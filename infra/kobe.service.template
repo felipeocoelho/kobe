@@ -1,0 +1,17 @@
+[Unit]
+Description=Kobe — Assistente Pessoal IA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{KOBE_HOME}}
+EnvironmentFile={{KOBE_HOME}}/.env
+ExecStart={{KOBE_HOME}}/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

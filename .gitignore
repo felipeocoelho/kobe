@@ -1,0 +1,37 @@
+# Variáveis de ambiente (NUNCA commitar)
+.env
+.env.local
+*.env.backup
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Workspace dinâmico (criado em runtime pelo Kobe)
+projetos/*
+!projetos/.gitkeep
+
+# Logs
+*.log
+.kobe-install.log
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build / dist
+dist/
+build/
