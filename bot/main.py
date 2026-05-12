@@ -109,7 +109,10 @@ def build_application(config: Config) -> Application:
     )
     app.bot_data["config"] = config
     app.bot_data["db"] = build_client(config)
-    app.bot_data["transcriber"] = Transcriber(api_key=config.groq_api_key)
+    app.bot_data["transcriber"] = Transcriber(
+        api_key=config.groq_api_key,
+        hints_path=config.kobe_home / "user-data" / "transcription-hints.md",
+    )
     app.bot_data["claude"] = ClaudeRunner(
         cwd=config.kobe_claude_cwd,
         timeout_seconds=config.claude_timeout_seconds,
