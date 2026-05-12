@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-KOBE_VERSION="0.6.2"
+KOBE_VERSION="0.6.3"
 REPO_URL="https://github.com/felipeocoelho/kobe.git"
 LOG_FILE="$HOME/.kobe-install.log"
 

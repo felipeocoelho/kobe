@@ -35,9 +35,13 @@ logger = logging.getLogger("kobe.transcribe")
 
 WHISPER_MODEL = "whisper-large-v3"
 
-# Whisper aceita prompt de até ~224 tokens (≈900 chars conservador).
-# Trunca pra não estourar e gerar erro de API.
-MAX_HINTS_CHARS = 900
+# Whisper (Groq) limita o prompt a 896 BYTES UTF-8. A mensagem de erro
+# da API diz "characters" mas na prática conta bytes — em pt-BR cada
+# acento custa 2 bytes, então 900 chars Unicode podem virar 925+ bytes.
+# Margem conservadora de 850 bytes garante folga pra textos com muitos
+# diacríticos. Truncamento opera em bytes; decode(errors="ignore")
+# descarta byte residual caso o corte caia no meio de um multibyte.
+MAX_HINTS_BYTES = 850
 
 
 class TranscriptionError(Exception):
@@ -65,8 +69,14 @@ class Transcriber:
             return None
         if not text:
             return None
-        if len(text) > MAX_HINTS_CHARS:
-            text = text[:MAX_HINTS_CHARS]
+        encoded = text.encode("utf-8")
+        if len(encoded) > MAX_HINTS_BYTES:
+            text = encoded[:MAX_HINTS_BYTES].decode("utf-8", errors="ignore")
+            logger.info(
+                "transcription hints truncados de %d → %d bytes (limite Groq)",
+                len(encoded),
+                len(text.encode("utf-8")),
+            )
         return text
 
     def transcribe(self, audio_bytes: bytes, filename: str) -> str:
