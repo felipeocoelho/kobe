@@ -33,11 +33,23 @@ kobe/
 │   ├── identity/USER.md       # Quem é o operador (a partir de USER.md.example)
 │   ├── identity/PREFERENCES.md# Preferências de comunicação
 │   └── knowledge/             # Conhecimento curado pelo operador
+├── plugins/                   # Plugins instalados (gitignored — cada plugin é repo próprio)
+│   ├── public/<plugin>/
+│   └── private/<plugin>/
 ├── projetos/                  # Workspace dinâmico (gitignored)
-├── infra/                     # schema.sql, systemd template
+├── infra/                     # schema.sql, systemd template, install-plugin.sh
 ├── CLAUDE.md                  # Cérebro mestre do agente
 └── SPEC.md                    # Especificação completa
 ```
+
+### Instalando plugins
+
+```bash
+bash infra/install-plugin.sh <git-url-do-plugin>
+systemctl --user restart kobe   # descoberta acontece no startup
+```
+
+Cada plugin é um repo Git separado com um `kobe-plugin.md` (manifest YAML) declarando `name`, `visibility` (public/private), `description`, `triggers` e opcionalmente um subagente em `claude/agents/<nome>.md`. O bot escaneia `plugins/` no startup, sincroniza os symlinks de subagentes em `.claude/agents/`, e injeta a lista de plugins no prompt — o agente decide quando usar.
 
 Tudo em `user-data/` é **do usuário** — fica fora do Git público. O instalador cria as cópias iniciais a partir dos `.example` distribuídos com o produto.
 

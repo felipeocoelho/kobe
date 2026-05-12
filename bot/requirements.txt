@@ -3,3 +3,4 @@ python-dotenv>=1.0
 supabase>=2.0
 groq>=0.4
 httpx>=0.27
+PyYAML>=6.0

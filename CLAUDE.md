@@ -114,6 +114,23 @@ Mesmo depois do onboarding, o operador pode (e deve) atualizar dados sobre ele m
 
 Princípio: edição manual dos arquivos é fallback; a forma natural de configurar o agente é conversando com ele.
 
+## Plugins
+
+Você tem acesso a plugins instalados em `plugins/public/<nome>/` e `plugins/private/<nome>/`. Cada plugin é um repo Git separado, com um manifest `kobe-plugin.md` (frontmatter YAML) que declara nome, visibilidade, descrição e triggers.
+
+A cada chamada, o bot injeta no prompt uma seção `[Plugins disponíveis]` com a lista atualizada — leia essa seção pra saber quais plugins estão instalados nesta instalação e o que cada um faz.
+
+**Quando usar plugin:**
+- Se o pedido do operador combina com um dos `triggers` do plugin → use o subagente correspondente via `Agent(subagent_type="<nome-do-plugin>", ...)`. O Claude Code resolve via `.claude/agents/<nome>.md` (symlink que o bot mantém pra cada plugin com `agent_definition`).
+- Se o plugin não tem subagente (só código/scripts), invoque diretamente via Bash com `cd plugins/{public,private}/<nome>/` antes.
+
+**Privacidade:**
+- Plugins **privados** (`plugins/private/`) só existem nesta instalação. Não revele detalhes deles em conversas / commits / responder publicamente sobre o que o agente "tem instalado".
+- Plugins **públicos** podem ser referenciados livremente.
+
+**Instalação:**
+- Operador instala plugins novos via `bash infra/install-plugin.sh <git-url>` e depois reinicia o bot (a descoberta acontece no startup). Você não precisa instalar plugins por conta própria — só usar os que já estiverem listados em `[Plugins disponíveis]`.
+
 ## Comportamento por tipo de solicitação
 
 ### Conversa livre

@@ -254,12 +254,14 @@ def build_prompt(
     thread_id: Optional[int],
     history: Iterable[dict],
     new_message: str,
+    plugins_section: str = "",
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
     Mantemos minimal: identidade e regras vivem no `CLAUDE.md` (que o
     Claude Code lê via auto-discovery no `cwd`). Aqui só damos o contexto
-    dinâmico — qual tópico, o histórico recente e a mensagem nova.
+    dinâmico — qual tópico, o histórico recente, plugins instalados (se
+    houver) e a mensagem nova.
     """
     topic_label = (
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
@@ -269,6 +271,10 @@ def build_prompt(
         f"[Telegram] tópico: {topic_label}",
         f"[Agora (America/Sao_Paulo)] {now_br.isoformat(timespec='minutes')}",
     ]
+
+    if plugins_section:
+        parts.append("")
+        parts.append(plugins_section)
 
     history_lines: list[str] = []
     for msg in history:
@@ -284,5 +290,5 @@ def build_prompt(
     parts.append("[Mensagem nova do operador]")
     parts.append(new_message)
     parts.append("")
-    parts.append("Responda agora, em português, no estilo do Kobe.")
+    parts.append("Responda agora, em português, no estilo do agente.")
     return "\n".join(parts)

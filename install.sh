@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-KOBE_VERSION="0.6.3"
+KOBE_VERSION="0.7.0"
 REPO_URL="https://github.com/felipeocoelho/kobe.git"
 LOG_FILE="$HOME/.kobe-install.log"
 
@@ -415,6 +415,17 @@ install_kobe() {
   log "Virtualenv pronto."
 
   init_user_data
+  init_plugin_dirs
+}
+
+# Cria as pastas-base de plugins. Os plugins propriamente ditos são
+# clonados depois via `infra/install-plugin.sh <git-url>`. Aqui só
+# garantimos a árvore esperada pelo bot.
+init_plugin_dirs() {
+  log "Preparando estrutura de plugins..."
+  mkdir -p "$KOBE_HOME/plugins/public" "$KOBE_HOME/plugins/private"
+  mkdir -p "$KOBE_HOME/.claude/agents"
+  log "  ↳ plugins/{public,private}/ prontos."
 }
 
 # Inicializa user-data/ a partir dos templates .example.

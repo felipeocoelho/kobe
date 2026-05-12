@@ -21,6 +21,10 @@ env/
 projetos/*
 !projetos/.gitkeep
 
+# Plugins — cada plugin é um repo separado (público em plugins/public/<nome>/,
+# privado em plugins/private/<nome>/). Kobe-base não trackeia o conteúdo.
+plugins/
+
 # user-data/ — dados do operador, NUNCA versionados no repo público.
 # Só os templates .example são trackados; as cópias preenchidas ficam
 # fora do Git pra não vazar identidade/conhecimento/preferências.

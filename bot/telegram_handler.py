@@ -27,6 +27,7 @@ from bot.claude_runner import (
     build_prompt,
 )
 from bot.config import Config
+from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
 from bot.topic_manager import (
     archive_active_session,
@@ -64,6 +65,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
+    plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
     if message is None or not _user_authorized(update, config.allowed_user_ids):
         return
@@ -87,6 +89,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         config=config,
         db=db,
         claude=claude,
+        plugins=plugins,
     )
 
 
@@ -96,6 +99,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Client = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     transcriber: Transcriber = context.application.bot_data["transcriber"]
+    plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
     if message is None or not _user_authorized(update, config.allowed_user_ids):
         return
@@ -147,6 +151,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         config=config,
         db=db,
         claude=claude,
+        plugins=plugins,
     )
 
 
@@ -158,6 +163,7 @@ async def _handle_user_text(
     config: Config,
     db: Client,
     claude: ClaudeRunner,
+    plugins: list[Plugin],
 ) -> None:
     """Caminho comum: persiste user msg, chama Claude, persiste e responde."""
     thread_id = message.message_thread_id
@@ -183,6 +189,7 @@ async def _handle_user_text(
         thread_id=thread_id,
         history=history,
         new_message=text,
+        plugins_section=render_plugins_section(plugins),
     )
 
     bot = message.get_bot()

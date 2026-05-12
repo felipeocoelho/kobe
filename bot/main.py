@@ -21,6 +21,7 @@ from telegram.ext import (
 from bot.claude_runner import ClaudeRunner
 from bot.config import Config, ConfigError, load_config
 from bot.db import build_client
+from bot.plugins import discover_plugins, render_plugins_section, sync_agent_symlinks
 from bot.snapshot import (
     cleanup_expired_snapshots,
     drop_snapshot,
@@ -45,16 +46,32 @@ logger = logging.getLogger("kobe.bot")
 
 
 async def _on_startup(app: Application) -> None:
-    """Pós-init, pré-polling: consome snapshots pendentes do restart anterior.
+    """Pós-init, pré-polling: descoberta de plugins + consumo de snapshots.
 
     Sequência:
-    1. Limpa snapshots expirados (TTL excedido).
-    2. Carrega os ainda válidos e manda uma mensagem proativa em cada
+    1. Descobre plugins instalados e sincroniza os symlinks de subagentes
+       — feito no startup pra refletir qualquer `install-plugin.sh` que
+       tenha rodado desde o último boot.
+    2. Limpa snapshots expirados (TTL excedido).
+    3. Carrega os ainda válidos e manda uma mensagem proativa em cada
        tópico, sinalizando o retorno e citando a última fala do operador
        como gancho.
-    3. Apaga cada snapshot após enviar — único uso, sem replay no
+    4. Apaga cada snapshot após enviar — único uso, sem replay no
        próximo boot.
     """
+    config: Config = app.bot_data["config"]
+    plugins = discover_plugins(config.kobe_home)
+    app.bot_data["plugins"] = plugins
+    if plugins:
+        linked = sync_agent_symlinks(config.kobe_home, plugins)
+        logger.info(
+            "startup: %d plugin(s) descoberto(s), %d symlink(s) de subagente",
+            len(plugins),
+            linked,
+        )
+    else:
+        logger.info("startup: nenhum plugin instalado")
+
     db = app.bot_data["db"]
     expired = cleanup_expired_snapshots(db)
     if expired:
