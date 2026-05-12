@@ -22,6 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -117,9 +120,14 @@ class ClaudeRunner:
 
         result_text: Optional[str] = None
         assistant_texts: list[str] = []
+        # Buffer dos eventos parseados — usado pra dump diagnóstico quando
+        # a resposta final vier vazia (acontece raro mas precisamos de
+        # evidência pra entender em qual cenário do Claude isso dispara).
+        raw_events: list[dict] = []
+        non_json_lines: int = 0
 
         async def _consume_stdout() -> None:
-            nonlocal result_text
+            nonlocal result_text, non_json_lines
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
@@ -131,8 +139,11 @@ class ClaudeRunner:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
+                    non_json_lines += 1
                     logger.debug("linha não-JSON ignorada: %s", line[:200])
                     continue
+
+                raw_events.append(event)
 
                 # Capta resultado final / fallbacks de texto.
                 etype = event.get("type")
@@ -185,8 +196,57 @@ class ClaudeRunner:
             return result_text
         # Fallback: alguns paths não emitem `result` (errado/raro), mas
         # vimos blocos `text` em eventos `assistant`. Junta tudo.
-        joined = "\n".join(t.strip() for t in assistant_texts if t.strip())
-        return joined.strip()
+        joined = "\n".join(t.strip() for t in assistant_texts if t.strip()).strip()
+        if joined:
+            return joined
+
+        # Resposta totalmente vazia. Não levantamos exceção (o caller
+        # devolve uma mensagem amigável no Telegram), mas dumpamos o
+        # stream completo + stderr pra `/tmp/` e logamos uma assinatura
+        # do que apareceu — assim qualquer reincidência tem evidência
+        # imediata pra root cause.
+        dump_path = _dump_empty_stream(raw_events, stderr_bytes, non_json_lines)
+        types_seen = Counter(e.get("type", "?") for e in raw_events)
+        logger.warning(
+            "claude_empty events=%d types=%s non_json_lines=%d "
+            "stderr_bytes=%d dump=%s",
+            len(raw_events),
+            dict(types_seen),
+            non_json_lines,
+            len(stderr_bytes),
+            dump_path,
+        )
+        return ""
+
+
+def _dump_empty_stream(
+    events: list[dict], stderr_bytes: bytes, non_json_lines: int
+) -> str:
+    """Persiste o stream cru num arquivo de diagnóstico em `/tmp/`.
+
+    Salvamos como JSONL pra inspeção rápida com `jq` / leitura linear,
+    e anexamos o stderr e contadores no fim como comentário. Retorna o
+    path absoluto pro caller logar.
+    """
+    fd, path = tempfile.mkstemp(
+        prefix="kobe-claude-empty-", suffix=".jsonl", dir="/tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for event in events:
+                fh.write(json.dumps(event, ensure_ascii=False, default=str))
+                fh.write("\n")
+            fh.write(f"# events_count={len(events)}\n")
+            fh.write(f"# non_json_lines={non_json_lines}\n")
+            if stderr_bytes:
+                fh.write("# --- stderr ---\n")
+                for ln in stderr_bytes.decode("utf-8", errors="replace").splitlines():
+                    fh.write(f"# {ln}\n")
+            else:
+                fh.write("# stderr=(vazio)\n")
+    except OSError:
+        logger.exception("falha gravando dump de stream vazio em %s", path)
+    return path
 
 
 def build_prompt(

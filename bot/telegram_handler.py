@@ -252,7 +252,14 @@ async def _handle_user_text(
         await reporter.finish(delete=True)
 
     if not reply_text:
-        reply_text = "(resposta vazia do Claude — tenta de novo?)"
+        # Claude saiu com sucesso mas sem texto. O runner já dumpou o
+        # stream cru pra /tmp/kobe-claude-empty-*.jsonl e logou os
+        # tipos de evento vistos — basta um grep pra investigar.
+        reply_text = (
+            "Resposta vazia do Claude — o stream foi salvo pra diagnóstico. "
+            "Procura no log: `journalctl --user -u kobe | grep claude_empty | tail -1` "
+            "pra ver onde o dump caiu. Tenta reformular a mensagem?"
+        )
 
     sent_message_id = await _send_long_text(message, reply_text)
 
