@@ -161,7 +161,7 @@ async def _handle_user_text(
 ) -> None:
     """Caminho comum: persiste user msg, chama Claude, persiste e responde."""
     thread_id = message.message_thread_id
-    topic_id = ensure_topic(db, thread_id)
+    topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session_id = ensure_active_session(db, topic_id)
 
     # Snapshot do histórico ANTES de inserir a nova mensagem — assim ela
@@ -345,7 +345,7 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     thread_id = message.message_thread_id
-    topic_id = ensure_topic(db, thread_id)
+    topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     archived = archive_active_session(db, topic_id)
     if archived is None:
         reply = "Nada pra arquivar aqui — já está zerado. Manda a próxima."
@@ -369,7 +369,7 @@ async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     thread_id = message.message_thread_id
-    topic_id = ensure_topic(db, thread_id)
+    topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session = get_active_session(db, topic_id)
     if session is None:
         await message.reply_text(
@@ -419,7 +419,7 @@ async def on_command_salvar(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     thread_id = message.message_thread_id
-    topic_id = ensure_topic(db, thread_id)
+    topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session = get_active_session(db, topic_id)
     if session is None:
         await message.reply_text(

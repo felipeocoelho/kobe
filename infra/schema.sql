@@ -36,12 +36,16 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS topics (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   telegram_thread_id BIGINT UNIQUE,
+  telegram_chat_id BIGINT,                     -- id do chat (supergrupo) — usado pra mensagens proativas
   current_name TEXT,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'deleted', 'archived')),
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Upgrades de instalações pré-v0.4: adiciona a coluna se ainda não existe.
+ALTER TABLE topics ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;
 
 CREATE INDEX IF NOT EXISTS idx_topics_telegram_thread ON topics(telegram_thread_id);
 CREATE INDEX IF NOT EXISTS idx_topics_status ON topics(status);

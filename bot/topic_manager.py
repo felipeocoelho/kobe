@@ -34,15 +34,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def ensure_topic(db: Client, thread_id: Optional[int]) -> str:
-    """Get-or-create do topic. Retorna o `topics.id` (UUID em str)."""
+def ensure_topic(
+    db: Client,
+    thread_id: Optional[int],
+    *,
+    chat_id: Optional[int] = None,
+) -> str:
+    """Get-or-create do topic. Retorna o `topics.id` (UUID em str).
+
+    `chat_id` (id do supergrupo do Telegram) é atualizado sempre que
+    fornecido — viabiliza mensagens proativas (snapshot-de-continuação)
+    no tópico correto após restart.
+    """
     key = _normalize_thread_id(thread_id)
+    payload: dict = {"telegram_thread_id": key, "last_activity_at": _now_iso()}
+    if chat_id is not None:
+        payload["telegram_chat_id"] = chat_id
     res = (
         db.table("topics")
-        .upsert(
-            {"telegram_thread_id": key, "last_activity_at": _now_iso()},
-            on_conflict="telegram_thread_id",
-        )
+        .upsert(payload, on_conflict="telegram_thread_id")
         .execute()
     )
     if not res.data:
