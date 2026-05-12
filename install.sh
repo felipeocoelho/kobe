@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-KOBE_VERSION="0.4.0"
+KOBE_VERSION="0.5.0"
 REPO_URL="https://github.com/felipeocoelho/kobe.git"
 LOG_FILE="$HOME/.kobe-install.log"
 
@@ -413,6 +413,36 @@ install_kobe() {
   "$KOBE_HOME/.venv/bin/pip" install --upgrade pip
   "$KOBE_HOME/.venv/bin/pip" install -r "$KOBE_HOME/bot/requirements.txt"
   log "Virtualenv pronto."
+
+  init_user_data
+}
+
+# Inicializa user-data/ a partir dos templates .example.
+# Idempotente: só copia se o destino real ainda não existe (não sobrescreve
+# personalizações do operador num upgrade).
+init_user_data() {
+  log "Inicializando user-data/ a partir dos templates..."
+  mkdir -p "$KOBE_HOME/user-data/identity" \
+           "$KOBE_HOME/user-data/persona" \
+           "$KOBE_HOME/user-data/knowledge"
+
+  local pairs=(
+    "user-data/persona/SOUL.md.example:user-data/persona/SOUL.md"
+    "user-data/identity/USER.md.example:user-data/identity/USER.md"
+    "user-data/identity/PREFERENCES.md.example:user-data/identity/PREFERENCES.md"
+  )
+  for pair in "${pairs[@]}"; do
+    local src="${pair%%:*}"
+    local dst="${pair##*:}"
+    if [[ -f "$KOBE_HOME/$dst" ]]; then
+      log "  ↳ $dst já existe — mantendo personalização do operador."
+    elif [[ -f "$KOBE_HOME/$src" ]]; then
+      cp "$KOBE_HOME/$src" "$KOBE_HOME/$dst"
+      log "  ↳ $dst criado a partir de $src"
+    else
+      log "  ↳ aviso: $src não encontrado no clone."
+    fi
+  done
 }
 
 # ----------------------------------------------------------------------------
@@ -553,7 +583,8 @@ PRÓXIMOS PASSOS:
   1. Adicione seu bot ao supergrupo Telegram com permissão de admin
   2. Habilite "Topics" nas configurações do supergrupo
   3. Mande uma mensagem num tópico pra testar
-  4. Edite $KOBE_HOME/memoria/identidade/USER.md com seu contexto
+  4. Edite $KOBE_HOME/user-data/identity/USER.md com seu contexto
+     (e $KOBE_HOME/user-data/persona/SOUL.md se quiser ajustar a personalidade)
 
 Log da instalação: $LOG_FILE
 

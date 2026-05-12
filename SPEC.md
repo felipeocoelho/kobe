@@ -58,13 +58,13 @@ kobe/
 │
 ├── CLAUDE.md                          # CÉREBRO MESTRE (princípios do agente)
 │
-├── memoria/                           # DNA do agente (vai pro Git)
-│   ├── identidade/
-│   │   ├── SOUL.md                    # Personalidade do agente Kobe
-│   │   ├── USER.md                    # Quem é o operador (template, editável)
-│   │   └── PREFERENCES.md             # Tom, formato, idioma, etc.
-│   │
-│   └── conhecimento/                  # (vazio inicialmente; operador popula)
+├── user-data/                         # DADOS DO OPERADOR — gitignored (só .example trackado)
+│   ├── persona/
+│   │   └── SOUL.md.example            # Template da personalidade do agente
+│   ├── identity/
+│   │   ├── USER.md.example            # Template: quem é o operador
+│   │   └── PREFERENCES.md.example     # Template: tom, formato, idioma, etc.
+│   └── knowledge/                     # Conhecimento curado pelo operador (livre)
 │       └── .gitkeep
 │
 ├── projetos/                          # Workspace dinâmico (gitignored, criado em runtime)
@@ -75,6 +75,8 @@ kobe/
     ├── kobe.service.template          # systemd unit template
     └── README.md                      # Docs da camada de infra
 ```
+
+> **Reorg desde v0.5:** a pasta `memoria/` foi extinta. SOUL/USER/PREFERENCES eram tracked no Git, o que era risco de vazar dados pessoais; agora ficam em `user-data/` (gitignored, exceto `.example`). O instalador copia `.example` → arquivo real.
 
 ---
 

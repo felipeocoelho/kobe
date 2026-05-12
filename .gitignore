@@ -21,6 +21,18 @@ env/
 projetos/*
 !projetos/.gitkeep
 
+# user-data/ — dados do operador, NUNCA versionados no repo público.
+# Só os templates .example são trackados; as cópias preenchidas ficam
+# fora do Git pra não vazar identidade/conhecimento/preferências.
+user-data/identity/*
+!user-data/identity/*.example
+user-data/persona/*
+!user-data/persona/*.example
+user-data/knowledge/*
+!user-data/knowledge/.gitkeep
+user-data/topics/
+user-data/transcription-hints.md
+
 # Logs
 *.log
 .kobe-install.log

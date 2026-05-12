@@ -27,14 +27,19 @@ Em construção. Veja [SPEC.md](./SPEC.md) pro escopo completo e ordem de implem
 
 ```
 kobe/
-├── bot/                   # Camada de transporte (Python)
-├── memoria/identidade/    # DNA do agente (SOUL, USER, PREFERENCES)
-├── memoria/conhecimento/  # Conhecimento curado (operador popula)
-├── projetos/              # Workspace dinâmico (gitignored)
-├── infra/                 # schema.sql, systemd template
-├── CLAUDE.md              # Cérebro mestre do agente
-└── SPEC.md                # Especificação completa
+├── bot/                       # Camada de transporte (Python)
+├── user-data/                 # Dados do operador (gitignored, exceto .example)
+│   ├── persona/SOUL.md        # Personalidade do agente (a partir de SOUL.md.example)
+│   ├── identity/USER.md       # Quem é o operador (a partir de USER.md.example)
+│   ├── identity/PREFERENCES.md# Preferências de comunicação
+│   └── knowledge/             # Conhecimento curado pelo operador
+├── projetos/                  # Workspace dinâmico (gitignored)
+├── infra/                     # schema.sql, systemd template
+├── CLAUDE.md                  # Cérebro mestre do agente
+└── SPEC.md                    # Especificação completa
 ```
+
+Tudo em `user-data/` é **do usuário** — fica fora do Git público. O instalador cria as cópias iniciais a partir dos `.example` distribuídos com o produto.
 
 ## Instalação
 
@@ -140,6 +145,23 @@ Confere `GROQ_API_KEY` no `.env`. Groq valida extensão case-sensitive — o bot
 ### Datas do tipo "amanhã" sendo interpretadas como passado
 
 Já corrigido na v0.2 — o prompt agora injeta `America/Sao_Paulo` explícito. Se persistir, confirma que você está em v0.2+ (`git -C ~/kobe log --oneline -1`).
+
+### Personalizar a alma do agente / dados pessoais
+
+A partir da v0.5 todos os arquivos de identidade ficam em `user-data/` e são gitignored (não vão pro repo público). Edite à vontade:
+
+```bash
+# personalidade do agente
+$EDITOR ~/kobe/user-data/persona/SOUL.md
+
+# quem é você
+$EDITOR ~/kobe/user-data/identity/USER.md
+
+# preferências de comunicação
+$EDITOR ~/kobe/user-data/identity/PREFERENCES.md
+```
+
+Após editar, `systemctl --user restart kobe` (o `.env` e o filesystem só são relidos no restart pra alguns paths).
 
 ## Licença
 
