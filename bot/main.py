@@ -100,9 +100,18 @@ async def _on_shutdown(app: Application) -> None:
 
 
 def build_application(config: Config) -> Application:
+    # Timeouts do PTB são 5s por padrão — curto demais pra get_file/download
+    # de áudio: voice messages mais longas (3+ min) chegaram a estourar só
+    # no metadata fetch. Subimos pra valores generosos, ainda dentro da boa
+    # prática do PTB pra long-polling clients.
     app = (
         ApplicationBuilder()
         .token(config.telegram_bot_token)
+        .connect_timeout(15)
+        .read_timeout(30)
+        .write_timeout(60)
+        .pool_timeout(5)
+        .media_write_timeout(120)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
         .build()
