@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-KOBE_VERSION="0.1.0"
+KOBE_VERSION="0.3.0"
 REPO_URL="https://github.com/felipeocoelho/kobe.git"
 LOG_FILE="$HOME/.kobe-install.log"
 
@@ -418,8 +418,52 @@ install_kobe() {
 # ----------------------------------------------------------------------------
 # [8/9] Banco
 # ----------------------------------------------------------------------------
+
+# Checa via REST se o schema já foi aplicado neste projeto Supabase.
+# Critério: tabela `topics` acessível via /rest/v1/topics?limit=0.
+# Como o schema.sql cria tudo num único arquivo idempotente, a presença
+# de uma tabela indica que o conjunto foi aplicado.
+#
+# Códigos esperados:
+#   200 → tabela existe (schema aplicado)
+#   404 / "PGRST205" → tabela não existe (schema pendente)
+#   401 / 403 → chave inválida (não decide — segue pro fluxo manual)
+#   outros / falha de rede → não decide (segue pro fluxo manual)
+schema_already_applied() {
+  local supa_url supa_key http_code
+  supa_url=$(grep -E "^SUPABASE_URL=" "$KOBE_HOME/.env" | cut -d= -f2- | tr -d '\r')
+  supa_key=$(grep -E "^SUPABASE_KEY=" "$KOBE_HOME/.env" | cut -d= -f2- | tr -d '\r')
+  [[ -n "$supa_url" && -n "$supa_key" ]] || return 1
+
+  http_code=$(curl --max-time 8 -s -o /dev/null -w '%{http_code}' \
+    -H "apikey: $supa_key" \
+    -H "Authorization: Bearer $supa_key" \
+    "${supa_url%/}/rest/v1/topics?limit=0" 2>/dev/null) || return 1
+
+  [[ "$http_code" == "200" ]]
+}
+
 setup_database() {
   log "[8/9] Configurando banco..."
+
+  if schema_already_applied; then
+    log "Schema já está aplicado — pulando [8/9]."
+    cat <<EOF
+
+==================================================================
+  Schema do banco Supabase — já aplicado ✓
+==================================================================
+
+Detectei via REST que as tabelas já existem neste projeto Supabase.
+Pulando o passo de aplicar o schema.
+
+Se você fizer upgrade futuro com mudanças destrutivas, as notas de
+release vão sinalizar e você reaplica manualmente.
+
+EOF
+    return
+  fi
+
   cat <<EOF
 
 ==================================================================

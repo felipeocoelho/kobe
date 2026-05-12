@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from supabase import Client
@@ -17,7 +18,14 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from bot.artifacts import save_artifact_from_messages, search_artifacts
-from bot.claude_runner import ClaudeError, ClaudeRunner, build_prompt
+from bot.claude_runner import (
+    ClaudeError,
+    ClaudeExitError,
+    ClaudeNotFoundError,
+    ClaudeRunner,
+    ClaudeTimeoutError,
+    build_prompt,
+)
 from bot.config import Config
 from bot.progress import ProgressReporter
 from bot.topic_manager import (
@@ -186,15 +194,56 @@ async def _handle_user_text(
         reply_to_message_id=message.message_id,
     )
     await reporter.start()
+    claude_started_at = time.monotonic()
+    claude_status = "ok"
     try:
         try:
             reply_text = await claude.run(prompt, on_event=reporter.on_event)
+        except ClaudeTimeoutError as exc:
+            claude_status = "timeout"
+            logger.warning("claude timeout: %s", exc)
+            reply_text = (
+                "Estourei o tempo limite processando isso. A tarefa era pesada — "
+                "tenta quebrar em pedaços menores, ou aumenta CLAUDE_TIMEOUT_SECONDS "
+                "no .env e me reinicia."
+            )
+        except ClaudeNotFoundError as exc:
+            # Indica problema de instalação/PATH — não adianta o operador
+            # retentar; precisa de intervenção no host.
+            claude_status = "not_found"
+            logger.error("claude CLI ausente: %s", exc)
+            reply_text = (
+                "O CLI do Claude não está disponível pro serviço — provavelmente "
+                "PATH do systemd ou instalação. Dá uma olhada no log."
+            )
+        except ClaudeExitError as exc:
+            # stderr já foi logado dentro do runner com detalhe completo.
+            claude_status = f"exit_{exc.returncode}"
+            logger.warning("claude exit=%s", exc.returncode)
+            reply_text = (
+                "O Claude saiu com erro processando isso. Stderr completo no log "
+                "(journalctl --user -u kobe). Tenta de novo?"
+            )
         except ClaudeError as exc:
+            # Catch-all pra qualquer subclasse futura ou caso raro.
+            claude_status = "error"
             logger.warning("claude falhou: %s", exc)
             reply_text = (
                 "Tive um problema te respondendo agora. Tenta de novo em uns segundos?"
             )
     finally:
+        elapsed = time.monotonic() - claude_started_at
+        # Métrica única por chamada — chave-valor pra grep fácil no journal.
+        logger.info(
+            "claude_run status=%s elapsed=%.1fs prompt_len=%d "
+            "history_msgs=%d tool_calls=%d reply_len=%d",
+            claude_status,
+            elapsed,
+            len(prompt),
+            len(history),
+            reporter.tool_call_count,
+            len(reply_text or ""),
+        )
         typing_task.cancel()
         try:
             await typing_task

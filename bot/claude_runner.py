@@ -43,6 +43,23 @@ class ClaudeError(Exception):
     """Falha ao invocar ou obter resposta do Claude Code."""
 
 
+class ClaudeTimeoutError(ClaudeError):
+    """Claude não respondeu dentro de `timeout_seconds`."""
+
+
+class ClaudeNotFoundError(ClaudeError):
+    """O binário do Claude Code não está no PATH do serviço."""
+
+
+class ClaudeExitError(ClaudeError):
+    """Claude terminou com exit code != 0 (problema no próprio CLI)."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(stderr or f"claude exit code {returncode}")
+
+
 # Callback recebe um dict com o evento parseado do stream-json. Pode ser
 # síncrono ou assíncrono — o runner aguarda se for awaitable.
 EventCallback = Callable[[dict], "Awaitable[None] | None"]
@@ -88,7 +105,7 @@ class ClaudeRunner:
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as exc:
-            raise ClaudeError(
+            raise ClaudeNotFoundError(
                 f"CLI {self.binary!r} não encontrado no PATH."
             ) from exc
 
@@ -149,18 +166,20 @@ class ClaudeRunner:
         except asyncio.TimeoutError as exc:
             proc.kill()
             await proc.wait()
-            raise ClaudeError(
+            raise ClaudeTimeoutError(
                 f"Claude não respondeu em {self.timeout_seconds}s."
             ) from exc
 
         if proc.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            # Loga o stderr inteiro (sem truncar) — em diagnóstico de
+            # erro do CLI a parte útil costuma vir no fim do output.
             logger.warning(
                 "claude exit=%s stderr=%s",
                 proc.returncode,
-                stderr[:500],
+                stderr or "(vazio)",
             )
-            raise ClaudeError(stderr or f"claude exit code {proc.returncode}")
+            raise ClaudeExitError(proc.returncode, stderr)
 
         if result_text:
             return result_text

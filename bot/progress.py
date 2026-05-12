@@ -152,6 +152,10 @@ class ProgressReporter:
         self._lock = asyncio.Lock()
         self._delay_task: Optional[asyncio.Task] = None
         self._closed = False
+        # Contador de tool_use vistos no stream — usado pelo handler pra
+        # logar "quanto trabalho o Claude fez nessa mensagem". Inclui
+        # ações de subagentes, pra refletir o esforço real.
+        self.tool_call_count: int = 0
 
     async def start(self) -> None:
         """Inicia o timer pra status default ("trabalhando…")."""
@@ -173,12 +177,8 @@ class ProgressReporter:
         etype = event.get("type")
         if etype != "assistant":
             return
-        # Subagentes: parent_tool_use_id != null → ações internas. Já
-        # cobrimos com "delegando subtarefa" quando o pai foi mostrado;
-        # não vamos detalhar o que acontece dentro.
-        if event.get("parent_tool_use_id"):
-            return
         msg = event.get("message") or {}
+        is_subagent = bool(event.get("parent_tool_use_id"))
         for block in msg.get("content") or []:
             if not isinstance(block, dict):
                 continue
@@ -186,6 +186,13 @@ class ProgressReporter:
                 continue
             name = block.get("name") or ""
             if not name:
+                continue
+            # Conta TODA tool_use (inclusive de subagente) — reflete o
+            # esforço real da resposta. O filtro de UI vem depois.
+            self.tool_call_count += 1
+            # Subagentes: ações internas já cobertas por "delegando
+            # subtarefa" no evento pai; não detalhamos aqui.
+            if is_subagent:
                 continue
             # TodoWrite e ScheduleWakeup são internos — não fazem sentido
             # pro operador. Idem nossos próprios reminders.

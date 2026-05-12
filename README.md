@@ -74,6 +74,73 @@ cp .env.example .env  # preencha as variáveis
 ./dev-run.sh          # roda em foreground, logs no terminal
 ```
 
+## Operação
+
+Comandos do dia-a-dia depois de instalado:
+
+```bash
+# Status / logs
+systemctl --user status kobe
+journalctl --user -u kobe -f                    # follow live
+journalctl --user -u kobe --since "1 hour ago"  # janela específica
+
+# Reiniciar (necessário ao mudar o .env)
+systemctl --user restart kobe
+
+# Parar / iniciar
+systemctl --user stop kobe
+systemctl --user start kobe
+```
+
+Cada chamada do Claude emite uma linha de métricas no journal:
+
+```
+INFO kobe.handler: claude_run status=ok elapsed=12.4s prompt_len=3128
+                   history_msgs=18 tool_calls=4 reply_len=812
+```
+
+`status` é `ok`, `timeout`, `not_found`, `exit_<N>` ou `error`. Útil pra grep rápido (`journalctl --user -u kobe | grep claude_run`).
+
+### Comandos no chat
+
+- `/nova` — arquiva a sessão ativa do tópico e abre uma nova (memória recente zera).
+- `/contexto` — mostra um resumo da memória ativa.
+- `/salvar <título>` — consolida a sessão num artefato pesquisável.
+- `/retomar <termo>` — busca em artefatos salvos.
+
+## Troubleshooting
+
+### Bot responde "Tive um problema te respondendo agora" ou "Estourei o tempo limite"
+
+Timeout do Claude CLI. Padrão é 300s. Em tarefas pesadas (Claude lendo arquivos, rodando comandos) pode estourar. Solução:
+
+```bash
+# No ~/kobe/.env
+CLAUDE_TIMEOUT_SECONDS=900    # 15 min
+```
+
+Depois `systemctl --user restart kobe`. **O serviço NÃO recarrega o `.env` sozinho** — sem o restart o valor antigo continua em memória.
+
+### "O CLI do Claude não está disponível pro serviço"
+
+`systemd --user` sobe com PATH mínimo que pode não incluir `~/.local/bin` (onde o Claude Code é instalado). O template `infra/kobe.service.template` já força um PATH explícito; se você customizou a unit, garanta:
+
+```ini
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+### Bot recebe mensagem mas não responde nada (nem erro)
+
+Quase sempre é autorização. Confere `TELEGRAM_ALLOWED_USER_IDS` no `.env` — usuários não-listados são ignorados silenciosamente (por segurança). Pega seu user ID com [@userinfobot](https://t.me/userinfobot).
+
+### Áudio não transcreve
+
+Confere `GROQ_API_KEY` no `.env`. Groq valida extensão case-sensitive — o bot já força lowercase, mas se você mexeu no `transcribe.py`, mantém o cuidado. Voice notes do Telegram viram `.ogg`, áudios anexados mantêm a extensão original.
+
+### Datas do tipo "amanhã" sendo interpretadas como passado
+
+Já corrigido na v0.2 — o prompt agora injeta `America/Sao_Paulo` explícito. Se persistir, confirma que você está em v0.2+ (`git -C ~/kobe log --oneline -1`).
+
 ## Licença
 
 [MIT](./LICENSE)
