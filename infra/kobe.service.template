@@ -6,6 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory={{KOBE_HOME}}
+# PATH explícito: systemd --user arranca com PATH mínimo que NÃO inclui
+# ~/.local/bin (onde o instalador oficial do Claude Code põe o binário).
+# %h é o $HOME do usuário do serviço, expandido pelo próprio systemd.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile={{KOBE_HOME}}/.env
 ExecStart={{KOBE_HOME}}/.venv/bin/python -m bot.main
 Restart=on-failure

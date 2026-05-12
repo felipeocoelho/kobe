@@ -42,7 +42,7 @@ Antes de rodar o instalador, tenha em mãos:
 
 1. **Bot Telegram** criado via [@BotFather](https://t.me/BotFather) — token salvo
 2. **Supergrupo Telegram** com tópicos habilitados (você como admin)
-3. **Conta Supabase** com projeto criado, URL + anon key copiados e extensão `vector` habilitada (Database → Extensions)
+3. **Conta Supabase** com projeto criado, Project URL + **Secret Key** (Project Settings → API Keys → "Secret keys" / service_role — não use a publishable/anon) e extensão `vector` habilitada (Database → Extensions)
 4. **Conta Groq** com API key ([console.groq.com](https://console.groq.com))
 5. **Claude Code** instalado e autenticado ([docs](https://docs.claude.com/en/docs/claude-code/setup))
 
@@ -59,8 +59,10 @@ O instalador é guiado, idempotente, em texto puro, e instala como `systemd --us
 ### Desinstalar
 
 ```bash
-bash ~/projetos/kobe/uninstall.sh
+bash ~/kobe/uninstall.sh
 ```
+
+(Ajuste o path se você customizou onde o Kobe foi instalado.)
 
 Remove só o que o instalador criou (diretório + unit do systemd). Não toca em Claude Code, Supabase, Telegram nem nas dependências do sistema. Oferece backup do `.env` antes de apagar.
 

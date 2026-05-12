@@ -18,6 +18,7 @@ touch "$LOG_FILE"
 # Variáveis preenchidas durante o fluxo
 KOBE_HOME=""
 TMP_ENV=""
+REEXEC_TARGET_USER=""  # setado se chamamos via --target-user=X (após re-exec)
 
 # ----------------------------------------------------------------------------
 # Utilitários
@@ -50,6 +51,120 @@ cleanup() {
 }
 trap cleanup EXIT
 
+parse_flags() {
+  for arg in "$@"; do
+    case "$arg" in
+      --target-user=*) REEXEC_TARGET_USER="${arg#--target-user=}" ;;
+    esac
+  done
+}
+
+create_target_user() {
+  local newuser="$1"
+  [[ -n "$newuser" ]] || err "Nome de usuário vazio."
+  [[ "$newuser" =~ ^[a-z_][a-z0-9_-]*$ ]] || err "Nome inválido: '$newuser' (use a-z, 0-9, _ e -)."
+  if id "$newuser" >/dev/null 2>&1; then
+    err "Usuário '$newuser' já existe."
+  fi
+  log "Criando usuário '$newuser'..."
+  if [[ $EUID -eq 0 ]]; then
+    useradd -m -s /bin/bash "$newuser" || err "Falhou ao criar usuário."
+    echo "Defina uma senha pra $newuser:"
+    passwd "$newuser"
+  else
+    sudo useradd -m -s /bin/bash "$newuser" || err "Falhou ao criar usuário (precisa sudo)."
+    echo "Defina uma senha pra $newuser:"
+    sudo passwd "$newuser"
+  fi
+  log "Usuário '$newuser' criado."
+}
+
+choose_target_user() {
+  # Selecionar/criar o usuário que vai rodar o Kobe e, se for diferente
+  # do executor atual, re-executar este script como ele.
+  log "Configurando usuário do Kobe..."
+
+  local target_user
+
+  if [[ $EUID -eq 0 ]]; then
+    cat <<'EOF'
+
+==================================================================
+  ATENÇÃO — Você está rodando como ROOT
+==================================================================
+
+Não recomendamos rodar o Kobe como root: prompt injection, MCP
+comprometido ou comando equivocado têm impacto muito maior.
+
+Vamos rodar o Kobe sob um usuário comum.
+
+EOF
+    local choice
+    read -r -p "Usar usuário (E)xistente ou (C)riar um novo? [E/C]: " choice
+    case "${choice,,}" in
+      c|criar|novo)
+        read -r -p "Nome do novo usuário: " target_user
+        create_target_user "$target_user"
+        ;;
+      *)
+        read -r -p "Nome do usuário existente: " target_user
+        [[ -n "$target_user" ]] || err "Nome vazio."
+        id "$target_user" >/dev/null 2>&1 || err "Usuário '$target_user' não existe."
+        ;;
+    esac
+  else
+    read -r -p "Qual usuário vai rodar o Kobe? [$USER]: " target_user
+    target_user=${target_user:-$USER}
+    if [[ "$target_user" != "$USER" ]]; then
+      if ! id "$target_user" >/dev/null 2>&1; then
+        if confirm "Usuário '$target_user' não existe. Criar agora? (precisa sudo)" "Y"; then
+          create_target_user "$target_user"
+        else
+          err "Cancelado."
+        fi
+      fi
+    fi
+  fi
+
+  log "Usuário-alvo: $target_user"
+
+  if [[ "$target_user" == "$USER" ]]; then
+    return
+  fi
+
+  # Linger precisa do executor (sudo/root) — o usuário-alvo pode não estar
+  # em sudoers (ex.: criado agora). Habilita aqui antes do re-exec.
+  if ! loginctl show-user "$target_user" --property=Linger 2>/dev/null | grep -q "Linger=yes"; then
+    if [[ $EUID -eq 0 ]]; then
+      loginctl enable-linger "$target_user" || log "Aviso: enable-linger falhou."
+    else
+      sudo loginctl enable-linger "$target_user" || log "Aviso: enable-linger falhou."
+    fi
+  fi
+
+  # Copia o script pra /tmp pra garantir que o usuário-alvo tem leitura
+  # (cobre o caso de instalador baixado em /root ou home restrito).
+  local script_path tmp_script
+  script_path="$(realpath "$0")"
+  tmp_script="$(mktemp /tmp/kobe-install-XXXXXX.sh)"
+  cp "$script_path" "$tmp_script"
+  chmod a+rx "$tmp_script"
+
+  log "Re-executando o instalador como '$target_user'..."
+  echo ""
+  echo "================================================================"
+  echo "  Trocando contexto pra usuário '$target_user' e continuando."
+  echo "  (A partir daqui, todas as operações rodam como $target_user.)"
+  echo "================================================================"
+  echo ""
+
+  if [[ $EUID -eq 0 ]]; then
+    exec runuser -l "$target_user" -- bash "$tmp_script" "--target-user=$target_user"
+  else
+    exec sudo -H -u "$target_user" bash "$tmp_script" "--target-user=$target_user"
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # [1/9] Boas-vindas
 # ----------------------------------------------------------------------------
@@ -65,15 +180,19 @@ ANTES DE CONTINUAR, você vai precisar de:
   1. Bot Telegram criado via @BotFather (token em mãos)
   2. Supergrupo Telegram com tópicos habilitados (você como admin)
   3. Conta Supabase com projeto criado:
-       - URL e anon key copiados
+       - Project URL e Secret Key copiados
+         (Project Settings → API Keys → "Secret keys" → "service_role".
+          NÃO use a publishable/anon key — o Kobe precisa de acesso server-side.)
        - Extensão "vector" habilitada (Database → Extensions)
   4. Conta Groq com API key (https://console.groq.com)
   5. Claude Code instalado e autenticado
      (https://docs.claude.com/en/docs/claude-code/setup)
 
 A instalação dura de 5 a 10 minutos. Você será guiado passo a passo.
-O Kobe será instalado como projeto do seu usuário ($USER), em
-$HOME/projetos/kobe (você pode customizar).
+Você vai escolher qual usuário do sistema vai rodar o Kobe (default:
+o usuário atual, $USER — mas você pode criar um dedicado, especialmente
+se estiver instalando como root). O Kobe será instalado em \$HOME/kobe
+do usuário escolhido (você pode customizar o path).
 
 Log da instalação: $LOG_FILE
 
@@ -155,29 +274,20 @@ EOF
 choose_install_path() {
   log "[5/9] Configurando local de instalação..."
 
-  if [[ $EUID -eq 0 ]]; then
-    cat <<EOF
-
-==================================================================
-  ATENÇÃO — Você está rodando como ROOT
-==================================================================
-
-Recomendamos FORTEMENTE rodar este instalador como usuário comum
-(não-root) e instalar o Kobe no home desse usuário.
-
-Rodar o Kobe como root expõe seu sistema a riscos caso ocorra prompt
-injection, comando equivocado ou MCP comprometido.
-
-EOF
-    if ! confirm "Tem CERTEZA que quer continuar como root?" "N"; then
-      err "Saia da sessão root, logue como seu usuário comum, e rode novamente."
-    fi
-  fi
-
-  local default_path="$HOME/projetos/kobe"
+  local default_path="$HOME/kobe"
   local input
   read -r -p "Onde instalar o Kobe? [$default_path]: " input
   KOBE_HOME=${input:-$default_path}
+
+  # `read` não expande ~; expandimos manualmente pra evitar criar pasta
+  # literal "~" no diretório corrente (e systemd recusa ~ em paths).
+  case "$KOBE_HOME" in
+    "~")     KOBE_HOME="$HOME" ;;
+    "~/"*)   KOBE_HOME="$HOME/${KOBE_HOME#\~/}" ;;
+    "~"*)    err "Path com ~user (ex: ~outro) não é suportado. Use caminho absoluto." ;;
+  esac
+
+  [[ "$KOBE_HOME" = /* ]] || err "Path precisa ser absoluto (começar com /). Recebido: $KOBE_HOME"
 
   if [[ -d "$KOBE_HOME" ]]; then
     if [[ -d "$KOBE_HOME/.git" ]]; then
@@ -224,7 +334,9 @@ EOF
   read -r -p "Supabase URL: " supa_url
   [[ -n "$supa_url" ]] || err "URL do Supabase vazia."
 
-  read -r -p "Supabase Anon Key: " supa_key
+  echo "Supabase Secret Key (Project Settings → API Keys → Secret/service_role)."
+  echo "NÃO é a publishable/anon — o bot precisa de acesso server-side."
+  read -r -p "Supabase Secret Key: " supa_key
   [[ -n "$supa_key" ]] || err "Chave do Supabase vazia."
 
   read -r -p "Groq API Key: " groq_key
@@ -315,8 +427,8 @@ setup_database() {
 ==================================================================
 
 Você precisa rodar o arquivo abaixo no SQL Editor do seu projeto
-Supabase (a anon key não tem permissão pra DDL — usar painel web é
-mais seguro):
+Supabase (as keys do Supabase — publishable/anon ou secret/service_role
+— não fazem DDL via REST API; SQL Editor é o caminho correto):
 
   $KOBE_HOME/infra/schema.sql
 
@@ -325,6 +437,11 @@ PASSOS:
   2. Menu lateral: Database → Extensions → habilite "vector"
   3. Menu lateral: SQL Editor → New query
   4. Cole o conteúdo de schema.sql e clique em "Run"
+
+⚠️  Se você JÁ rodou antes (upgrade de instalação existente), pode
+   rodar de novo — o schema é idempotente (CREATE TABLE IF NOT EXISTS
+   em tudo). Mudanças destrutivas no futuro virão sinalizadas nas
+   notas de release.
 
 EOF
   read -r -p "Pressione ENTER quando tiver rodado o schema..."
@@ -404,9 +521,25 @@ EOF
 # Main
 # ----------------------------------------------------------------------------
 main() {
-  print_welcome
-  check_os
-  install_system_deps
+  parse_flags "$@"
+
+  if [[ -z "$REEXEC_TARGET_USER" ]]; then
+    # Phase A — roda como executor (root ou sudoer). Faz as coisas que
+    # exigem privilégio (apt-get, useradd, enable-linger), determina o
+    # usuário-alvo e — se for diferente — re-executa via runuser/sudo.
+    print_welcome
+    check_os
+    install_system_deps
+    choose_target_user
+    # Se chegou aqui, target_user == executor: segue inline.
+  else
+    # Phase B (re-executada como target). Já passamos pelo welcome e
+    # pelos passos privilegiados na invocação anterior.
+    [[ "$USER" == "$REEXEC_TARGET_USER" ]] \
+      || err "Esperava rodar como '$REEXEC_TARGET_USER', mas estou como '$USER'."
+    log "Continuando como '$USER' (re-exec)."
+  fi
+
   check_claude_code
   choose_install_path
   collect_credentials

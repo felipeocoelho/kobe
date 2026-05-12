@@ -19,6 +19,7 @@ from telegram.ext import ContextTypes
 from bot.artifacts import save_artifact_from_messages, search_artifacts
 from bot.claude_runner import ClaudeError, ClaudeRunner, build_prompt
 from bot.config import Config
+from bot.progress import ProgressReporter
 from bot.topic_manager import (
     archive_active_session,
     count_messages,
@@ -176,12 +177,18 @@ async def _handle_user_text(
         new_message=text,
     )
 
-    typing_task = asyncio.create_task(
-        _keep_typing(message.chat_id, thread_id, message.get_bot())
+    bot = message.get_bot()
+    typing_task = asyncio.create_task(_keep_typing(message.chat_id, thread_id, bot))
+    reporter = ProgressReporter(
+        chat_id=message.chat_id,
+        thread_id=thread_id,
+        bot=bot,
+        reply_to_message_id=message.message_id,
     )
+    await reporter.start()
     try:
         try:
-            reply_text = await claude.run(prompt)
+            reply_text = await claude.run(prompt, on_event=reporter.on_event)
         except ClaudeError as exc:
             logger.warning("claude falhou: %s", exc)
             reply_text = (
@@ -193,6 +200,7 @@ async def _handle_user_text(
             await typing_task
         except asyncio.CancelledError:
             pass
+        await reporter.finish(delete=True)
 
     if not reply_text:
         reply_text = "(resposta vazia do Claude — tenta de novo?)"

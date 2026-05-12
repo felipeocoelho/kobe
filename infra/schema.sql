@@ -2,7 +2,23 @@
 --
 -- Rode este arquivo no SQL Editor do projeto Supabase.
 -- Pré-requisito: extensão "vector" habilitada em Database → Extensions.
--- A anon key NÃO tem permissão DDL — por isso a execução é manual via painel.
+-- As keys públicas do Supabase (publishable/anon ou secret/service_role)
+-- não executam DDL via REST — por isso a execução é manual no painel.
+--
+-- REGRA DE IDEMPOTÊNCIA (importante pra upgrades):
+-- Toda mudança neste arquivo deve ser segura pra re-execução. Padrões:
+--   - Nova tabela:   CREATE TABLE IF NOT EXISTS ...
+--   - Nova coluna:   ALTER TABLE x ADD COLUMN IF NOT EXISTS y TYPE;
+--   - Novo índice:   CREATE INDEX IF NOT EXISTS ...
+--   - Nova função:   CREATE OR REPLACE FUNCTION ...
+--   - Destrutivo:    bloco DO $$ ... END $$ com guarda explícita +
+--                    sinalização explícita nas notas de release.
+--
+-- A intenção é que o usuário possa colar este arquivo inteiro a cada
+-- upgrade sem efeitos colaterais — só aplica o que ainda não foi aplicado.
+-- O install.sh em modo upgrade vai consultar uma tabela de versão
+-- (a implementar na Fase 9) pra pular este passo quando o banco já estiver
+-- em dia.
 
 -- ============================================================================
 -- Extensões
