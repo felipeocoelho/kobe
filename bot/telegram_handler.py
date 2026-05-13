@@ -27,6 +27,7 @@ from bot.claude_runner import (
     build_prompt,
 )
 from bot.config import Config
+from bot.markdown import to_telegram_html
 from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
 from bot.topic_manager import (
@@ -306,6 +307,17 @@ async def _keep_typing(chat_id: int, thread_id: Optional[int], bot) -> None:
 async def _send_long_text(message: Message, text: str) -> Optional[int]:
     """Envia texto possivelmente longo, fatiando no limite do Telegram.
 
+    Converte markdown padrão → HTML supported pelo Telegram antes de
+    enviar, e usa `parse_mode="HTML"`. Texto sem markdown passa quase
+    intacto (só com escape de `&<>`).
+
+    O split ocorre ANTES da conversão pra HTML — assim o limite de
+    bytes é avaliado no texto fonte (markdown), o que evita estourar o
+    limite por causa de tags HTML adicionadas. Se um chunk cortar
+    exatamente no meio de `**bold**`, vira texto plain naquele chunk
+    (sem renderização) — perda aceitável, raro acontecer porque o
+    split prefere quebras de linha.
+
     Retorna o `message_id` do ÚLTIMO chunk enviado (referência mais útil
     pra rastrear a resposta no banco).
     """
@@ -313,7 +325,19 @@ async def _send_long_text(message: Message, text: str) -> Optional[int]:
     chunks = _split_for_telegram(text, TELEGRAM_TEXT_LIMIT)
     last_id: Optional[int] = None
     for chunk in chunks:
-        sent = await message.reply_text(chunk, message_thread_id=thread_id)
+        html_chunk = to_telegram_html(chunk)
+        try:
+            sent = await message.reply_text(
+                html_chunk,
+                message_thread_id=thread_id,
+                parse_mode="HTML",
+            )
+        except Exception:  # noqa: BLE001 — HTML inválido (tag órfã etc) → fallback plain
+            logger.warning(
+                "falha enviando como HTML; caindo pra texto plain",
+                exc_info=True,
+            )
+            sent = await message.reply_text(chunk, message_thread_id=thread_id)
         if sent is not None:
             last_id = sent.message_id
     return last_id

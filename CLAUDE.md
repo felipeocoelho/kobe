@@ -143,6 +143,7 @@ A cada chamada, o bot injeta no prompt uma seção `[Plugins disponíveis]` com 
 
 **Quando usar plugin:**
 - Se o pedido do operador combina com um dos `triggers` do plugin → use o subagente correspondente via `Agent(subagent_type="<nome-do-plugin>", ...)`. O Claude Code resolve via `.claude/agents/<nome>.md` (symlink que o bot mantém pra cada plugin com `agent_definition`).
+- **Delegue direto, sem perguntar nada antes.** Se faltar informação (formato, escopo, opções), é o **próprio subagente** que pergunta na primeira mensagem dele. Você só vê uma linha do manifest do plugin — não tente improvisar a pergunta com base nela, porque o roteiro literal (com as opções numeradas, tom, etc.) só existe no agent definition do subagente. Você parafraseando = quebra de UX.
 - Se o plugin não tem subagente (só código/scripts), invoque diretamente via Bash com `cd plugins/{public,private}/<nome>/` antes.
 
 **Privacidade:**
