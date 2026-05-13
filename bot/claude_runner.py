@@ -79,12 +79,21 @@ class ClaudeRunner:
         prompt: str,
         *,
         on_event: Optional[EventCallback] = None,
+        chat_id: Optional[int] = None,
+        thread_id: Optional[int] = None,
+        bot_token: Optional[str] = None,
     ) -> str:
         """Manda `prompt` via stdin pro Claude Code e retorna a resposta.
 
         Se `on_event` for fornecido, é chamado pra cada evento JSON do
         stream (system/assistant/user/result/etc.) — útil pra mostrar
         progresso ao usuário enquanto o Claude trabalha.
+
+        `chat_id`, `thread_id` e `bot_token` (se fornecidos) são injetados
+        no env do subprocess como `KOBE_CHAT_ID`, `KOBE_THREAD_ID` e
+        `KOBE_TELEGRAM_BOT_TOKEN` — usados pelos helpers `bot/bin/kobe-notify`
+        e `bot/bin/kobe-attach` pra plugins emitirem progresso/anexos em
+        tempo real, sem precisar passar pela resposta final do agente.
 
         O texto final retornado vem do evento `result` (campo `result`).
         Se por algum motivo não chegar um `result`, montamos a resposta
@@ -99,10 +108,20 @@ class ClaudeRunner:
             "stream-json",
             "--verbose",
         ]
+
+        env = dict(os.environ)
+        if bot_token:
+            env["KOBE_TELEGRAM_BOT_TOKEN"] = bot_token
+        if chat_id is not None:
+            env["KOBE_CHAT_ID"] = str(chat_id)
+        if thread_id is not None:
+            env["KOBE_THREAD_ID"] = str(thread_id)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.cwd),
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -205,7 +205,13 @@ async def _handle_user_text(
     claude_status = "ok"
     try:
         try:
-            reply_text = await claude.run(prompt, on_event=reporter.on_event)
+            reply_text = await claude.run(
+                prompt,
+                on_event=reporter.on_event,
+                chat_id=message.chat_id,
+                thread_id=message.message_thread_id,
+                bot_token=config.telegram_bot_token,
+            )
         except ClaudeTimeoutError as exc:
             claude_status = "timeout"
             logger.warning("claude timeout: %s", exc)

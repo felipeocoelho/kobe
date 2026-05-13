@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""kobe-attach — envia arquivo como documento pro chat ativo do operador.
+
+Uso:
+    kobe-attach <path-do-arquivo> [caption opcional]
+
+Plugins do Kobe usam este helper pra entregar artefatos (txt, html,
+pdf, etc.) sem precisar passar pelo agente principal. Útil pra
+transcrições, relatórios, exportações — tudo que é melhor consumir
+como arquivo do que como mensagem inline.
+
+Variáveis de ambiente (injetadas pelo bot do Kobe ao invocar `claude -p`):
+    KOBE_TELEGRAM_BOT_TOKEN
+    KOBE_CHAT_ID
+    KOBE_THREAD_ID            (opcional)
+
+Implementação: chama `curl` em subprocess pra evitar reimplementar
+multipart/form-data em Python puro. `curl` é dependência do Kobe
+(instalada pelo install.sh), então está sempre disponível.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("uso: kobe-attach <path> [caption]", file=sys.stderr)
+        return 2
+    path = Path(sys.argv[1])
+    caption = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+
+    if not path.is_file():
+        print(f"kobe-attach: arquivo não existe: {path}", file=sys.stderr)
+        return 1
+
+    token = os.environ.get("KOBE_TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("KOBE_CHAT_ID", "").strip()
+    thread_id = os.environ.get("KOBE_THREAD_ID", "").strip()
+
+    if not token or not chat_id:
+        print(
+            "kobe-attach: envs KOBE_TELEGRAM_BOT_TOKEN/KOBE_CHAT_ID ausentes "
+            "(o helper só funciona quando chamado a partir de um agente do Kobe)",
+            file=sys.stderr,
+        )
+        return 1
+
+    args = [
+        "curl",
+        "--silent",
+        "--fail",
+        "--show-error",
+        "--max-time", "120",
+        "-F", f"chat_id={chat_id}",
+        "-F", f"document=@{path}",
+    ]
+    if thread_id:
+        args.extend(["-F", f"message_thread_id={thread_id}"])
+    if caption:
+        args.extend(["-F", f"caption={caption}"])
+    args.append(f"https://api.telegram.org/bot{token}/sendDocument")
+
+    try:
+        result = subprocess.run(args, capture_output=True, timeout=150)
+    except FileNotFoundError:
+        print("kobe-attach: `curl` não encontrado no sistema.", file=sys.stderr)
+        return 1
+    except subprocess.TimeoutExpired:
+        print("kobe-attach: timeout enviando documento.", file=sys.stderr)
+        return 1
+
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace")[:400]
+        print(f"kobe-attach falhou: curl exit={result.returncode} {stderr}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
