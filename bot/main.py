@@ -35,7 +35,6 @@ from bot.telegram_handler import (
     on_command_retomar,
     on_command_salvar,
     on_text,
-    on_unsupported,
     on_voice,
 )
 from bot.topic_manager import GENERAL_THREAD_ID
@@ -147,9 +146,13 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("contexto", on_command_contexto))
     app.add_handler(CommandHandler("salvar", on_command_salvar))
     app.add_handler(CommandHandler("retomar", on_command_retomar))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    # Texto E commands desconhecidos vão pro mesmo handler: os
+    # CommandHandler acima já consumem /nova /contexto /salvar /retomar;
+    # qualquer outro `/comando` cai aqui e é repassado ao agente Claude,
+    # que decide se delega pra plugin (ex: /transcrever pro Atrus) ou
+    # trata como texto livre.
+    app.add_handler(MessageHandler(filters.TEXT, on_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
-    app.add_handler(MessageHandler(filters.COMMAND, on_unsupported))
     return app
 
 

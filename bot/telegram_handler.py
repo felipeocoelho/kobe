@@ -515,13 +515,10 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await message.reply_text("\n".join(lines), message_thread_id=thread_id)
 
 
-async def on_unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch-all pra comandos não reconhecidos."""
-    config: Config = context.application.bot_data["config"]
-    message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
-        return
-    await message.reply_text(
-        "Comando desconhecido. Disponíveis: /nova, /contexto, /salvar, /retomar.",
-        message_thread_id=message.message_thread_id,
-    )
+# on_unsupported foi removido: comandos "desconhecidos" agora caem em
+# on_text e o agente Claude decide o que fazer (rotear pra subagente de
+# plugin que reconhece o comando, ou tratar como texto livre). Os
+# CommandHandler registrados primeiro em main.py continuam interceptando
+# /nova, /contexto, /salvar, /retomar antes do on_text — então a função
+# precisava sumir só pra commands desconhecidos não emitirem "Comando
+# desconhecido" e bloquearem plugins como /transcrever.
