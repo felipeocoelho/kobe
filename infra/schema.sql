@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS topics (
   telegram_thread_id BIGINT UNIQUE,
   telegram_chat_id BIGINT,                     -- id do chat (supergrupo) — usado pra mensagens proativas
   current_name TEXT,
+  welcomed_at TIMESTAMPTZ,                     -- v0.11: timestamp do envio da mensagem de boas-vindas (NULL = pendente)
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'deleted', 'archived')),
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -46,6 +47,8 @@ CREATE TABLE IF NOT EXISTS topics (
 
 -- Upgrades de instalações pré-v0.4: adiciona a coluna se ainda não existe.
 ALTER TABLE topics ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;
+-- Upgrade v0.11: marca tópicos já onboardados (msg de instruções enviada).
+ALTER TABLE topics ADD COLUMN IF NOT EXISTS welcomed_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_topics_telegram_thread ON topics(telegram_thread_id);
 CREATE INDEX IF NOT EXISTS idx_topics_status ON topics(status);

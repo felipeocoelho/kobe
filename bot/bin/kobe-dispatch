@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""kobe-dispatch — dispara comando em background detached, retorna imediato.
+
+Uso:
+    kobe-dispatch [--name <label>] [--topic <slug>] -- <command> [args...]
+
+Plugins do Kobe que rodam tarefas longas (transcrição, build, processamento
+pesado) usam este helper pra liberar o turno do agente em ~1s. O comando real
+roda em background, sobrevive ao processo do `claude -p`, e atualiza um
+state.json no fim com exit_code e timestamp de término.
+
+Layout em $KOBE_HOME/.local/dispatched/<topic>/<job_id>/:
+    state.json    estado canônico (status, pid, exit_code, timestamps)
+    stdout.log    stdout do comando
+    stderr.log    stderr do comando
+
+Saída pro stdout (JSON, uma linha):
+    {"job_id": "...", "status": "running", "state_file": "...",
+     "topic": "...", "pid": <int>}
+
+Variáveis de ambiente (injetadas pelo bot via ClaudeRunner):
+    KOBE_CHAT_ID         chat ativo
+    KOBE_THREAD_ID       forum topic (opcional; default = "general")
+    KOBE_HOME            raiz do Kobe (opcional; default = dois níveis acima deste script)
+
+Sai com 0 se o dispatch foi feito; !=0 se argumentos inválidos ou falha de I/O.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+_BOT_PARENT = Path(__file__).resolve().parent.parent.parent
+_KOBE_HOME = Path(os.environ.get("KOBE_HOME", _BOT_PARENT))
+
+# Marcador interno usado pra re-invocar este mesmo script em modo "tracker"
+# (o filho detached, que de fato roda o comando do operador). Mantém a
+# implementação inteira num único arquivo, sem helper separado.
+_TRACKER_MARKER = "--__kobe-dispatch-runner__"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _short_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _slug_from_env() -> str:
+    """Slug derivado do KOBE_THREAD_ID; sem thread_id => 'general'.
+
+    Não temos acesso ao Supabase aqui pra resolver o nome humano do tópico,
+    então usamos o thread_id numérico como sufixo determinístico. A pasta
+    fica indexada por tópico mesmo sem o slug humano.
+    """
+    thread_id = os.environ.get("KOBE_THREAD_ID", "").strip()
+    if not thread_id:
+        return "general"
+    return f"thread-{thread_id}"
+
+
+def _write_state(state_file: Path, state: dict) -> None:
+    state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+
+def _run_tracker(state_file: Path, cmd: list[str]) -> int:
+    """Roda o comando real (já no processo detached), redireciona logs,
+    atualiza state.json com pid + status final."""
+    state = json.loads(state_file.read_text())
+    stdout_log = Path(state["stdout_log"])
+    stderr_log = Path(state["stderr_log"])
+    state["pid"] = os.getpid()
+    _write_state(state_file, state)
+
+    with stdout_log.open("wb") as out, stderr_log.open("wb") as err:
+        try:
+            ret = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                check=False,
+            ).returncode
+        except FileNotFoundError as exc:
+            err.write(f"kobe-dispatch tracker: comando não encontrado: {exc}\n".encode())
+            ret = 127
+        except Exception as exc:  # noqa: BLE001
+            err.write(f"kobe-dispatch tracker: erro: {exc}\n".encode())
+            ret = 1
+
+    state["status"] = "completed" if ret == 0 else "failed"
+    state["exit_code"] = ret
+    state["completed_at"] = _now_iso()
+    _write_state(state_file, state)
+    return ret
+
+
+def main() -> int:
+    # Modo tracker: este mesmo script reinvocado pelo Popen detached.
+    if len(sys.argv) > 1 and sys.argv[1] == _TRACKER_MARKER:
+        if len(sys.argv) < 4 or sys.argv[3] != "--":
+            print("kobe-dispatch tracker: args inválidos", file=sys.stderr)
+            return 2
+        state_file = Path(sys.argv[2])
+        cmd = sys.argv[4:]
+        return _run_tracker(state_file, cmd)
+
+    parser = argparse.ArgumentParser(prog="kobe-dispatch", add_help=True)
+    parser.add_argument("--name", default="", help="rótulo legível pro job")
+    parser.add_argument("--topic", default="",
+                        help="slug do tópico (default: thread-<KOBE_THREAD_ID> ou 'general')")
+    parser.add_argument("command", nargs=argparse.REMAINDER,
+                        help="comando a executar (separado por --)")
+    args = parser.parse_args()
+
+    cmd = args.command
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        parser.print_usage(sys.stderr)
+        print("kobe-dispatch: falta o comando (use -- antes do comando)", file=sys.stderr)
+        return 2
+
+    topic = (args.topic or _slug_from_env()).strip() or "general"
+    job_id = _short_id()
+    base = _KOBE_HOME / ".local" / "dispatched" / topic / job_id
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"kobe-dispatch: falha criando {base}: {exc}", file=sys.stderr)
+        return 1
+
+    state_file = base / "state.json"
+    stdout_log = base / "stdout.log"
+    stderr_log = base / "stderr.log"
+
+    initial_state = {
+        "job_id": job_id,
+        "name": args.name or " ".join(cmd[:3]),
+        "topic": topic,
+        "command": cmd,
+        "cwd": str(Path.cwd()),
+        "started_at": _now_iso(),
+        "status": "running",
+        "pid": None,
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
+        "exit_code": None,
+        "completed_at": None,
+        "kobe_chat_id": os.environ.get("KOBE_CHAT_ID", ""),
+        "kobe_thread_id": os.environ.get("KOBE_THREAD_ID", ""),
+    }
+    _write_state(state_file, initial_state)
+
+    tracker = [
+        sys.executable, str(Path(__file__).resolve()),
+        _TRACKER_MARKER, str(state_file),
+        "--",
+        *cmd,
+    ]
+    try:
+        proc = subprocess.Popen(
+            tracker,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # equivale a setsid: independente da sessão do parent
+            close_fds=True,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-dispatch: falha lançando tracker: {exc}", file=sys.stderr)
+        initial_state["status"] = "failed"
+        initial_state["exit_code"] = -1
+        initial_state["completed_at"] = _now_iso()
+        _write_state(state_file, initial_state)
+        return 1
+
+    initial_state["pid"] = proc.pid
+    _write_state(state_file, initial_state)
+
+    print(json.dumps({
+        "job_id": job_id,
+        "status": "running",
+        "state_file": str(state_file),
+        "topic": topic,
+        "pid": proc.pid,
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

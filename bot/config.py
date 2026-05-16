@@ -26,7 +26,9 @@ class Config:
     log_level: str
     claude_timeout_seconds: int
     recent_messages_limit: int
+    compact_threshold_messages: int
     anthropic_api_key: Optional[str]
+    assemblyai_api_key: Optional[str]
 
 
 def _require(name: str) -> str:
@@ -75,5 +77,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         claude_timeout_seconds=int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "300")),
         recent_messages_limit=int(os.getenv("RECENT_MESSAGES_LIMIT", "20")),
+        compact_threshold_messages=int(os.getenv("COMPACT_THRESHOLD_MESSAGES", "40")),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
+        assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or None,
     )

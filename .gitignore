@@ -37,6 +37,11 @@ user-data/knowledge/*
 user-data/topics/
 user-data/transcription-hints.md
 
+# Runtime artifacts dos plugins / agente (privados a cada instalação)
+user-data/artifacts/
+user-data/coder-sessions/
+user-data/claude-presence/
+
 # Logs
 *.log
 .kobe-install.log
@@ -51,3 +56,11 @@ user-data/transcription-hints.md
 # Build / dist
 dist/
 build/
+
+# Rascunhos, planos, dumps temporários (notas locais, scripts ad-hoc,
+# saídas de análise). Funciona em qualquer lugar da árvore. Vide CLAUDE.md.
+.local/
+**/.local/
+
+# Scripts locais de conveniência do mantenedor (não vai pra repo)
+claude.sh

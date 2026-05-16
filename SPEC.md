@@ -977,59 +977,119 @@ set +a
 
 ## 10. Ordem de Implementação
 
+> **Estado atual (atualizado em 2026-05-13):** as Fases 1-9 do MVP estão ✅ concluídas e
+> publicadas como `v0.1.0` em diante. Releases subsequentes (`v0.5.0`–`v0.9.0`) entregaram
+> features adicionais — `user-data/` (v0.5), onboarding conversacional (v0.6), plugins
+> (v0.7), helpers `kobe-notify`/`kobe-attach` (v0.8), markdown no Telegram (v0.9). A lista
+> **"Critérios de Pronto" (seção 12)** abaixo é a fonte da verdade pro que ainda falta.
+
 Implementar nesta ordem, validando cada etapa antes de avançar:
 
-### Fase 1 — Esqueleto e identidade
+### Fase 1 — Esqueleto e identidade ✅
 1. Criar estrutura de pastas conforme seção 2
 2. Criar `CLAUDE.md`, `SOUL.md`, `USER.md`, `PREFERENCES.md` com conteúdo das seções 4-5
 3. Criar `.gitignore`, `.env.example`, `LICENSE`, `README.md`
 4. Commit inicial
 
-### Fase 2 — Banco
+### Fase 2 — Banco ✅
 5. Criar `infra/schema.sql` (seção 3)
 6. Rodar manualmente em projeto Supabase de teste
 7. Validar que tabelas existem e pgvector tá ativo
 
-### Fase 3 — Bot mínimo (echo)
+### Fase 3 — Bot mínimo (echo) ✅
 8. Implementar `bot/config.py`
 9. Implementar `bot/main.py` mínimo: recebe mensagem do Telegram, ecoa de volta
 10. Testar com `dev-run.sh`
 11. Confirmar que bot responde no Telegram
 
-### Fase 4 — Persistência
+### Fase 4 — Persistência ✅
 12. Implementar `bot/db.py`
 13. Implementar `bot/topic_manager.py`
 14. Modificar `main.py` pra persistir mensagens recebidas
 15. Verificar registros no Supabase via painel
 
-### Fase 5 — Transcrição
+### Fase 5 — Transcrição ✅
 16. Implementar `bot/transcribe.py`
 17. Bot deve transcrever áudio recebido e ecoar texto
 
-### Fase 6 — Claude integration
+### Fase 6 — Claude integration ✅
 18. Implementar `bot/claude_runner.py`
 19. Construir prompt com contexto (identidade + mensagens recentes)
 20. Disparar `claude -p`, devolver resposta no Telegram
 21. Persistir resposta no DB
 22. **Marco crítico:** sistema funcional end-to-end
 
-### Fase 7 — Comandos especiais
+### Fase 7 — Comandos especiais ✅
 23. `/nova` — arquiva sessão, cria nova
 24. `/contexto` — mostra resumo da memória ativa
 25. `/salvar` — persiste artefato
-26. `/retomar` — busca semântica
+26. `/retomar` — busca (ILIKE por enquanto; busca semântica via embeddings é pós-MVP)
 
-### Fase 8 — Instalador
+### Fase 8 — Instalador ✅
 27. Implementar `install.sh`
 28. Testar instalação numa pasta limpa do mesmo usuário (ex: `$HOME/teste-kobe`)
 29. Implementar `uninstall.sh`
 30. Validar ciclo install → uninstall → install
 
-### Fase 9 — Polimento
+### Fase 9 — Polimento ✅
 31. Tratamento de erros robusto
 32. Logging detalhado
 33. README definitivo
 34. Tag v0.1.0 no GitHub
+
+### Fase 12 — Manutenção & observabilidade ✅
+Última fase do roadmap original: itens de longa-cauda que evitam degradação
+silenciosa. Nenhum é bloqueante, mas todos importam quando o uso real escala.
+
+- ✅ Compactação automática de sessões longas (`COMPACT_THRESHOLD_MESSAGES`,
+  default 40 msgs). Summary via Claude, sessão arquivada com `status='compacted'`,
+  nova sessão aberta com summary como `role='system'`. Lógica em `bot/compactor.py`.
+- ✅ Detecção passiva de tópicos closed/reopened (handlers `forum_topic_closed`
+  e `forum_topic_reopened` atualizam `topics.status`). "Delete real" não é emitido
+  pelo Telegram — sugestão de check periódico em `docs/sugestoes-futuras.md`.
+- ✅ Métricas estruturadas no log `claude_run`: `tokens_in`, `tokens_out`,
+  `cache_read`, `cache_create`, `cost_usd`, `error_class`. Sem tabela nova —
+  `journalctl ... grep claude_run` permite análise. Migração pra tabela em
+  `docs/sugestoes-futuras.md` quando precisar de dashboard contínuo.
+- ✅ Convenção `.local/` pra rascunhos não-versionáveis (gitignored, documentado
+  em `CLAUDE.md`).
+- ✅ Arquivo `docs/sugestoes-futuras.md` com ideias fora do roadmap (embeddings,
+  delete real, tabela metrics, comandos /instrucoes /kb, web dashboard).
+
+### Fase 11 — Onboarding por tópico ✅
+A v0.10 entregou a infraestrutura de knowledge base por tópico mas a feature ficou invisível
+pro operador. Esta fase cobre a descoberta:
+
+- ✅ Mensagem de boas-vindas/instruções enviada uma vez por tópico (controlada por
+  `topics.welcomed_at`), explicando como adicionar/consultar/atualizar KB.
+- ✅ Disparo automático em `forum_topic_created` e retroativo no startup pra tópicos
+  pré-existentes que ainda não viram a msg.
+- ✅ Upload de anexo via Telegram: `.txt`, `.md`, `.pdf`, `.docx` → texto extraído e
+  salvo em `user-data/topics/<slug>/knowledge/`.
+- ✅ `CLAUDE.md` documenta a edição conversacional da KB (operador pede, agente
+  edita `prompt.md`/`knowledge/*` direto, sem cerimônia).
+
+### Fase 10 — Knowledge base por tópico ✅
+O CLAUDE.md já documentava a estrutura `user-data/topics/<nome>/{prompt.md, knowledge/}`,
+mas o bot nunca carregava esses arquivos. Esta fase fechou o gap.
+
+35. ✅ Slug do tópico derivado de `topics.current_name` (kebab-case, sem acento). Função
+    `get_topic_slug(db, chat_id, thread_id)` em `bot/topic_manager.py`. Tópico no chat raiz
+    usa slug fixo `general`.
+36. ✅ `load_topic_context(kobe_home, slug)` em `bot/topic_manager.py`: lê `prompt.md` +
+    `knowledge/*` em ordem alfabética. Retorna string única ou `None`.
+37. ✅ `claude_runner.build_prompt` injeta o resultado numa seção `[Contexto do tópico]`
+    logo após `[Plugins disponíveis]`, antes da mensagem nova do operador.
+38. ✅ `current_name` populado via handlers `forum_topic_created` e `forum_topic_edited`
+    no `bot/telegram_handler.py`. Tópicos pré-existentes precisam de UPDATE manual no
+    Supabase (ou rename no Telegram) — documentado em `docs/runbooks/v0.10-topic-knowledge.md`.
+39. ✅ Limite de 20 000 chars (`TOPIC_CONTEXT_CHAR_LIMIT`). Acima trunca, loga WARN, e
+    envia 1 mensagem ao operador via Telegram pra ele reorganizar.
+40. ✅ Smoke test + teste de truncagem rodaram localmente; validados via Telegram com
+    tópico real do operador antes do release.
+
+> Detalhamento de implementação (passo-a-passo, decisões de design, comandos de teste):
+> ver `docs/runbooks/v0.10-topic-knowledge.md` (privado, fora do repo público).
 
 ---
 
@@ -1064,23 +1124,41 @@ RECENT_MESSAGES_LIMIT=20
 
 ## 12. Critérios de "Pronto"
 
-### MVP (v0.1.0)
-- [ ] Bot recebe texto e áudio no Telegram
-- [ ] Áudio é transcrito via Groq Whisper
-- [ ] Mensagens são persistidas no Supabase
-- [ ] Tópicos são descobertos automaticamente
-- [ ] Sessões são gerenciadas por tópico
-- [ ] Claude Code é invocado com contexto de memória
-- [ ] Resposta volta no tópico correto
-- [ ] Instalador roda do início ao fim
-- [ ] Desinstalador remove tudo que o instalador criou
+### MVP (v0.1.0) — ✅ concluído
+- [x] Bot recebe texto e áudio no Telegram
+- [x] Áudio é transcrito via Groq Whisper
+- [x] Mensagens são persistidas no Supabase
+- [x] Tópicos são descobertos automaticamente
+- [x] Sessões são gerenciadas por tópico
+- [x] Claude Code é invocado com contexto de memória
+- [x] Resposta volta no tópico correto
+- [x] Instalador roda do início ao fim
+- [x] Desinstalador remove tudo que o instalador criou
 
-### Pós-MVP (v0.2.0+)
-- [ ] Comandos `/nova`, `/salvar`, `/retomar`, `/contexto`
-- [ ] Embeddings em `saved_artifacts`
-- [ ] Compactação automática de sessões longas
-- [ ] Detecção passiva de tópicos deletados
-- [ ] Métricas básicas (tokens, latência, erros)
+### Pós-MVP
+
+Feito:
+- [x] Comandos `/nova`, `/salvar`, `/retomar`, `/contexto` (v0.1.0)
+- [x] `user-data/` separado do código + onboarding conversacional (v0.5–v0.6)
+- [x] Scaffolding de plugins (manifest, discovery, install) (v0.7)
+- [x] Helpers `kobe-notify` / `kobe-attach` pra plugins emitirem progresso (v0.8)
+- [x] Markdown renderizado no Telegram (v0.9)
+- [x] Knowledge base por tópico (v0.10) — bot carrega `user-data/topics/<slug>/prompt.md`
+      e `knowledge/*` ao montar o prompt; handlers de `forum_topic_created/edited` populam
+      `topics.current_name` automaticamente.
+- [x] Onboarding por tópico (v0.11) — msg de boas-vindas explica como adicionar/consultar/
+      atualizar a KB; upload de `.txt/.md/.pdf/.docx` salva em `knowledge/` via handler de
+      documentos; edição conversacional documentada no `CLAUDE.md`.
+- [x] Manutenção & observabilidade (v0.12) — compactação automática de sessões longas,
+      detecção passiva de tópicos closed/reopened, métricas estruturadas (tokens + custo) no
+      log `claude_run`, convenção `.local/` pra rascunhos.
+
+Pendente (mantido em `docs/sugestoes-futuras.md` agora — não há mais roadmap fixo):
+- Embeddings em `saved_artifacts` (motivo: custo de provider novo).
+- Detecção real de tópico deletado (limitação da API do Telegram).
+- Tabela `metrics` no Supabase (hoje só logger).
+- Comandos `/instrucoes` e `/kb` explícitos.
+- Web dashboard.
 
 ---
 

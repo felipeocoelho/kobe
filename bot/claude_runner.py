@@ -69,6 +69,21 @@ EventCallback = Callable[[dict], "Awaitable[None] | None"]
 
 
 @dataclass(frozen=True)
+class ClaudeResult:
+    """Resposta + métricas de uma chamada ao Claude. Tokens e custo vêm
+    do evento `result` do stream-json (campo `usage` + `total_cost_usd`).
+    Se o evento não chegar (caminho de fallback), os campos numéricos
+    ficam em zero — log estruturado expõe isso naturalmente.
+    """
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
 class ClaudeRunner:
     cwd: Path
     timeout_seconds: int
@@ -82,7 +97,7 @@ class ClaudeRunner:
         chat_id: Optional[int] = None,
         thread_id: Optional[int] = None,
         bot_token: Optional[str] = None,
-    ) -> str:
+    ) -> ClaudeResult:
         """Manda `prompt` via stdin pro Claude Code e retorna a resposta.
 
         Se `on_event` for fornecido, é chamado pra cada evento JSON do
@@ -138,6 +153,8 @@ class ClaudeRunner:
         proc.stdin.close()
 
         result_text: Optional[str] = None
+        result_usage: dict = {}
+        result_cost: float = 0.0
         assistant_texts: list[str] = []
         # Buffer dos eventos parseados — usado pra dump diagnóstico quando
         # a resposta final vier vazia (acontece raro mas precisamos de
@@ -146,7 +163,7 @@ class ClaudeRunner:
         non_json_lines: int = 0
 
         async def _consume_stdout() -> None:
-            nonlocal result_text, non_json_lines
+            nonlocal result_text, non_json_lines, result_usage, result_cost
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
@@ -168,6 +185,13 @@ class ClaudeRunner:
                 etype = event.get("type")
                 if etype == "result":
                     result_text = (event.get("result") or "").strip() or None
+                    # Métricas (v0.12): usage e custo só vêm aqui. Pode ser
+                    # None em paths de erro — guardamos dict vazio então.
+                    result_usage = event.get("usage") or {}
+                    try:
+                        result_cost = float(event.get("total_cost_usd") or 0.0)
+                    except (TypeError, ValueError):
+                        result_cost = 0.0
                 elif etype == "assistant":
                     msg = event.get("message") or {}
                     for block in msg.get("content") or []:
@@ -211,13 +235,25 @@ class ClaudeRunner:
             )
             raise ClaudeExitError(proc.returncode, stderr)
 
+        def _result(text: str) -> ClaudeResult:
+            return ClaudeResult(
+                text=text,
+                input_tokens=int(result_usage.get("input_tokens") or 0),
+                output_tokens=int(result_usage.get("output_tokens") or 0),
+                cache_read_tokens=int(result_usage.get("cache_read_input_tokens") or 0),
+                cache_creation_tokens=int(
+                    result_usage.get("cache_creation_input_tokens") or 0
+                ),
+                cost_usd=result_cost,
+            )
+
         if result_text:
-            return result_text
+            return _result(result_text)
         # Fallback: alguns paths não emitem `result` (errado/raro), mas
         # vimos blocos `text` em eventos `assistant`. Junta tudo.
         joined = "\n".join(t.strip() for t in assistant_texts if t.strip()).strip()
         if joined:
-            return joined
+            return _result(joined)
 
         # Resposta totalmente vazia. Não levantamos exceção (o caller
         # devolve uma mensagem amigável no Telegram), mas dumpamos o
@@ -235,7 +271,7 @@ class ClaudeRunner:
             len(stderr_bytes),
             dump_path,
         )
-        return ""
+        return _result("")
 
 
 def _dump_empty_stream(
@@ -274,13 +310,19 @@ def build_prompt(
     history: Iterable[dict],
     new_message: str,
     plugins_section: str = "",
+    topic_context: Optional[str] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
     Mantemos minimal: identidade e regras vivem no `CLAUDE.md` (que o
     Claude Code lê via auto-discovery no `cwd`). Aqui só damos o contexto
     dinâmico — qual tópico, o histórico recente, plugins instalados (se
-    houver) e a mensagem nova.
+    houver), conhecimento curado do tópico (se houver) e a mensagem nova.
+
+    `topic_context` é o output de `topic_manager.load_topic_context`
+    (concatenação de `prompt.md` + `knowledge/*` do tópico). Vem antes do
+    histórico pra funcionar como instrução de base — o histórico é
+    consequência dela.
     """
     topic_label = (
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
@@ -294,6 +336,11 @@ def build_prompt(
     if plugins_section:
         parts.append("")
         parts.append(plugins_section)
+
+    if topic_context:
+        parts.append("")
+        parts.append("[Contexto do tópico]")
+        parts.append(topic_context)
 
     history_lines: list[str] = []
     for msg in history:

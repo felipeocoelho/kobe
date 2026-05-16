@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""kobe-heartbeat-run — roda um comando e emite kobe-notify periódico.
+
+Uso:
+    kobe-heartbeat-run [--interval <s>] [--message <tpl>] [--label <txt>] -- <cmd> [args...]
+
+Wraps um comando longo emitindo sinal de vida no Telegram. O comando roda
+em foreground; uma thread daemon dispara `kobe-notify` a cada N segundos.
+Quando o comando termina (sucesso ou erro), o heartbeat para e o script sai
+com o exit code do comando.
+
+Usado tipicamente DENTRO do worker detached (via `kobe-dispatch`) pra cobrir
+intervalos longos entre marcos semânticos do pipeline.
+
+Argumentos:
+    --interval N    segundos entre heartbeats (default: 600 = 10min, mín 10s)
+    --message TPL   template do heartbeat. Suporta {elapsed} e {cmd}.
+                    Default: "⏳ Em andamento: {cmd} ({elapsed})"
+    --label TXT     valor de {cmd} (default: primeiras 3 palavras do comando)
+
+Variáveis de ambiente usadas pelo `kobe-notify` (não precisamos delas aqui,
+mas o subprocess herda): KOBE_TELEGRAM_BOT_TOKEN, KOBE_CHAT_ID, KOBE_THREAD_ID.
+
+Heartbeat falha silenciosamente se o notify quebrar — o comando real continua.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+
+_BIN = Path(__file__).resolve().parent
+_KOBE_NOTIFY = _BIN / "kobe-notify"
+
+
+def _fmt_elapsed(secs: float) -> str:
+    s = int(secs)
+    h, rem = divmod(s, 3600)
+    m, ss = divmod(rem, 60)
+    if h:
+        return f"{h:d}h{m:02d}m"
+    if m:
+        return f"{m:d}m{ss:02d}s"
+    return f"{ss:d}s"
+
+
+def _send_notify(text: str) -> None:
+    try:
+        subprocess.run(
+            [str(_KOBE_NOTIFY), text],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001 — heartbeat é nice-to-have, não derruba o comando
+        pass
+
+
+def _heartbeat_loop(
+    stop_event: threading.Event,
+    interval: int,
+    message: str,
+    cmd_label: str,
+    started: float,
+) -> None:
+    while not stop_event.wait(interval):
+        elapsed = _fmt_elapsed(time.monotonic() - started)
+        try:
+            text = message.format(elapsed=elapsed, cmd=cmd_label)
+        except (KeyError, IndexError):
+            text = f"⏳ Em andamento: {cmd_label} ({elapsed})"
+        _send_notify(text)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="kobe-heartbeat-run", add_help=True)
+    parser.add_argument("--interval", type=int, default=600,
+                        help="segundos entre heartbeats (default: 600 = 10min)")
+    parser.add_argument("--message", default="⏳ Em andamento: {cmd} ({elapsed})",
+                        help="template do heartbeat ({elapsed}, {cmd})")
+    parser.add_argument("--label", default="",
+                        help="texto pro {cmd} (default: primeiras 3 palavras do comando)")
+    parser.add_argument("command", nargs=argparse.REMAINDER,
+                        help="comando a executar (separado por --)")
+    args = parser.parse_args()
+
+    cmd = args.command
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        parser.print_usage(sys.stderr)
+        print("kobe-heartbeat-run: falta o comando (use -- antes do comando)", file=sys.stderr)
+        return 2
+
+    if args.interval < 10:
+        print(f"kobe-heartbeat-run: intervalo mínimo 10s (recebido {args.interval})",
+              file=sys.stderr)
+        return 2
+
+    cmd_label = args.label or " ".join(cmd[:3])
+    started = time.monotonic()
+    stop_event = threading.Event()
+    hb_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(stop_event, args.interval, args.message, cmd_label, started),
+        daemon=True,
+    )
+    hb_thread.start()
+
+    try:
+        ret = subprocess.run(cmd, check=False).returncode
+    except FileNotFoundError as exc:
+        print(f"kobe-heartbeat-run: comando não encontrado: {exc}", file=sys.stderr)
+        ret = 127
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-heartbeat-run: erro: {exc}", file=sys.stderr)
+        ret = 1
+    finally:
+        stop_event.set()
+        hb_thread.join(timeout=2)
+    return ret
+
+
+if __name__ == "__main__":
+    sys.exit(main())

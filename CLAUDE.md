@@ -50,7 +50,7 @@ Você tem três camadas de memória:
 - `user-data/identity/PREFERENCES.md` — como o operador prefere ser tratado
 - `user-data/identity/agent-name` — nome pelo qual o operador te chama (opcional)
 - `user-data/knowledge/` — conhecimento curado pelo operador (livre estrutura)
-- `user-data/topics/<nome>/` — quando existir, contém `prompt.md` e `knowledge/` específicos daquele tópico do Telegram
+- `user-data/topics/<slug>/` — quando existir, contém `prompt.md` e `knowledge/` específicos daquele tópico do Telegram. O `<slug>` é o **kebab-case minúsculo, sem acento** do nome do forum topic (ex: tópico "Café & Livros" → pasta `cafe-livros/`). Tópico no chat raiz (sem thread_id) usa slug fixo `general`. O bot lê `prompt.md` + tudo em `knowledge/` (ordem alfabética) e injeta no prompt como `[Contexto do tópico]` — limite de 20k chars, acima disso trunca e avisa via Telegram.
 
 Esses arquivos pertencem ao **operador**, não ao framework. Ficam fora do repo público. Você pode atualizá-los quando ele autorizar.
 
@@ -114,6 +114,39 @@ Mesmo depois do onboarding, o operador pode (e deve) atualizar dados sobre ele m
 
 Princípio: edição manual dos arquivos é fallback; a forma natural de configurar o agente é conversando com ele.
 
+## Edição conversacional da knowledge base do tópico
+
+Cada forum topic do Telegram tem (opcionalmente) uma pasta `user-data/topics/<slug>/`:
+
+- `prompt.md` — instruções permanentes deste tópico (system prompt local)
+- `knowledge/*.md` — base de conhecimento (glossários, briefings, notas)
+
+Você (agente) carrega tudo isso automaticamente no prompt — vide seção `[Contexto do tópico]`. O bot também aceita upload de `.txt/.md/.pdf/.docx` direto no chat (salva em `knowledge/` automaticamente). **Mas o operador também pode pedir edição conversando contigo**, e nesse caso você deve agir direto, sem cerimônia:
+
+| Operador diz | Você faz |
+|---|---|
+| "anota como instrução: …" / "regra desse tópico: …" | append em `user-data/topics/<slug>/prompt.md` (ou cria) |
+| "adiciona à base de conhecimento: …" / "anota na base: …" | cria arquivo novo em `knowledge/` com slug derivado do conteúdo (ex: `clientes-2026.md`) |
+| "atualiza a instrução sobre X" / "muda a regra de Y" | localiza linha relevante em `prompt.md` ou no arquivo `knowledge/` certo e edita inline |
+| "esquece a instrução X" / "remove o arquivo Y" | apaga linha/seção do `prompt.md` ou deleta arquivo de `knowledge/` |
+| "o que tem na base?" / "quais as instruções daqui?" | lista `prompt.md` + `knowledge/*` com resumo de 1 linha de cada |
+
+Princípios:
+- **Slug do tópico**: vem do contexto da chamada. Quando em dúvida, leia o cabeçalho `[Telegram] tópico:` do prompt — o slug é derivado do nome registrado em `topics.current_name`.
+- **Confirme em uma linha** após editar: "anotei em `prompt.md`" ou "salvei em `knowledge/clientes-2026.md`". Sem alarde.
+- **Nomes de arquivos**: kebab-case, descritivo, com prefixo numérico se ordem importa (`01-glossario.md`, `02-clientes.md`). Não use timestamps.
+- **Nada de criar pasta de tópico vazio**: só se o operador pediu pra adicionar conteúdo. Se ele falou "anota X" mas o tópico nem tem pasta ainda, crie-a com o arquivo adequado e ponto.
+
+## Convenção `.local/` — rascunhos que nunca devem ir pro git
+
+Quando precisar criar arquivo temporário (plano de implementação, dump de análise, script ad-hoc, snapshot pra inspecionar depois), coloque em `.local/` — qualquer pasta com esse nome em qualquer nível da árvore está no `.gitignore`. Exemplos:
+
+- `.local/plano-da-fase-X.md` — rascunho de design antes de virar runbook formal
+- `.local/dump-supabase-2026-05-13.json` — extrato pra investigar
+- `plugins/private/algo/.local/teste.sh` — script só do plugin, não vai pro repo dele
+
+Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.
+
 ## Helpers do Kobe pra plugins emitirem progresso e anexos
 
 Plugins (e o próprio agente principal, se útil) têm dois helpers em `bot/bin/` pra emitir mensagens e anexos durante a execução — sem precisar esperar a resposta final:
@@ -134,6 +167,20 @@ done
 ```
 
 A vantagem: o operador vê progresso em tempo real, em vez de esperar 15 minutos em silêncio. Cada notify/attach é uma mensagem separada no Telegram.
+
+## Estado de processos em background — leia antes de afirmar
+
+Plugins que dispatcham trabalho em background (Coder, Atrus, qualquer um que use `kobe-dispatch`) gravam estado em arquivos `.json` específicos enquanto rodam. Antes de **afirmar qualquer coisa** sobre o status desse trabalho ("está rodando", "terminou", "PID X", "aguardando input", "exit_code Y", "última atividade às Z"), **leia o arquivo de estado correspondente**. Não confie em memória da conversa nem em mensagens passadas — o trabalho pode ter terminado, falhado ou avançado enquanto você não estava olhando.
+
+Onde está o estado de cada plugin:
+
+- **Coder** — `user-data/coder-sessions/<thread_id>/<session-id>.json` (campos `state`, `exit_code`, `last_activity`, `last_text`, `pid`). Presença ativa em `user-data/claude-presence/`.
+- **Atrus** — jobs dispatched escrevem em `user-data/dispatched/<job-id>.json` (mesma convenção do `kobe-dispatch`).
+- **Qualquer plugin novo que use background** — segue a mesma convenção `user-data/<plugin>/...json`. Quando em dúvida, listar `user-data/` e procurar pasta correspondente ao plugin.
+
+Regra: se o operador perguntar "como está X?" e X é trabalho em background, **abra o arquivo primeiro, responda depois**. Nunca diga "está rodando" sem ter visto o `state` atual. Nunca cite um PID sem ter lido o `pid` do arquivo. Resposta de memória aqui é fonte garantida de inconsistência — o trabalho roda em paralelo, a memória da conversa congela no último update que você viu.
+
+Vale pro agente principal e pra qualquer subagente que tenha que reportar status de algo dispatched.
 
 ## Plugins
 

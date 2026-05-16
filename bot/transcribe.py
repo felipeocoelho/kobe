@@ -1,4 +1,4 @@
-"""Transcrição de áudio via Groq Whisper.
+"""Transcrição de áudio via Groq Whisper, com fallback automático pra AssemblyAI.
 
 Wrapper fino sobre o cliente Groq. Recebe o conteúdo binário do áudio
 (já baixado pelo handler do Telegram) e devolve a transcrição em texto.
@@ -19,12 +19,21 @@ gírias específicas do operador (ex.: "HAL" sendo transcrito como
 "Raul" em sotaque carioca). Releitura a cada chamada é intencional:
 o onboarding pode criar/editar o arquivo a qualquer momento, e o
 custo de I/O é desprezível diante de uma chamada HTTP pra Groq.
+
+Fallback pra AssemblyAI: se `assemblyai_api_key` for fornecido e o
+Whisper falhar (rate limit 429, indisponibilidade etc.), tentamos
+AssemblyAI antes de levantar TranscriptionError. Quando o fallback é
+usado, `last_engine_used` fica como "assemblyai-fallback" — o handler
+do Telegram pode avisar o operador. Sem a key configurada, comportamento
+é o original (falha = TranscriptionError direto).
 """
 
 from __future__ import annotations
 
+import io
 import logging
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -53,6 +62,15 @@ class Transcriber:
     api_key: str
     hints_path: Optional[Path] = None
     model: str = WHISPER_MODEL
+    # Quando setada, Whisper falhando cai pra AssemblyAI antes de
+    # propagar TranscriptionError. Nice-to-have — sem isso, comportamento
+    # é o original (falha = exception).
+    assemblyai_api_key: Optional[str] = None
+    # Engine usada na ÚLTIMA chamada `transcribe()`. Valores possíveis:
+    # "groq-whisper" (caminho normal), "assemblyai-fallback" (Whisper
+    # falhou, AssemblyAI cobriu), "" (antes da primeira chamada).
+    # Handler do Telegram lê após `transcribe()` pra avisar o operador.
+    last_engine_used: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         self._client = Groq(api_key=self.api_key)
@@ -85,6 +103,10 @@ class Transcriber:
         `filename` precisa ter extensão coerente com o conteúdo (ex.
         `voice.ogg` pra voice messages do Telegram) — a Groq usa pra
         decidir o decoder.
+
+        Side effect: atualiza `self.last_engine_used` ("groq-whisper" ou
+        "assemblyai-fallback") pra que o caller possa avisar o operador
+        quando o fallback foi acionado.
         """
         kwargs: dict = {
             "file": (filename, audio_bytes),
@@ -99,7 +121,56 @@ class Transcriber:
             result = self._client.audio.transcriptions.create(**kwargs)
         except APIError as exc:
             logger.warning("groq transcription falhou: %s", exc)
-            raise TranscriptionError(str(exc)) from exc
+            if not self.assemblyai_api_key:
+                raise TranscriptionError(str(exc)) from exc
+            logger.info("tentando fallback pra AssemblyAI…")
+            try:
+                text = self._transcribe_assemblyai(audio_bytes, filename)
+            except Exception as fallback_exc:  # noqa: BLE001
+                logger.warning("assemblyai fallback também falhou: %s", fallback_exc)
+                raise TranscriptionError(
+                    f"Whisper falhou ({exc}) e fallback AssemblyAI também ({fallback_exc})"
+                ) from fallback_exc
+            self.last_engine_used = "assemblyai-fallback"
+            return text.strip()
 
         text = result if isinstance(result, str) else getattr(result, "text", "")
+        self.last_engine_used = "groq-whisper"
         return text.strip()
+
+    def _transcribe_assemblyai(self, audio_bytes: bytes, filename: str) -> str:
+        """Fallback: usa AssemblyAI (sem speakers) quando Whisper falha.
+
+        SDK importado lazy — só puxa quando o fallback acontece. Áudio é
+        gravado num arquivo temporário porque o SDK aceita path (não
+        bytes-em-memória) na assinatura `transcribe`.
+        """
+        try:
+            import assemblyai as aai  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "assemblyai SDK não instalado — fallback indisponível"
+            ) from exc
+
+        aai.settings.api_key = self.assemblyai_api_key  # type: ignore[assignment]
+        # `speech_models` (plural) é exigido pelo backend atual da AssemblyAI.
+        # "universal-2" é o modelo multilíngue padrão (suporta PT-BR).
+        config = aai.TranscriptionConfig(
+            speaker_labels=False,
+            language_code="pt",
+            punctuate=True,
+            format_text=True,
+            speech_models=["universal-2"],
+        )
+        suffix = Path(filename).suffix or ".ogg"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            transcriber = aai.Transcriber(config=config)
+            transcript = transcriber.transcribe(tmp.name)
+        if transcript.status == aai.TranscriptStatus.error:
+            raise RuntimeError(f"AssemblyAI status=error: {transcript.error}")
+        text = (transcript.text or "").strip()
+        if not text:
+            raise RuntimeError("AssemblyAI retornou texto vazio")
+        return text

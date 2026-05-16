@@ -52,6 +52,11 @@ class Plugin:
     triggers: list[str] = field(default_factory=list)
     agent_definition: Optional[Path] = None  # absoluto, se houver
     dependencies: dict = field(default_factory=dict)
+    # Slash commands declarados pelo plugin, no formato:
+    #   [{"name": "transcrever_txt", "description": "..."}]
+    # Usado pelo bot pra registrar no menu do Telegram via set_my_commands.
+    # Restrições do Telegram: name 1-32 chars [a-z0-9_], description ≤ 256.
+    slash_commands: list[dict] = field(default_factory=list)
 
 
 def discover_plugins(kobe_home: Path) -> list[Plugin]:
@@ -134,6 +139,35 @@ def _parse_manifest(manifest_path: Path, plugin_dir: Path, visibility: str) -> P
     if isinstance(triggers, str):
         triggers = [triggers]
 
+    # slash_commands: lista de dicts com `name` (a-z0-9_, ≤32) e
+    # `description` (≤256). Plugin pode omitir; validamos cada entrada
+    # e dropamos silenciosamente as inválidas (com log).
+    raw_cmds = front.get("slash_commands") or []
+    if not isinstance(raw_cmds, list):
+        logger.warning("plugin %s: slash_commands não é lista — ignorando", name)
+        raw_cmds = []
+    slash_commands: list[dict] = []
+    for entry in raw_cmds:
+        if not isinstance(entry, dict):
+            logger.warning("plugin %s: slash_command malformado: %r", name, entry)
+            continue
+        cmd_name = (entry.get("name") or "").strip().lower()
+        cmd_desc = (entry.get("description") or "").strip()
+        if not cmd_name or not cmd_desc:
+            logger.warning("plugin %s: slash_command faltando name/description: %r",
+                           name, entry)
+            continue
+        # Telegram só aceita [a-z0-9_], 1-32 chars
+        if not all(c.isalnum() or c == "_" for c in cmd_name) or not (1 <= len(cmd_name) <= 32):
+            logger.warning(
+                "plugin %s: slash_command name inválido pro Telegram: %r (a-z0-9_, ≤32)",
+                name, cmd_name,
+            )
+            continue
+        if len(cmd_desc) > 256:
+            cmd_desc = cmd_desc[:253] + "…"
+        slash_commands.append({"name": cmd_name, "description": cmd_desc})
+
     return Plugin(
         name=name,
         visibility=visibility,
@@ -143,6 +177,7 @@ def _parse_manifest(manifest_path: Path, plugin_dir: Path, visibility: str) -> P
         triggers=list(triggers),
         agent_definition=agent_def_abs,
         dependencies=front.get("dependencies") or {},
+        slash_commands=slash_commands,
     )
 
 
