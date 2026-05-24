@@ -1,0 +1,24 @@
+[Unit]
+Description=Keyko — daemon de despertar do Claude (Sistema de Missões + futuro Alertas)
+After=network-online.target
+Wants=network-online.target
+# Não tem dependência dura do bot principal (kobe.service): se o bot
+# cai, o Keyko continua observando arquivos e despertando o Claude.
+# Independência é parte da resiliência (decisão 4.3 do plano).
+
+[Service]
+Type=simple
+WorkingDirectory={{KOBE_HOME}}
+# PATH explícito: systemd --user arranca com PATH mínimo que NÃO inclui
+# ~/.local/bin (onde o instalador oficial do Claude Code põe o binário).
+# %h é o $HOME do usuário do serviço, expandido pelo próprio systemd.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile={{KOBE_HOME}}/.env
+ExecStart={{KOBE_HOME}}/.venv/bin/python -m bot.keyko
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

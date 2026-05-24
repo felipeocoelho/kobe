@@ -124,6 +124,73 @@ INFO kobe.handler: claude_run status=ok elapsed=12.4s prompt_len=3128
 - `/contexto` — mostra um resumo da memória ativa.
 - `/salvar <título>` — consolida a sessão num artefato pesquisável.
 - `/retomar <termo>` — busca em artefatos salvos.
+- `/missao <descrição>` — abre uma Missão (trabalho multi-tarefa coordenado). Veja seção abaixo.
+- `/missao_status` — snapshot do painel da missão ativa do tópico.
+- `/missao_abortar` — aborta a missão ativa do tópico.
+- `/missao_lista` — lista missões deste tópico (ativas + 5 últimas encerradas).
+
+## Sistema de Missões (v0.13) + Keyko
+
+**Missão** é trabalho multi-tarefa coordenado: o agente quebra o pedido em subtarefas, dispara em paralelo respeitando dependências, e mostra um painel vivo no Telegram que se atualiza sozinho conforme as tarefas terminam. No fim, anexa o resultado consolidado. Resolve dois bugs estruturais:
+
+1. Promessa de continuação que o agente não cumpre (stateless por turno).
+2. Você ter que cobrar status manualmente.
+
+**Keyko** é o daemon (`systemd --user`) que faz a mágica acontecer — observa eventos das missões, atualiza painéis, acorda o orquestrador (Claude background) em marcos. Nome em homenagem a um pastor alemão do operador. Foi pensado **genérico** desde o início: a próxima feature derivada (Sistema de Alertas, agente proativo) vai conectar nele criando só uma `Source` nova — zero refatoração.
+
+### Instalar o Keyko
+
+```bash
+# Templating do unit
+SERVICE_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SERVICE_DIR"
+sed "s|{{KOBE_HOME}}|$HOME/kobe|g" \
+  "$HOME/kobe/infra/systemd/keyko.service" \
+  > "$SERVICE_DIR/keyko.service"
+systemctl --user daemon-reload
+systemctl --user enable --now keyko
+systemctl --user status keyko --no-pager
+```
+
+Não há dependência dura do `kobe.service`: bot caindo não para o Keyko, e vice-versa.
+
+### Usar
+
+No Telegram, num tópico:
+
+```
+/missao analise o debriefing da Fulana e me manda resumo
+```
+
+Em segundos aparece uma mensagem-painel:
+
+```
+🎯 Missão: analise o debriefing da Fulana e me manda resumo
+🟡 Planejando — sem tarefas ainda
+
+💬 Planejando...
+
+🕐 Atualizado: 15:30:12
+```
+
+Quando o orquestrador planeja, vira:
+
+```
+🎯 Missão: analise o debriefing da Fulana e me manda resumo
+▶️ Em andamento — 0/3 tarefa(s)
+
+▶️ T1 — Extrair pontos-chave
+⏳ T2 — Categorizar por tema (aguarda T1)
+⏳ T3 — Redigir resumo final (aguarda T2)
+
+💬 Quebrei em 3 tarefas sequenciais.
+
+🕐 Atualizado: 15:30:24
+```
+
+E vai atualizando sozinho (▶️ → ✅) até fechar com 🟢 e o anexo do resultado.
+
+Detalhes operacionais, troubleshoot e rollback em [`docs/runbooks/keyko-e-missoes.md`](./docs/runbooks/keyko-e-missoes.md). Guia rápido pro operador em [`docs/missoes.md`](./docs/missoes.md).
 
 ## Troubleshooting
 

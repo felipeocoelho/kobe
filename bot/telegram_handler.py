@@ -31,6 +31,8 @@ from bot.claude_runner import (
 from bot.compactor import compact_session
 from bot.config import Config
 from bot.markdown import to_telegram_html
+from bot.missoes import storage as missoes_storage
+from bot.missoes import orquestrador as missoes_orquestrador
 from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
 from bot.topic_manager import (
@@ -245,6 +247,62 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+# Sentinela retornada por `_triagem_missao_se_ativa` quando o
+# orquestrador respondeu à msg do operador — caller deve encerrar
+# sem chamar o Hal. Valor escolhido pra não colidir com nenhum prompt
+# legítimo (contém NUL).
+_TRIAGEM_RESPONDEU = "\x00MISSAO_RESPONDEU\x00"
+
+
+async def _triagem_missao_se_ativa(
+    *,
+    kobe_home: Path,
+    bot_token: str,
+    chat_id: int,
+    thread_id: Optional[int],
+    texto: str,
+) -> Optional[str]:
+    """Decide o destino da msg quando há missão ativa no tópico (v0.13).
+
+    Retorno:
+    - `None` — não há missão ativa, segue fluxo normal pro Hal.
+    - `_TRIAGEM_RESPONDEU` — orquestrador tratou; encerra turno.
+    - string `[Missão ativa: <id> — "<obj>"]` — rouea pro Hal com essa
+      linha extra de ciência (msg não era sobre a missão).
+    """
+    ativa = missoes_storage.find_missao_ativa(kobe_home, chat_id, thread_id)
+    if ativa is None:
+        return None
+
+    # Chamada síncrona ao orquestrador. Vai bloquear o handler do
+    # tópico por até TIMEOUT_TRIAGEM_S (90s) — aceitável: lock por
+    # tópico já serializa, então é só um delay. Rodamos em thread
+    # pra não pendurar o loop asyncio.
+    loop = asyncio.get_running_loop()
+    try:
+        decisao = await loop.run_in_executor(
+            None,
+            lambda: missoes_orquestrador.triar_mensagem_sincrono(
+                kobe_home=kobe_home,
+                missao_id=ativa.id,
+                mensagem_operador=texto,
+                bot_token=bot_token,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — fail-safe: deixa o Hal responder
+        logger.exception("triagem missao falhou — fallback pro Hal")
+        objetivo_curto = (ativa.objetivo or "")[:80]
+        return f'[Missão ativa: {ativa.id} — "{objetivo_curto}"]'
+
+    if decisao == "related":
+        return _TRIAGEM_RESPONDEU
+    # decisao == "not_related"
+    objetivo_curto = (ativa.objetivo or "")[:80]
+    return f'[Missão ativa: {ativa.id} — "{objetivo_curto}"]'
+
+
 async def _handle_user_text(
     *,
     message: Message,
@@ -330,12 +388,32 @@ async def _handle_user_text(
         audio_transcribed=audio_transcribed,
     )
 
+    # Triagem de missão (v0.13, decisão 4.1=A): se há missão ativa no
+    # tópico, o orquestrador peneira a msg ANTES de chamar o Hal. Se a
+    # msg é sobre a missão, o orquestrador já respondeu via kobe-notify
+    # e a gente encerra aqui. Se não é, vem com a linha extra de
+    # ciência pro Hal saber que existe missão rolando.
+    missao_ativa_info = await _triagem_missao_se_ativa(
+        kobe_home=config.kobe_home,
+        bot_token=config.telegram_bot_token,
+        chat_id=message.chat_id,
+        thread_id=thread_id,
+        texto=text,
+    )
+    if missao_ativa_info == _TRIAGEM_RESPONDEU:
+        # Orquestrador cuidou. A msg do operador já está persistida
+        # como 'user'; a resposta do orquestrador foi via kobe-notify
+        # direto pro Telegram, não passa pelo histórico — aceitável na
+        # Fase 1 (operador vê resposta, sessão fica sem trace dela).
+        return
+
     prompt = build_prompt(
         thread_id=thread_id,
         history=history,
         new_message=text,
         plugins_section=render_plugins_section(plugins),
         topic_context=topic_context,
+        missao_ativa_info=missao_ativa_info,
     )
 
     bot = message.get_bot()

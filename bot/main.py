@@ -32,6 +32,12 @@ from bot.snapshot import (
     render_resume_message,
     save_pending_snapshots,
 )
+from bot.missoes.handlers import (
+    on_command_missao,
+    on_command_missao_abortar,
+    on_command_missao_lista,
+    on_command_missao_status,
+)
 from bot.telegram_handler import (
     on_command_contexto,
     on_command_nova,
@@ -61,6 +67,10 @@ _CORE_SLASH_COMMANDS: list[BotCommand] = [
     BotCommand("contexto", "Mostrar resumo da memória ativa do tópico"),
     BotCommand("salvar", "Salvar a conversa como artefato"),
     BotCommand("retomar", "Buscar um artefato salvo anteriormente"),
+    BotCommand("missao", "Abrir nova missão coordenada (multi-tarefa)"),
+    BotCommand("missao_status", "Snapshot do painel da missão ativa"),
+    BotCommand("missao_abortar", "Abortar a missão ativa neste tópico"),
+    BotCommand("missao_lista", "Listar missões deste tópico (ativas + recentes)"),
 ]
 
 
@@ -245,6 +255,11 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("contexto", on_command_contexto))
     app.add_handler(CommandHandler("salvar", on_command_salvar))
     app.add_handler(CommandHandler("retomar", on_command_retomar))
+    # Sistema de Missões (v0.13)
+    app.add_handler(CommandHandler("missao", on_command_missao))
+    app.add_handler(CommandHandler("missao_status", on_command_missao_status))
+    app.add_handler(CommandHandler("missao_abortar", on_command_missao_abortar))
+    app.add_handler(CommandHandler("missao_lista", on_command_missao_lista))
     # Texto E commands desconhecidos vão pro mesmo handler: os
     # CommandHandler acima já consumem /nova /contexto /salvar /retomar;
     # qualquer outro `/comando` cai aqui e é repassado ao agente Claude,

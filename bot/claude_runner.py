@@ -311,6 +311,7 @@ def build_prompt(
     new_message: str,
     plugins_section: str = "",
     topic_context: Optional[str] = None,
+    missao_ativa_info: Optional[str] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
@@ -323,6 +324,12 @@ def build_prompt(
     (concatenação de `prompt.md` + `knowledge/*` do tópico). Vem antes do
     histórico pra funcionar como instrução de base — o histórico é
     consequência dela.
+
+    `missao_ativa_info` (v0.13): quando há missão ativa no tópico E o
+    orquestrador da missão triou a mensagem como "não é sobre a missão",
+    o bot routea pra cá com essa linha extra de ciência (formato
+    `[Missão ativa: <id> — "<objetivo>"]`). Só uma linha — sem inflar
+    contexto. Hal sabe que existe missão rolando sem precisar gerenciá-la.
     """
     topic_label = (
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
@@ -332,6 +339,9 @@ def build_prompt(
         f"[Telegram] tópico: {topic_label}",
         f"[Agora (America/Sao_Paulo)] {now_br.isoformat(timespec='minutes')}",
     ]
+
+    if missao_ativa_info:
+        parts.append(missao_ativa_info)
 
     if plugins_section:
         parts.append("")
