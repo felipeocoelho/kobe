@@ -147,6 +147,50 @@ Quando precisar criar arquivo temporário (plano de implementação, dump de an�
 
 Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.
 
+## Handoff entre canais Claude — convenção provisória
+
+Trabalho não-trivial no Kobe acontece por múltiplos canais Claude: **Hal** (você, no Telegram), **Claude Code direto** (no VS Code via SSH no VPS, ou local), e **plugin Coder dispatched** (sessão remota lançada pelo plugin). Contexto vivo entre canais hoje é frágil — começar num e continuar noutro exige arqueologia.
+
+**Convenção provisória (até o Chat Manager substituir a parte do Hal):** toda sessão Claude trabalhando em algo não-trivial mantém um **handoff doc vivo** em `<cwd>/.local/handoff.md`. Próxima instância (do mesmo canal ou outro) lê esse arquivo e tem o contexto pra continuar sem arqueologia.
+
+### Quem mantém handoff (e como)
+
+- **Claude Code direto (qualquer instância)** — Mantém `<cwd>/.local/handoff.md` na cwd da sessão. Atualiza **a cada marco do checklist** do plano (item virou `[x]` ou `[!]`). Não a cada turno, não a cada arquivo tocado — só nos marcos.
+- **Plugin Coder dispatched** — Mesma regra. A sessão remota tem cwd próprio; mantém handoff lá.
+- **Hal (você)** — Convenção provisória até Chat Manager:
+  - **Comando explícito `/handoff` do operador** — destila a conversa atual em handoff doc.
+  - **Automático no `/nova`** — antes de arquivar a sessão atual, destila pra `<kobe_home>/.local/handoff.md` (ou path equivalente pra Hal — fora de cwd de projeto).
+  - **Sem heurística automática por enquanto** — não tente adivinhar "isso aqui é importante"; siga só os 2 gatilhos acima.
+
+### Formato — 8 campos
+
+1. **Objetivo** — texto literal que disparou a sessão
+2. **Plano aprovado** — embed ou link pro `.local/plano-*.md`
+3. **Estado do checklist** — `[x]` feito / `[~]` em-andamento / `[ ]` pendente / `[!]` bloqueado, com timestamp BRT
+4. **Decisões tomadas** — append com timestamp + razão curta
+5. **Arquivos tocados** — paths absolutos
+6. **Bloqueios / Aguardando** — o que está pendente em outro lado (input do operador, fila externa, etc.)
+7. **Próximo passo** — o que faria agora se acordasse
+8. **Como retomar** — instrução literal pra próxima instância ("abra X, lê Y, roda Z")
+
+Protótipo concreto da convenção em qualquer `.local/handoff.md` existente na árvore.
+
+### Lifecycle
+
+- Novo handoff doc nasce limpo quando o operador faz `/nova` no Hal (ou equivalente em outros canais — abertura explícita de nova sessão).
+- Antigo move pra `<cwd>/.local/handoffs/arquivados/<data>-<slug>.md` antes de ser sobrescrito.
+- Se 2 sessões coexistem na mesma cwd (ex: Coder dispatched + Claude Code direto), cada uma mantém arquivo próprio com session-id; `.local/handoff.md` na raiz aponta pra ativa via marker file ou symlink.
+
+### Por que essa regra existe
+
+Bug histórico (2026-05-26): Felipe começou trabalho no Telegram com Hal, foi pro VS Code com Claude Code direto, e perdeu contexto. Sessões antigas existiam no banco do Supabase mas não vinham pro prompt da próxima sessão. Resultado: arqueologia recorrente. Convenção acima é a forma mais leve de resolver — regra de prompt, sem código novo, sem tooling.
+
+### Limitações conhecidas
+
+- **Não automatizado** — depende da disciplina do Claude da vez seguir a regra. Vai variar entre versões.
+- **Hal não tem código suporte ainda** — `/handoff` como comando do Telegram **ainda não está implementado** no `bot/telegram_handler.py`. Hoje, se o operador mandar `/handoff`, cai como msg livre — o Hal precisa entender pelo texto. Próximo passo: implementar handler explícito.
+- **Substituição planejada pelo Chat Manager** — quando o card `1ddbeaf7-8e41-4b9a-8b12-bb023592f5cb` no Flow ("Chat Manager — persistência inteligente de conversa por assunto") for implementado, a parte do Hal será reestruturada — sessão = conversa por assunto, transição automática vira o gatilho natural. Esta convenção provisória continua valendo até lá.
+
 ## Helpers do Kobe pra plugins emitirem progresso e anexos
 
 Plugins (e o próprio agente principal, se útil) têm dois helpers em `bot/bin/` pra emitir mensagens e anexos durante a execução — sem precisar esperar a resposta final:
