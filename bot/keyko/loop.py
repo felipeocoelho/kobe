@@ -108,7 +108,17 @@ class KeykoLoop:
 def _disparar_despertar(
     despertar: Despertar, bot_token: str, kobe_home: Path,
 ) -> Optional[subprocess.Popen]:
-    """Dispara `claude -p` em background detached. Volta imediato."""
+    """Dispara `claude -p` em background detached. Volta imediato.
+
+    Roteamento de stdout/stderr:
+    - Se `despertar.log_path` está setado, abre em append e usa como
+      stdout (stderr merge). Source é responsável por escolher o path
+      (ex.: MissoesSource → orquestrador.log da missão).
+    - Senão, DEVNULL (futuras sources podem preferir não logar).
+
+    Sem essa rota, falhas do claude despertado (auth expirada, exit≠0,
+    prompt rejeitado) ficam invisíveis — Bug 4 do v0.13.
+    """
     env = dict(os.environ)
     env["KOBE_HOME"] = str(kobe_home)
     env["KOBE_TELEGRAM_BOT_TOKEN"] = bot_token
@@ -122,13 +132,34 @@ def _disparar_despertar(
 
     cwd = despertar.cwd or str(kobe_home)
 
+    # Abre log_fh se source pediu. Importante: header com motivo escrito
+    # ANTES do Popen pra garantir que se claude -p saiu sem escrever
+    # nada (exit imediato com erro), ainda fica evidente no log que
+    # houve tentativa. Espelha padrão de `acordar_orquestrador`.
+    log_fh = None
+    if despertar.log_path is not None:
+        try:
+            despertar.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = despertar.log_path.open("a", encoding="utf-8")
+            log_fh.write(
+                f"\n=== despertar fonte={despertar.fonte} "
+                f"chave={despertar.chave} motivo={despertar.motivo} ===\n"
+            )
+            log_fh.flush()
+        except OSError:
+            logger.exception(
+                "falha abrindo log_path=%s — caindo pra DEVNULL",
+                despertar.log_path,
+            )
+            log_fh = None
+
     cmd = ["claude", "-p", "--permission-mode", "bypassPermissions"]
     try:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,    # source decide se quer log
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh if log_fh is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if log_fh is not None else subprocess.DEVNULL,
             cwd=cwd,
             env=env,
             start_new_session=True,
@@ -136,9 +167,13 @@ def _disparar_despertar(
         )
     except FileNotFoundError:
         logger.error("claude CLI não encontrado — não há como despertar")
+        if log_fh is not None:
+            log_fh.close()
         return None
     except Exception:  # noqa: BLE001
         logger.exception("falha disparando despertar")
+        if log_fh is not None:
+            log_fh.close()
         return None
 
     try:
@@ -149,7 +184,8 @@ def _disparar_despertar(
         logger.exception("falha escrevendo prompt no stdin do claude despertado")
 
     logger.info(
-        "despertar disparado fonte=%s chave=%s motivo=%s pid=%s",
+        "despertar disparado fonte=%s chave=%s motivo=%s pid=%s log=%s",
         despertar.fonte, despertar.chave, despertar.motivo, proc.pid,
+        despertar.log_path if despertar.log_path else "DEVNULL",
     )
     return proc

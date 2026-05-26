@@ -212,6 +212,11 @@ class MissoesSource:
             thread_id=missao.thread_id,
             cwd=str(self._kobe_home),
             env_extra={"KOBE_HOME": str(self._kobe_home)},
+            # Roteia stdout/stderr do claude -p despertado pro orquestrador.log
+            # da missão — mesmo arquivo que `acordar_orquestrador` (handler
+            # /missao direto) usa. Bug 4 do v0.13: sem isso, falhas do claude
+            # despertado pelo Keyko ficavam invisíveis (T2 nunca disparava).
+            log_path=storage.path_log_orquestrador(self._kobe_home, missao.id),
         )
 
     def _anexar_outputs(self, missao: Missao) -> None:

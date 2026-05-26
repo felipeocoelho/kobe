@@ -16,6 +16,7 @@ com Keiko). A metáfora bate com o papel: late quando algo acontece.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
@@ -37,6 +38,11 @@ class Despertar:
     - cwd: diretório de trabalho do `claude -p`. Default = KOBE_HOME.
     - env_extra: vars adicionais pro env do subprocess (a source pode
       injetar KOBE_HOME, IDs específicos da fonte etc).
+    - log_path: se setado, stdout+stderr do claude -p vão pra cá em
+      modo append. Senão, DEVNULL. MissoesSource usa pra dirigir o log
+      pro orquestrador.log da missão; Alertas (futuro) pode optar por
+      log próprio. Sem essa rota, falhas do claude despertado viram
+      mistério silencioso (Bug 4 do v0.13).
     """
     fonte: str
     chave: str
@@ -46,6 +52,7 @@ class Despertar:
     thread_id: Optional[int] = None
     cwd: Optional[str] = None
     env_extra: dict[str, str] = field(default_factory=dict)
+    log_path: Optional[Path] = None
 
 
 @runtime_checkable

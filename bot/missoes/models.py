@@ -31,6 +31,19 @@ class StatusMissao(str, Enum):
     ABORTADA = "abortada"            # operador rodou /missao_abortar
 
 
+# Status "vivos" — fora deste conjunto a missão é considerada terminal.
+# Definido como conjunto positivo (e não negativo, "lista de terminais")
+# por defesa: se alguém grava `status: "cancelada"` ou qualquer string
+# ad-hoc no estado.json à mão (ex.: Hal limpando lixo), `is_terminal()`
+# devolve True automaticamente sem precisar atualizar a lista. Adicionar
+# um status NOVO de "vivo" no futuro requer atualizar este conjunto —
+# que é o comportamento certo.
+_STATUS_VIVOS: frozenset[str] = frozenset({
+    StatusMissao.PLANEJADA.value,
+    StatusMissao.EM_ANDAMENTO.value,
+})
+
+
 class StatusTarefa(str, Enum):
     PENDENTE = "pendente"            # aguarda dependências ou plano
     RODANDO = "rodando"              # executor disparado, PID conhecido
@@ -150,11 +163,7 @@ class Missao:
         return prontas
 
     def is_terminal(self) -> bool:
-        return self.status in (
-            StatusMissao.CONCLUIDA.value,
-            StatusMissao.FALHOU.value,
-            StatusMissao.ABORTADA.value,
-        )
+        return self.status not in _STATUS_VIVOS
 
 
 @dataclass(frozen=True)
