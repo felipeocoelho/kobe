@@ -40,6 +40,7 @@ from bot.missoes.handlers import (
 )
 from bot.telegram_handler import (
     on_command_contexto,
+    on_command_handoff,
     on_command_nova,
     on_command_retomar,
     on_command_salvar,
@@ -67,6 +68,7 @@ _CORE_SLASH_COMMANDS: list[BotCommand] = [
     BotCommand("contexto", "Mostrar resumo da memória ativa do tópico"),
     BotCommand("salvar", "Salvar a conversa como artefato"),
     BotCommand("retomar", "Buscar um artefato salvo anteriormente"),
+    BotCommand("handoff", "Destilar sessão atual em handoff doc"),
     BotCommand("missao", "Abrir nova missão coordenada (multi-tarefa)"),
     BotCommand("missao_status", "Snapshot do painel da missão ativa"),
     BotCommand("missao_abortar", "Abortar a missão ativa neste tópico"),
@@ -255,6 +257,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("contexto", on_command_contexto))
     app.add_handler(CommandHandler("salvar", on_command_salvar))
     app.add_handler(CommandHandler("retomar", on_command_retomar))
+    app.add_handler(CommandHandler("handoff", on_command_handoff))
     # Sistema de Missões (v0.13)
     app.add_handler(CommandHandler("missao", on_command_missao))
     app.add_handler(CommandHandler("missao_status", on_command_missao_status))

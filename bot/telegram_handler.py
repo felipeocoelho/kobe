@@ -30,6 +30,15 @@ from bot.claude_runner import (
 )
 from bot.compactor import compact_session
 from bot.config import Config
+from bot.handoff import (
+    DestiladorError,
+    active_handoff_path,
+    archive_path_for_session,
+    destilar_sessao,
+    rotate_active_to_archive,
+)
+from bot.handoff.destilador import MIN_MESSAGES_FOR_HANDOFF
+from bot.handoff.paths import ensure_topic_handoff_dirs
 from bot.markdown import to_telegram_html
 from bot.missoes import storage as missoes_storage
 from bot.missoes import orquestrador as missoes_orquestrador
@@ -630,9 +639,16 @@ def _audio_filename(media: Voice | Audio) -> str:
 
 
 async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Arquiva sessão ativa do tópico. Próxima mensagem cria uma nova."""
+    """Arquiva sessão ativa do tópico. Próxima mensagem cria uma nova.
+
+    Dispara também um handoff doc em background (fire-and-forget): a
+    sessão arquivada vira `<kobe_home>/.local/handoffs/<slug>/arquivados/
+    <data>-<session_id>.md`. `kobe-notify`-like confirma quando termina.
+    Skip silencioso pra sessões com < MIN_MESSAGES_FOR_HANDOFF.
+    """
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
+    claude: ClaudeRunner = context.application.bot_data["claude"]
     message = update.effective_message
     if message is None or not _user_authorized(update, config.allowed_user_ids):
         return
@@ -641,6 +657,12 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lock = _get_topic_lock(message.chat_id, thread_id)
     async with lock:
         topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
+        # Captura referências da sessão ANTES de arquivar — o destilador
+        # vai precisar de `session_id` e `topic_slug` (que persistem) pra
+        # ler messages e gravar no path certo.
+        active_before = get_active_session(db, topic_id)
+        topic_slug = get_topic_slug(db, message.chat_id, thread_id)
+
         archived = archive_active_session(db, topic_id)
         if archived is None:
             reply = "Nada pra arquivar aqui — já está zerado. Manda a próxima."
@@ -653,6 +675,30 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             archived,
         )
         await message.reply_text(reply, message_thread_id=thread_id)
+
+        # Background destilação. Skip se: nada arquivado, sem slug do
+        # tópico, ou sessão pequena (essa última checagem ocorre dentro
+        # do helper — aqui só evitamos disparar task à toa).
+        if archived and topic_slug and active_before is not None:
+            session_id = active_before["id"]
+            target = archive_path_for_session(
+                config.kobe_home, topic_slug, session_id
+            )
+            asyncio.create_task(
+                _destilar_e_gravar_handoff(
+                    bot=context.application.bot,
+                    db=db,
+                    claude=claude,
+                    chat_id=message.chat_id,
+                    thread_id=thread_id,
+                    topic_slug=topic_slug,
+                    session_id=session_id,
+                    kobe_home=config.kobe_home,
+                    target_path=target,
+                    confirm_when_done=False,  # /nova é silencioso se pequena
+                ),
+                name=f"nova-handoff-{session_id}",
+            )
 
 
 async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -753,6 +799,201 @@ async def on_command_salvar(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text(
             f"Salvo: “{title}”.",
             message_thread_id=thread_id,
+        )
+
+
+async def _destilar_e_gravar_handoff(
+    *,
+    bot,
+    db: Client,
+    claude: ClaudeRunner,
+    chat_id: int,
+    thread_id: Optional[int],
+    topic_slug: str,
+    session_id: str,
+    kobe_home: Path,
+    target_path: Path,
+    confirm_when_done: bool,
+) -> None:
+    """Roda destilador em background e grava o resultado em `target_path`.
+
+    Usado pelos dois gatilhos (/handoff e /nova). Notifica via Telegram
+    quando termina (se `confirm_when_done`) ou em caso de erro. NUNCA
+    levanta exceção (é fire-and-forget) — falhas viram log + msg curta.
+    """
+    # API do Telegram quer None pro chat raiz (sentinela 0 do banco
+    # também vira None aqui — espelha padrão de send_welcome).
+    api_thread_id = None if thread_id in (None, 0) else thread_id
+    try:
+        messages = get_recent_messages(db, session_id, limit=500)
+    except Exception:  # noqa: BLE001
+        logger.exception("handoff: falha buscando mensagens session=%s", session_id)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="🔴 Handoff falhou — não consegui ler o histórico da sessão.",
+                message_thread_id=api_thread_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("handoff: falha enviando erro pro Telegram")
+        return
+
+    if len(messages) < MIN_MESSAGES_FOR_HANDOFF:
+        logger.info(
+            "handoff skip session=%s msgs=%d (< %d) confirm=%s",
+            session_id, len(messages), MIN_MESSAGES_FOR_HANDOFF, confirm_when_done,
+        )
+        if confirm_when_done:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"ℹ️ Sessão tem só {len(messages)} mensagem(ns) — "
+                        f"sem substância pra destilar (mínimo: {MIN_MESSAGES_FOR_HANDOFF})."
+                    ),
+                    message_thread_id=api_thread_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("handoff: falha enviando skip-info")
+        return
+
+    try:
+        result = await destilar_sessao(messages=messages, runner=claude)
+    except DestiladorError as exc:
+        logger.exception("handoff: destilador falhou session=%s", session_id)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🔴 Handoff falhou ao destilar: {exc}",
+                message_thread_id=api_thread_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("handoff: falha enviando erro pro Telegram")
+        return
+    except Exception:  # noqa: BLE001 — fire-and-forget defensivo
+        logger.exception("handoff: erro inesperado destilando session=%s", session_id)
+        return
+
+    try:
+        ensure_topic_handoff_dirs(kobe_home, topic_slug)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(result.markdown, encoding="utf-8")
+    except OSError:
+        logger.exception("handoff: falha gravando %s", target_path)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🔴 Handoff destilado mas não consegui gravar em {target_path}.",
+                message_thread_id=api_thread_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("handoff: falha enviando erro de IO")
+        return
+
+    logger.info(
+        "handoff ok session=%s msgs=%d path=%s tokens_in=%d tokens_out=%d cost=$%.4f",
+        session_id, len(messages), target_path,
+        result.input_tokens, result.output_tokens, result.cost_usd,
+    )
+
+    if confirm_when_done:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🟢 Handoff destilado ({len(messages)} msgs, "
+                    f"${result.cost_usd:.4f}).\n"
+                    f"<code>{target_path}</code>"
+                ),
+                message_thread_id=api_thread_id,
+                parse_mode="HTML",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("handoff: falha enviando confirmação")
+
+
+async def on_command_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Destila a sessão ativa em um handoff doc em `.local/handoffs/`.
+
+    Roda assíncrono: handler responde "destilando..." imediato e
+    `kobe-notify`-like confirma quando termina (via `bot.send_message`
+    direto, sem precisar do helper CLI).
+    """
+    config: Config = context.application.bot_data["config"]
+    db: Client = context.application.bot_data["db"]
+    claude: ClaudeRunner = context.application.bot_data["claude"]
+    message = update.effective_message
+    if message is None or not _user_authorized(update, config.allowed_user_ids):
+        return
+
+    thread_id = message.message_thread_id
+    lock = _get_topic_lock(message.chat_id, thread_id)
+    async with lock:
+        topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
+        session = get_active_session(db, topic_id)
+        if session is None:
+            await message.reply_text(
+                "Sem sessão ativa neste tópico — nada pra destilar.",
+                message_thread_id=thread_id,
+            )
+            return
+
+        session_id = session["id"]
+        total = count_messages(db, session_id)
+        if total < MIN_MESSAGES_FOR_HANDOFF:
+            await message.reply_text(
+                f"Sessão tem só {total} mensagem(ns) — sem substância pra "
+                f"destilar (mínimo: {MIN_MESSAGES_FOR_HANDOFF}).",
+                message_thread_id=thread_id,
+            )
+            return
+
+        topic_slug = get_topic_slug(db, message.chat_id, thread_id)
+        if not topic_slug:
+            await message.reply_text(
+                "Tópico sem nome registrado — renomeie no Telegram pra eu "
+                "saber onde gravar o handoff.",
+                message_thread_id=thread_id,
+            )
+            return
+
+        kobe_home = config.kobe_home
+        # Se já existia handoff ativo, move pra arquivados antes do novo.
+        rotated = rotate_active_to_archive(kobe_home, topic_slug, session_id)
+        if rotated:
+            logger.info("handoff: rotacionou anterior pra %s", rotated)
+
+        target = active_handoff_path(kobe_home, topic_slug)
+
+        logger.info(
+            "/handoff user=%s %s session=%s total=%d → %s",
+            update.effective_user.id if update.effective_user else None,
+            _topic_label(thread_id),
+            session_id,
+            total,
+            target,
+        )
+
+        await message.reply_text(
+            f"🟡 Destilando {total} mensagens — te aviso quando ficar pronto.",
+            message_thread_id=thread_id,
+        )
+
+        # Fire-and-forget: handler retorna já, destilador roda em paralelo.
+        asyncio.create_task(
+            _destilar_e_gravar_handoff(
+                bot=context.application.bot,
+                db=db,
+                claude=claude,
+                chat_id=message.chat_id,
+                thread_id=thread_id,
+                topic_slug=topic_slug,
+                session_id=session_id,
+                kobe_home=kobe_home,
+                target_path=target,
+                confirm_when_done=True,
+            ),
+            name=f"handoff-{session_id}",
         )
 
 
