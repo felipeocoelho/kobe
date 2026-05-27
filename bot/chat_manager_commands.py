@@ -1,33 +1,31 @@
-"""Comandos do Chat Manager (Fase 6).
+"""Comandos do Chat Manager (Fase 6, refatorado em 2026-05-27).
 
-Implementa handlers de comandos Telegram pra gerenciamento de conversations:
+Listagem usa **links de slash command clicáveis** em texto (não botões
+inline) — Telegram destaca `/retomar_<id>` em azul e clicar dispara o
+comando direto. Mais escalável que botões: muitos items continuam
+legíveis, e cada link tem espaço próprio em vez de truncar.
 
-- /conversas — lista do topic atual com botões clicáveis
-- /conversas-global — lista todas categorizadas
-- /conversa <busca> — abre conversation específica
-- /renomear <nome> — renomeia conversation ativa
-- Callback handler `cm_retomar:<conv_id>` — clique nos botões
+Comandos:
+- /conversas_topico — lista do topic atual
+- /conversas_global — lista todos os topics
+- /conversa <termo> — busca substring no title
+- /renomear <nome> — renomeia ativa
+- /retomar_<id_prefix> — link clicável gerado nas listagens (8 chars do UUID)
 
-Todos os comandos requerem CHAT_MANAGER_ENABLED=true (senão respondem
-mensagem explicativa). Sistema atual continua intacto com flag off.
+Todos requerem CHAT_MANAGER_ENABLED=true.
 
-Comportamento sem parâmetro (clique mobile no menu):
-- /conversa, /conversas, /conversas-global, /retomar → listam
-- /renomear → orienta a passar nome como argumento (MVP sem estado
-  conversacional; v2 pode adicionar single-turn pending state)
+Sem parâmetro (clique mobile): cada comando tem comportamento gracioso —
+/conversa cai pra /conversas_topico, /renomear orienta a passar nome.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from supabase import Client
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.config import Config
@@ -44,11 +42,13 @@ from bot.topic_manager import (
 logger = logging.getLogger("kobe.chat_manager_cmd")
 
 
-# Telegram callback_data: max 64 bytes. UUID = 36 chars. Cabe.
-_CB_RETOMAR_PREFIX = "cm_retomar:"
+# Limite de items na lista por mensagem — Telegram tem limite de 4096
+# chars; com 50 chars/linha cabem ~80 items, mas nunca queremos isso.
+_MAX_LIST_ITEMS = 15
 
-# Limite de botões por lista — Telegram tolera mais, mas ficar legível.
-_MAX_BUTTONS_PER_LIST = 10
+# Quantos chars do UUID usar no /retomar_<id_curto>. 8 chars = 4 bilhões
+# de combinações — improvável colisão em escala do Kobe.
+_ID_PREFIX_LEN = 8
 
 
 def _user_authorized(update: Update, allowed_user_ids: frozenset[int]) -> bool:
@@ -70,31 +70,42 @@ async def _require_enabled(update: Update, config: Config) -> bool:
     return False
 
 
-def _build_keyboard(conversations: list[dict], *, show_topic: bool = False) -> InlineKeyboardMarkup:
-    """Inline keyboard com 1 botão por conversation."""
-    rows: list[list[InlineKeyboardButton]] = []
-    for c in conversations[:_MAX_BUTTONS_PER_LIST]:
-        title = (c.get("title") or c.get("slug") or "(sem título)")[:40]
-        label = title
+def _format_conversations_list(
+    conversations: list[dict], *, show_topic: bool = False
+) -> str:
+    """Formata lista de conversations como texto com slash commands clicáveis.
+
+    Cada item ocupa 2 linhas + 1 linha em branco pra respiração visual:
+
+        • Nome da conversa
+          /retomar_a1b2c3d4
+
+        • Outro nome
+          /retomar_e5f6g7h8
+
+    Quando `show_topic=True`, prefixa com `[topic]`.
+    """
+    lines: list[str] = []
+    for c in conversations[:_MAX_LIST_ITEMS]:
+        title = c.get("title") or c.get("slug") or "(sem título)"
+        prefix = ""
         if show_topic and c.get("topic_name"):
-            label = f"[{c['topic_name'][:10]}] {title}"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"{_CB_RETOMAR_PREFIX}{c['id']}",
-                )
-            ]
-        )
-    return InlineKeyboardMarkup(rows)
+            prefix = f"[{c['topic_name']}] "
+        short_id = c["id"][:_ID_PREFIX_LEN]
+        lines.append(f"• {prefix}{title}")
+        lines.append(f"  /retomar_{short_id}")
+        lines.append("")  # espaçamento
+    return "\n".join(lines).rstrip()
 
 
 # ---------------------------------------------------------------------------
-# /conversas — lista do topic atual
+# /conversas_topico — lista do topic atual
 # ---------------------------------------------------------------------------
 
 
-async def on_command_conversas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_command_conversas_topico(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
@@ -115,7 +126,6 @@ async def on_command_conversas(update: Update, context: ContextTypes.DEFAULT_TYP
         .order("last_activity_at", desc=True)
     )
     if args_text:
-        # Filtro substring case-insensitive no title
         q = q.ilike("title", f"%{args_text}%")
     res = q.execute()
     convs = res.data or []
@@ -133,20 +143,19 @@ async def on_command_conversas(update: Update, context: ContextTypes.DEFAULT_TYP
     if args_text:
         header += f" (filtro: `{args_text}`)"
     header += f"\nTotal: {len(convs)}"
-    if len(convs) > _MAX_BUTTONS_PER_LIST:
-        header += f" (mostrando {_MAX_BUTTONS_PER_LIST} mais recentes)"
-    header += "\n\nClique pra retomar:"
+    if len(convs) > _MAX_LIST_ITEMS:
+        header += f" (mostrando {_MAX_LIST_ITEMS} mais recentes)"
+    header += "\nClique em `/retomar_...` pra reabrir.\n\n"
 
     await message.reply_text(
-        header,
+        header + _format_conversations_list(convs),
         message_thread_id=thread_id,
-        reply_markup=_build_keyboard(convs),
         parse_mode="Markdown",
     )
 
 
 # ---------------------------------------------------------------------------
-# /conversas-global — todas, categorizadas por topic
+# /conversas_global — todas, categorizadas por topic
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +174,6 @@ async def on_command_conversas_global(
     current_topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     args_text = " ".join(context.args or []).strip()
 
-    # Carrega tudo
     q = (
         db.table("conversations")
         .select("id, title, slug, status, topic_id, last_activity_at")
@@ -185,7 +193,6 @@ async def on_command_conversas_global(
         )
         return
 
-    # Carrega names dos topics
     topics_map = {
         t["id"]: t.get("current_name") or "?"
         for t in db.table("topics").select("id, current_name").execute().data
@@ -193,27 +200,24 @@ async def on_command_conversas_global(
     for c in convs:
         c["topic_name"] = topics_map.get(c["topic_id"], "?")
 
-    # Prioriza topic atual
-    convs.sort(key=lambda c: (c["topic_id"] != current_topic_id, c["last_activity_at"]), reverse=False)
-    # ^ tuple: topic atual primeiro (False < True), depois mais recente primeiro
     convs.sort(
         key=lambda c: (
             0 if c["topic_id"] == current_topic_id else 1,
-            -1 * int(_iso_to_epoch_seconds(c["last_activity_at"])),
+            -1 * _iso_to_epoch_seconds(c["last_activity_at"]),
         )
     )
 
-    header = "🌐 *Todas as conversas* (priorizando este tópico)"
+    header = "🌐 *Todas as conversas* (tópico atual primeiro)"
     if args_text:
         header += f"\nFiltro: `{args_text}`"
     header += f"\nTotal: {len(convs)}"
-    if len(convs) > _MAX_BUTTONS_PER_LIST:
-        header += f" (mostrando {_MAX_BUTTONS_PER_LIST} primeiros)"
+    if len(convs) > _MAX_LIST_ITEMS:
+        header += f" (mostrando {_MAX_LIST_ITEMS} mais recentes)"
+    header += "\nClique em `/retomar_...` pra reabrir.\n\n"
 
     await message.reply_text(
-        header,
+        header + _format_conversations_list(convs, show_topic=True),
         message_thread_id=thread_id,
-        reply_markup=_build_keyboard(convs, show_topic=True),
         parse_mode="Markdown",
     )
 
@@ -232,7 +236,7 @@ def _iso_to_epoch_seconds(iso: str) -> float:
 
 
 async def on_command_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sem param: equivalente a /conversas. Com param: busca semântica."""
+    """Sem param: equivalente a /conversas_topico. Com param: busca substring."""
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
@@ -243,15 +247,13 @@ async def on_command_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     args_text = " ".join(context.args or []).strip()
     if not args_text:
-        # Sem parâmetro: cai pra /conversas
-        await on_command_conversas(update, context)
+        # Sem parâmetro: cai pra /conversas_topico
+        await on_command_conversas_topico(update, context)
         return
 
     thread_id = message.message_thread_id
     topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
 
-    # Busca substring em title (MVP — busca semântica via embedding fica
-    # pra v2; o detector já faz isso quando operador manda msg natural).
     res = (
         db.table("conversations")
         .select("id, title, slug, status")
@@ -266,14 +268,13 @@ async def on_command_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not matches:
         await message.reply_text(
             f"Nenhuma conversa do tópico atual com `{args_text}` no título. "
-            f"Tente /conversas-global pra buscar em todos os tópicos.",
+            f"Tente /conversas\\_global pra buscar em todos os tópicos.",
             message_thread_id=thread_id,
             parse_mode="Markdown",
         )
         return
 
     if len(matches) == 1:
-        # Match único: ativa direto
         await _activate_conversation(db, topic_id, matches[0])
         await message.reply_text(
             f"✅ Reabri a conversa *{matches[0]['title']}*. Próxima mensagem cai nela.",
@@ -282,11 +283,10 @@ async def on_command_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Múltiplos matches: lista pra operador escolher
+    header = f"🔍 {len(matches)} conversas com `{args_text}` no título — clique pra escolher:\n\n"
     await message.reply_text(
-        f"🔍 {len(matches)} conversas com `{args_text}` no título. Clique pra escolher:",
+        header + _format_conversations_list(matches),
         message_thread_id=thread_id,
-        reply_markup=_build_keyboard(matches),
         parse_mode="Markdown",
     )
 
@@ -342,51 +342,71 @@ async def on_command_renomear(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ---------------------------------------------------------------------------
-# Callback handler — clique nos botões "Reabrir conversa X"
+# /retomar_<id_curto> — link clicável gerado nas listagens
 # ---------------------------------------------------------------------------
 
 
-async def on_callback_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler de callback_query pra prefixo `cm_retomar:<conv_id>`."""
+_RETOMAR_SHORT_RE = re.compile(r"^/retomar_([0-9a-f]{6,16})(?:@\w+)?\s*$", re.IGNORECASE)
+
+
+async def on_command_retomar_short(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Match texto `/retomar_<id_prefix>` (com ou sem `@botname`).
+
+    Resolve o id_prefix → UUID completo via client-side filter (escala
+    atual permite, ~50 conversations max no banco). Ativa a conversation.
+    """
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
-    query = update.callback_query
-    if query is None:
+    message = update.effective_message
+    if message is None or not _user_authorized(update, config.allowed_user_ids):
         return
-    if not _user_authorized(update, config.allowed_user_ids):
-        await query.answer("Não autorizado.", show_alert=True)
+    if not await _require_enabled(update, config):
         return
 
-    data = query.data or ""
-    if not data.startswith(_CB_RETOMAR_PREFIX):
-        return  # outro handler
+    text = (message.text or "").strip()
+    m = _RETOMAR_SHORT_RE.match(text)
+    if not m:
+        return
+    id_prefix = m.group(1).lower()
 
-    conv_id = data[len(_CB_RETOMAR_PREFIX):]
-    res = (
+    # Carrega todas conversations não-archived e filtra por prefix
+    all_convs = (
         db.table("conversations")
         .select("id, title, topic_id, status")
-        .eq("id", conv_id)
-        .limit(1)
+        .in_("status", ["active", "dormant"])
         .execute()
-    )
-    if not res.data:
-        await query.answer("Conversa não encontrada.", show_alert=True)
-        return
-    conv = res.data[0]
+        .data
+    ) or []
+    matches = [c for c in all_convs if c["id"].lower().startswith(id_prefix)]
 
-    # Detecta se a conversation está em OUTRO topic — confirma com operador
-    message = query.message
-    if message is None:
-        await query.answer("Erro: sem contexto de mensagem.", show_alert=True)
+    thread_id = message.message_thread_id
+    if not matches:
+        await message.reply_text(
+            f"Não encontrei conversa com id começando em `{id_prefix}`. "
+            f"Use `/conversas_topico` pra ver a lista atual.",
+            message_thread_id=thread_id,
+            parse_mode="Markdown",
+        )
         return
-    current_thread_id = message.message_thread_id
-    current_topic_id = ensure_topic(db, current_thread_id, chat_id=message.chat_id)
+    if len(matches) > 1:
+        await message.reply_text(
+            f"⚠️ {len(matches)} conversas têm id começando em `{id_prefix}` — "
+            f"caso raro de colisão de prefix. Use `/conversas_global` pra ver a lista completa.",
+            message_thread_id=thread_id,
+            parse_mode="Markdown",
+        )
+        return
+
+    conv = matches[0]
+    current_topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     cross_topic = conv["topic_id"] != current_topic_id
 
     await _activate_conversation(db, conv["topic_id"], conv)
+
     suffix = ""
     if cross_topic:
-        # Conversation pertence a outro topic — operador precisa ir pro topic certo
         other_topic = db.table("topics").select("current_name").eq(
             "id", conv["topic_id"]
         ).limit(1).execute()
@@ -396,9 +416,9 @@ async def on_callback_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"vá pra lá pra continuar nela."
         )
 
-    await query.answer("Reabri a conversa.")
-    await query.edit_message_text(
-        f"✅ Reabri *{conv['title']}*.{suffix}",
+    await message.reply_text(
+        f"✅ Reabri *{conv['title']}*. Próxima mensagem cai nela.{suffix}",
+        message_thread_id=thread_id,
         parse_mode="Markdown",
     )
 

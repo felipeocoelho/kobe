@@ -39,11 +39,11 @@ from bot.missoes.handlers import (
     on_command_missao_status,
 )
 from bot.chat_manager_commands import (
-    on_callback_retomar,
     on_command_conversa,
-    on_command_conversas,
     on_command_conversas_global,
+    on_command_conversas_topico,
     on_command_renomear,
+    on_command_retomar_short,
 )
 from bot.telegram_handler import (
     on_command_contexto,
@@ -76,7 +76,7 @@ _CORE_SLASH_COMMANDS: list[BotCommand] = [
     BotCommand("salvar", "Salvar a conversa como artefato"),
     BotCommand("retomar", "Buscar um artefato salvo anteriormente"),
     BotCommand("handoff", "Destilar sessão atual em handoff doc"),
-    BotCommand("conversas", "Listar conversas do tópico atual"),
+    BotCommand("conversas_topico", "Listar conversas do tópico atual"),
     BotCommand("conversas_global", "Listar conversas de todos os tópicos"),
     BotCommand("conversa", "Buscar e abrir conversa específica"),
     BotCommand("renomear", "Renomear a conversa ativa"),
@@ -276,12 +276,20 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("missao_lista", on_command_missao_lista))
     # Chat Manager (Fase 6) — handlers respondem mensagem explicativa se
     # CHAT_MANAGER_ENABLED=false, então é safe registrar mesmo com flag off.
-    app.add_handler(CommandHandler("conversas", on_command_conversas))
+    app.add_handler(CommandHandler("conversas_topico", on_command_conversas_topico))
     app.add_handler(CommandHandler("conversas_global", on_command_conversas_global))
     app.add_handler(CommandHandler("conversa", on_command_conversa))
     app.add_handler(CommandHandler("renomear", on_command_renomear))
-    from telegram.ext import CallbackQueryHandler
-    app.add_handler(CallbackQueryHandler(on_callback_retomar, pattern=r"^cm_retomar:"))
+    # /retomar_<id_curto> é gerado dinamicamente nas listagens; intercepta
+    # via MessageHandler com regex (CommandHandler não suporta sufixo).
+    # IMPORTANTE: tem que vir ANTES do MessageHandler(filters.TEXT, on_text)
+    # genérico, senão on_text engole.
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^/retomar_[0-9a-f]{6,16}(?:@\w+)?\s*$"),
+            on_command_retomar_short,
+        )
+    )
     # Texto E commands desconhecidos vão pro mesmo handler: os
     # CommandHandler acima já consumem /nova /contexto /salvar /retomar;
     # qualquer outro `/comando` cai aqui e é repassado ao agente Claude,

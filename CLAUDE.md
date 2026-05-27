@@ -182,14 +182,15 @@ Princípio: **isolamento total entre topics**. Detector roda independente em cad
 
 ### Comandos novos no menu
 
-- `/conversas [filtro]` — lista conversations do topic atual com botões clicáveis (InlineKeyboard).
+- `/conversas_topico [filtro]` — lista conversations do topic atual com links clicáveis `/retomar_<id>` em texto.
 - `/conversas_global [filtro]` — todas as conversations, categorizadas, priorizando topic atual.
 - `/conversa <termo>` — busca substring no title; match único = abre direto, múltiplos = mostra lista.
 - `/renomear <novo nome>` — renomeia conversation ativa.
+- `/retomar_<id_curto>` — gerado dinamicamente nas listagens (8 chars do UUID). Clique no link em texto pra reabrir.
 
 Linguagem natural sempre funciona em paralelo: "Hal, lista as conversas", "Hal, retoma aquela conversa sobre X", etc.
 
-Sem parâmetro (clique mobile no menu): cada comando tem comportamento gracioso — `/conversa` cai pra `/conversas`, `/renomear` orienta a passar nome.
+Sem parâmetro (clique mobile no menu): cada comando tem comportamento gracioso — `/conversa` cai pra `/conversas_topico`, `/renomear` orienta a passar nome.
 
 ### Comandos existentes ajustados
 
