@@ -29,6 +29,8 @@ class Config:
     compact_threshold_messages: int
     anthropic_api_key: Optional[str]
     assemblyai_api_key: Optional[str]
+    openai_api_key: Optional[str]
+    chat_manager_enabled: bool
 
 
 def _require(name: str) -> str:
@@ -80,4 +82,12 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         compact_threshold_messages=int(os.getenv("COMPACT_THRESHOLD_MESSAGES", "40")),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or None,
+        openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+        chat_manager_enabled=_parse_bool(os.getenv("CHAT_MANAGER_ENABLED")),
     )
+
+
+def _parse_bool(raw: Optional[str]) -> bool:
+    if not raw:
+        return False
+    return raw.strip().lower() in ("1", "true", "yes", "on", "enabled")

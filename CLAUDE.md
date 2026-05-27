@@ -147,49 +147,81 @@ Quando precisar criar arquivo temporário (plano de implementação, dump de an�
 
 Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.
 
-## Handoff entre canais Claude — convenção provisória
+## Chat Manager — persistência inteligente de conversa por assunto
 
-Trabalho não-trivial no Kobe acontece por múltiplos canais Claude: **Hal** (você, no Telegram), **Claude Code direto** (no VS Code via SSH no VPS, ou local), e **plugin Coder dispatched** (sessão remota lançada pelo plugin). Contexto vivo entre canais hoje é frágil — começar num e continuar noutro exige arqueologia.
+Implementado em 2026-05-27 (v0.14.0). Substitui parcialmente a convenção de handoff provisória anterior (que ainda vale pra **Claude Code direto** e **plugin Coder dispatched** — só a parte do Hal foi reestruturada).
 
-**Convenção provisória (até o Chat Manager substituir a parte do Hal):** toda sessão Claude trabalhando em algo não-trivial mantém um **handoff doc vivo** em `<cwd>/.local/handoff.md`. Próxima instância (do mesmo canal ou outro) lê esse arquivo e tem o contexto pra continuar sem arqueologia.
+### Conceito
 
-### Quem mantém handoff (e como)
+Sessão deixa de ser **bloco temporal arbitrário** e ganha uma camada acima — **conversation**, que agrupa sessions por **assunto/tema**. Hierarquia:
 
-- **Claude Code direto (qualquer instância)** — Mantém `<cwd>/.local/handoff.md` na cwd da sessão. Atualiza **a cada marco do checklist** do plano (item virou `[x]` ou `[!]`). Não a cada turno, não a cada arquivo tocado — só nos marcos.
-- **Plugin Coder dispatched** — Mesma regra. A sessão remota tem cwd próprio; mantém handoff lá.
-- **Hal (você)** — Convenção provisória até Chat Manager:
-  - **Comando explícito `/handoff` do operador** — destila a conversa atual em handoff doc.
-  - **Automático no `/nova`** — antes de arquivar a sessão atual, destila pra `<kobe_home>/.local/handoff.md` (ou path equivalente pra Hal — fora de cwd de projeto).
-  - **Sem heurística automática por enquanto** — não tente adivinhar "isso aqui é importante"; siga só os 2 gatilhos acima.
+```
+Topic (forum do Telegram) → Conversation (tema longevo) → Session (bloco temporal) → Message
+```
 
-### Formato — 8 campos
+- **Topic** = container fixo do Telegram (Dev Kobe, Olimpo, Pessoal, etc.). Não atravessa.
+- **Conversation** = tema longevo dentro de um topic. Pode dormir e ser retomada após dias. Tem `title`, `slug`, `centroid_embedding`, status (`active`/`dormant`/`archived`).
+- **Session** = bloco contínuo de atividade dentro de uma conversation. Ainda compacta em 40 msgs.
+- **Message** = mensagem individual. Ganhou coluna `embedding` (vector 1536).
 
-1. **Objetivo** — texto literal que disparou a sessão
-2. **Plano aprovado** — embed ou link pro `.local/plano-*.md`
-3. **Estado do checklist** — `[x]` feito / `[~]` em-andamento / `[ ]` pendente / `[!]` bloqueado, com timestamp BRT
-4. **Decisões tomadas** — append com timestamp + razão curta
-5. **Arquivos tocados** — paths absolutos
-6. **Bloqueios / Aguardando** — o que está pendente em outro lado (input do operador, fila externa, etc.)
-7. **Próximo passo** — o que faria agora se acordasse
-8. **Como retomar** — instrução literal pra próxima instância ("abra X, lê Y, roda Z")
+### Mecânica do detector (`bot/conversation_detector.py`)
 
-Protótipo concreto da convenção em qualquer `.local/handoff.md` existente na árvore.
+A cada msg do operador:
+1. Calcula embedding via OpenAI text-embedding-3-small (≈$0.01/mês).
+2. Compara com `centroid_embedding` das conversations do **topic atual** (não atravessa).
+3. Decide:
+   - similaridade com ativa ≥ 0.55 → **continue** (mesma conversation)
+   - dormant casa melhor → **reopen**
+   - similaridade ≤ 0.35 → **open_new** (cria conversation nova)
+   - zona cinza → **GPT-4o-mini** judge decide (não consome cota do plano Max)
+4. Atualiza `centroid_embedding` com EMA (peso 0.1) re-normalizada L2.
+5. Arquiva session ativa e cria nova vinculada à conversation alvo quando há transição.
+6. Manda aviso curto pro operador no caso de reopen/open_new.
 
-### Lifecycle
+Princípio: **isolamento total entre topics**. Detector roda independente em cada topic — trocar de assunto em Dev Kobe nunca afeta Olimpo, Pessoal, Private, etc.
 
-- Novo handoff doc nasce limpo quando o operador faz `/nova` no Hal (ou equivalente em outros canais — abertura explícita de nova sessão).
-- Antigo move pra `<cwd>/.local/handoffs/arquivados/<data>-<slug>.md` antes de ser sobrescrito.
-- Se 2 sessões coexistem na mesma cwd (ex: Coder dispatched + Claude Code direto), cada uma mantém arquivo próprio com session-id; `.local/handoff.md` na raiz aponta pra ativa via marker file ou symlink.
+### Comandos novos no menu
 
-### Por que essa regra existe
+- `/conversas [filtro]` — lista conversations do topic atual com botões clicáveis (InlineKeyboard).
+- `/conversas_global [filtro]` — todas as conversations, categorizadas, priorizando topic atual.
+- `/conversa <termo>` — busca substring no title; match único = abre direto, múltiplos = mostra lista.
+- `/renomear <novo nome>` — renomeia conversation ativa.
 
-Bug histórico (2026-05-26): Felipe começou trabalho no Telegram com Hal, foi pro VS Code com Claude Code direto, e perdeu contexto. Sessões antigas existiam no banco do Supabase mas não vinham pro prompt da próxima sessão. Resultado: arqueologia recorrente. Convenção acima é a forma mais leve de resolver — regra de prompt, sem código novo, sem tooling.
+Linguagem natural sempre funciona em paralelo: "Hal, lista as conversas", "Hal, retoma aquela conversa sobre X", etc.
 
-### Limitações conhecidas
+Sem parâmetro (clique mobile no menu): cada comando tem comportamento gracioso — `/conversa` cai pra `/conversas`, `/renomear` orienta a passar nome.
 
-- **Não automatizado** — depende da disciplina do Claude da vez seguir a regra. Vai variar entre versões.
-- **Hal não tem código suporte ainda** — `/handoff` como comando do Telegram **ainda não está implementado** no `bot/telegram_handler.py`. Hoje, se o operador mandar `/handoff`, cai como msg livre — o Hal precisa entender pelo texto. Próximo passo: implementar handler explícito.
-- **Substituição planejada pelo Chat Manager** — quando o card `1ddbeaf7-8e41-4b9a-8b12-bb023592f5cb` no Flow ("Chat Manager — persistência inteligente de conversa por assunto") for implementado, a parte do Hal será reestruturada — sessão = conversa por assunto, transição automática vira o gatilho natural. Esta convenção provisória continua valendo até lá.
+### Comandos existentes ajustados
+
+- `/nova` — fecha conversation ativa (marca dormant) **e** arquiva session.
+- `/contexto` — mostra também conversation ativa, idade, qty sessions arquivadas.
+- `/retomar <termo>` — continua buscando `saved_artifacts`. Sugere `/conversa` como fallback quando nada encontrado.
+
+### Convenção de slug
+
+- Chat privado (chat_id > 0, DM 1-on-1) → slug `private`, current_name "Private".
+- "Geral" do supergrupo (chat_id < 0, sem thread_id) → slug `general`, current_name "General".
+- Forum topics → slugify do `current_name` (Dev Kobe → `dev-kobe`, etc.).
+
+UNIQUE composta em `topics(telegram_chat_id, telegram_thread_id)` garante que privado e geral do supergrupo coexistam.
+
+### Feature flag
+
+`CHAT_MANAGER_ENABLED=true|false` no `.env`. Default false (rollback trivial: flag off + restart). Quando off, sistema atual (sessions ortogonais) roda intacto.
+
+### O que sobrou da convenção de handoff provisória
+
+A parte do **Hal** (item 3 da seção antiga) **deixa de ser provisória** — Chat Manager substituiu. Mas Claude Code direto e plugin Coder dispatched **ainda mantêm `<cwd>/.local/handoff.md`** com o formato de 8 campos descrito anteriormente. Essa parte segue valendo enquanto não houver convenção equivalente pra essas instâncias.
+
+### Limitações conhecidas (v0.14.0)
+
+- **Thresholds não calibrados em uso real ainda** (HIGH=0.55, LOW=0.35, CLUSTER=0.55). Validação real é Fase 8 do plano.
+- **Busca de `/conversa <termo>` é substring no title**, não semântica. Pra busca por tema, use linguagem natural ("Hal, retoma a conversa sobre X").
+- **`/renomear` sem parâmetro não pergunta** (MVP simples; estado conversacional fica pra v2).
+- **`messages.embedding` é populado mas não indexado** (sem ivfflat) — só vale se busca em escala virar caso de uso.
+
+Plano completo de design: `~/.claude/plans/claude-sobre-o-chat-noble-dawn.md`.
+Card original: `1ddbeaf7-8e41-4b9a-8b12-bb023592f5cb` no Flow.
 
 ## Helpers do Kobe pra plugins emitirem progresso e anexos
 

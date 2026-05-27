@@ -127,3 +127,76 @@ CREATE TABLE IF NOT EXISTS saved_artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_topic ON saved_artifacts(topic_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embedding
   ON saved_artifacts USING ivfflat (embedding vector_cosine_ops);
+
+-- ============================================================================
+-- Chat Manager — Fase 1 (2026-05-27)
+-- Vide ~/.claude/plans/claude-sobre-o-chat-noble-dawn.md pro design completo.
+--
+-- Mudanças:
+-- 1. UNIQUE composta em topics (chat_id, thread_id) — separa chat privado
+--    do "Geral" do supergrupo (ambos teriam thread_id=0 antes, colidiam).
+-- 2. Tabela conversations — tema longevo aninhando sessions.
+-- 3. FK sessions.conversation_id (nullable enquanto Chat Manager está sendo
+--    construído; classificação retroativa vai popular).
+-- 4. Coluna messages.embedding (pro detector calcular similaridade).
+-- 5. Renomear current_name do topic privado existente de 'Geral' → 'Private'
+--    pra alinhar com o slug 'private' do `get_topic_slug` atualizado.
+-- ============================================================================
+
+-- 1. Topics: UNIQUE composta
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'topics_telegram_thread_id_key'
+  ) THEN
+    ALTER TABLE topics DROP CONSTRAINT topics_telegram_thread_id_key;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'topics_chat_thread_unique'
+  ) THEN
+    ALTER TABLE topics
+      ADD CONSTRAINT topics_chat_thread_unique
+      UNIQUE (telegram_chat_id, telegram_thread_id);
+  END IF;
+END $$;
+
+-- 2. Tabela conversations
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  topic_id UUID NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'dormant', 'archived')),
+  centroid_embedding VECTOR(1536),
+  parent_conversation_id UUID REFERENCES conversations(id),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  archived_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_topic_status
+  ON conversations(topic_id, status);
+CREATE INDEX IF NOT EXISTS idx_conversations_embedding
+  ON conversations USING ivfflat (centroid_embedding vector_cosine_ops);
+
+-- 3. sessions.conversation_id (nullable até classificação retroativa popular)
+ALTER TABLE sessions
+  ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(id);
+CREATE INDEX IF NOT EXISTS idx_sessions_conversation
+  ON sessions(conversation_id);
+
+-- 4. messages.embedding (sem índice ivfflat aqui — só populamos pra detector,
+--    busca direta em messages não é caso de uso atual)
+ALTER TABLE messages
+  ADD COLUMN IF NOT EXISTS embedding VECTOR(1536);
+
+-- 5. Renomear topic privado existente: 'Geral' → 'Private'
+UPDATE topics
+   SET current_name = 'Private'
+ WHERE telegram_thread_id = 0
+   AND telegram_chat_id > 0
+   AND current_name IN ('Geral', 'geral');

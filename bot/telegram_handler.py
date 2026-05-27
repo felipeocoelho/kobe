@@ -51,13 +51,16 @@ from bot.topic_manager import (
     count_messages,
     ensure_active_session,
     ensure_topic,
+    get_active_conversation_for_topic,
     get_active_session,
+    get_conversation_session_summaries,
     get_recent_messages,
     get_topic_slug,
     insert_message,
     load_topic_context,
     mark_welcomed,
     rename_topic_dir,
+    set_session_conversation,
     set_topic_name,
     set_topic_status,
     slugify,
@@ -327,6 +330,46 @@ async def _handle_user_text(
     topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session_id = ensure_active_session(db, topic_id)
 
+    # Chat Manager (Fase 4): se habilitado, detector decide a qual
+    # conversation a msg pertence. Trocar de conversation = arquiva
+    # session atual e cria nova vinculada à conversation alvo.
+    # Falha aqui é silenciosa — bot continua funcionando como antes.
+    conversation_active_info: Optional[dict] = None
+    conversation_summaries: list[dict] = []
+    if config.chat_manager_enabled:
+        try:
+            from bot.conversation_detector import detect as _detect_conversation
+            detector_result = await _detect_conversation(
+                db, topic_id=topic_id, message_text=text
+            )
+            if detector_result.action != "continue":
+                # Arquiva session atual + cria nova vinculada à conversation alvo
+                archive_active_session(db, topic_id, status="archived")
+                session_id = ensure_active_session(db, topic_id)
+            set_session_conversation(db, session_id, detector_result.conversation_id)
+            conversation_active_info = get_active_conversation_for_topic(db, topic_id)
+            conversation_summaries = get_conversation_session_summaries(
+                db, detector_result.conversation_id, except_session_id=session_id
+            )
+            if detector_result.notice_text:
+                try:
+                    await message.reply_text(
+                        detector_result.notice_text, message_thread_id=thread_id
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "chat_manager: falha enviando notice", exc_info=True
+                    )
+            logger.info(
+                "chat_manager action=%s conv_id=%s confidence=%.3f judge=%s",
+                detector_result.action,
+                detector_result.conversation_id[:8],
+                detector_result.confidence,
+                detector_result.judge_used,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("chat_manager falhou; seguindo sem ele")
+
     # Compactação (v0.12): se sessão atingiu limite de mensagens, gera
     # summary via Claude, arquiva como 'compacted' e abre nova com o
     # summary como role='system' inicial. Falha aqui é silenciosa —
@@ -423,6 +466,8 @@ async def _handle_user_text(
         plugins_section=render_plugins_section(plugins),
         topic_context=topic_context,
         missao_ativa_info=missao_ativa_info,
+        conversation_active=conversation_active_info,
+        conversation_summaries=conversation_summaries,
     )
 
     bot = message.get_bot()
@@ -664,15 +709,36 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         topic_slug = get_topic_slug(db, message.chat_id, thread_id)
 
         archived = archive_active_session(db, topic_id)
-        if archived is None:
+
+        # Chat Manager (Fase 7): se habilitado, também marca conversation
+        # ativa do topic como dormant. Próxima msg dispara detector que
+        # pode reabrir a antiga (se tema continua) ou criar nova.
+        conv_dormant_title: Optional[str] = None
+        if config.chat_manager_enabled:
+            active_conv = get_active_conversation_for_topic(db, topic_id)
+            if active_conv is not None:
+                db.table("conversations").update({"status": "dormant"}).eq(
+                    "id", active_conv["id"]
+                ).execute()
+                conv_dormant_title = active_conv["title"]
+
+        if archived is None and conv_dormant_title is None:
             reply = "Nada pra arquivar aqui — já está zerado. Manda a próxima."
+        elif conv_dormant_title:
+            reply = (
+                f"Sessão arquivada e conversa '{conv_dormant_title}' fechada. "
+                "Próxima mensagem abre nova conversation/session."
+            )
         else:
-            reply = "Sessão arquivada. Memória ativa zerada — a próxima mensagem abre uma nova."
+            reply = (
+                "Sessão arquivada. Memória ativa zerada — a próxima mensagem abre uma nova."
+            )
         logger.info(
-            "/nova user=%s %s archived=%s",
+            "/nova user=%s %s archived=%s conv_closed=%s",
             update.effective_user.id if update.effective_user else None,
             _topic_label(thread_id),
             archived,
+            conv_dormant_title or "-",
         )
         await message.reply_text(reply, message_thread_id=thread_id)
 
@@ -738,6 +804,25 @@ async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Tópico: {_topic_label(thread_id)}",
             f"Sessão ativa desde {started_at} — {total} mensagem(ns).",
         ]
+
+        # Chat Manager (Fase 7): se habilitado e há conversation ativa,
+        # inclui meta (título, idade, qty sessions arquivadas).
+        if config.chat_manager_enabled:
+            active_conv = get_active_conversation_for_topic(db, topic_id)
+            if active_conv is not None:
+                conv_started = (active_conv.get("started_at") or "")[:10]
+                arquivadas = get_conversation_session_summaries(
+                    db, active_conv["id"], except_session_id=session_id
+                )
+                lines.append("")
+                lines.append(
+                    f"Conversa: '{active_conv['title']}' (desde {conv_started}, "
+                    f"{len(arquivadas)} session(s) arquivada(s))"
+                )
+            else:
+                lines.append("")
+                lines.append("Sem conversa ativa ainda — próxima msg pode criar.")
+
         if snippets:
             lines.append("")
             lines.append("Últimas:")
@@ -1007,9 +1092,16 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     query = " ".join(context.args).strip() if context.args else ""
     if not query:
+        hint = "Manda o termo: /retomar <palavra-chave>"
+        if config.chat_manager_enabled:
+            hint += (
+                "\n\nDica: pra retomar uma *conversa* (não um artefato salvo), "
+                "use /conversa <termo> ou /conversas pra listar com botões."
+            )
         await message.reply_text(
-            "Manda o termo: /retomar <palavra-chave do que você salvou>",
+            hint,
             message_thread_id=message.message_thread_id,
+            parse_mode="Markdown",
         )
         return
 
@@ -1018,9 +1110,16 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with lock:
         results = search_artifacts(db, query)
         if not results:
+            text = f"Não achei nenhum *artefato salvo* com “{query}”."
+            if config.chat_manager_enabled:
+                text += (
+                    f" Tenta /conversa {query} pra buscar entre conversas, "
+                    f"ou /conversas-global pra ver todas."
+                )
             await message.reply_text(
-                f"Não achei nada com “{query}”.",
+                text,
                 message_thread_id=thread_id,
+                parse_mode="Markdown",
             )
             return
 

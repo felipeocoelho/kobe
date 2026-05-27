@@ -64,17 +64,15 @@ def get_topic_slug(
     """Slug do tópico (kebab-case de `topics.current_name`) ou None se
     ainda não está no banco / o nome não foi capturado.
 
-    `thread_id=None` (mensagem no chat raiz do supergrupo) devolve
-    "general" — alinhado com a convenção do filesystem.
+    Sem thread_id real (None ou GENERAL_THREAD_ID=0), distingue:
+    - `"private"` quando chat_id > 0 (DM 1-on-1 com o operador)
+    - `"general"` quando chat_id < 0 (topic raiz do supergrupo)
 
-    `current_name` é populado pelos handlers `forum_topic_created` e
-    `forum_topic_edited`. Tópicos pré-existentes (criados antes da v0.10)
-    ficam com `current_name=NULL` até o operador renomear o tópico no
-    Telegram (qualquer rename dispara `forum_topic_edited`) ou rodar
-    UPDATE manual no Supabase. Quando vazio, logamos WARN pra dar pista.
+    Forum topics retornam `slugify(current_name)`. Tópicos pré-v0.10 ficam
+    com `current_name=NULL` até o operador renomear ou rodar UPDATE manual.
     """
-    if thread_id is None:
-        return "general"
+    if thread_id is None or thread_id == GENERAL_THREAD_ID:
+        return "private" if chat_id > 0 else "general"
     res = (
         db.table("topics")
         .select("current_name")
@@ -344,25 +342,49 @@ def ensure_topic(
     db: Client,
     thread_id: Optional[int],
     *,
-    chat_id: Optional[int] = None,
+    chat_id: int,
 ) -> str:
     """Get-or-create do topic. Retorna o `topics.id` (UUID em str).
 
-    `chat_id` (id do supergrupo do Telegram) é atualizado sempre que
-    fornecido — viabiliza mensagens proativas (snapshot-de-continuação)
-    no tópico correto após restart.
+    `chat_id` agora é obrigatório (Fase 1 do Chat Manager) — a UNIQUE
+    composta `(telegram_chat_id, telegram_thread_id)` permite topics
+    diferentes com `thread_id=0` separados por chat: o chat privado do
+    operador (`chat_id > 0`) e o "Geral" do supergrupo (`chat_id < 0`).
+
+    Topics sem thread_id real recebem `current_name` automático no
+    primeiro insert: "Private" pra DM, "General" pra Geral do supergrupo.
+    Forum topics têm current_name preenchido depois por `set_topic_name`
+    (handler de `forum_topic_created` / `forum_topic_edited`).
     """
     key = _normalize_thread_id(thread_id)
-    payload: dict = {"telegram_thread_id": key, "last_activity_at": _now_iso()}
-    if chat_id is not None:
-        payload["telegram_chat_id"] = chat_id
-    res = (
+
+    existing = (
         db.table("topics")
-        .upsert(payload, on_conflict="telegram_thread_id")
+        .select("id, current_name")
+        .eq("telegram_chat_id", chat_id)
+        .eq("telegram_thread_id", key)
+        .limit(1)
         .execute()
     )
+    if existing.data:
+        row = existing.data[0]
+        db.table("topics").update({"last_activity_at": _now_iso()}).eq(
+            "id", row["id"]
+        ).execute()
+        return row["id"]
+
+    payload: dict = {
+        "telegram_thread_id": key,
+        "telegram_chat_id": chat_id,
+        "last_activity_at": _now_iso(),
+    }
+    if key == GENERAL_THREAD_ID:
+        payload["current_name"] = "Private" if chat_id > 0 else "General"
+    res = db.table("topics").insert(payload).execute()
     if not res.data:
-        raise RuntimeError(f"upsert de topic não retornou linha (thread_id={key})")
+        raise RuntimeError(
+            f"insert de topic não retornou linha (chat_id={chat_id}, thread_id={key})"
+        )
     return res.data[0]["id"]
 
 
@@ -507,3 +529,69 @@ def insert_message(
     if not res.data:
         raise RuntimeError("insert de message não retornou linha")
     return res.data[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# Helpers do Chat Manager (Fase 4)
+# ---------------------------------------------------------------------------
+
+
+def set_session_conversation(
+    db: Client, session_id: str, conversation_id: str
+) -> None:
+    """Vincula `sessions.conversation_id`. Idempotente — pode chamar várias
+    vezes com mesmo valor sem efeito. Usado pelo detector quando decide
+    a qual conversation a session corrente pertence.
+    """
+    db.table("sessions").update({"conversation_id": conversation_id}).eq(
+        "id", session_id
+    ).execute()
+
+
+def get_conversation_session_summaries(
+    db: Client, conversation_id: str, *, except_session_id: Optional[str] = None
+) -> list[dict]:
+    """Retorna lista de `{title_hint, started_at, ended_at, summary}` das
+    sessions arquivadas/compacted de uma conversation, ordenadas pela
+    data de início. Usado por `build_prompt` pra carregar cronologia
+    comprimida (vide Caso 3 da analogia com Claude Desktop, no plano
+    do Chat Manager).
+
+    `except_session_id` (opcional): exclui a session ativa atual da
+    lista — útil porque o histórico bruto dela já vai pro prompt via
+    `get_recent_messages`.
+
+    Filtra fora sessions sem summary (não compactadas ainda, baixo valor
+    como cronologia).
+    """
+    q = (
+        db.table("sessions")
+        .select("id, started_at, ended_at, summary, status")
+        .eq("conversation_id", conversation_id)
+        .in_("status", ["archived", "compacted"])
+        .not_.is_("summary", "null")
+        .order("started_at", desc=False)
+    )
+    res = q.execute()
+    rows = res.data or []
+    if except_session_id:
+        rows = [r for r in rows if r["id"] != except_session_id]
+    return rows
+
+
+def get_active_conversation_for_topic(
+    db: Client, topic_id: str
+) -> Optional[dict]:
+    """Retorna a conversation ativa (status='active') do topic, ou None.
+    Inclui `id`, `title`, `slug`, `started_at`. Usado pra montar header
+    do prompt e pra `/contexto`.
+    """
+    res = (
+        db.table("conversations")
+        .select("id, title, slug, started_at")
+        .eq("topic_id", topic_id)
+        .eq("status", "active")
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None

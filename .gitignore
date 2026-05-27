@@ -1,7 +1,11 @@
 # Variáveis de ambiente (NUNCA commitar)
 .env
-.env.local
+.env.*
+!.env.example
 *.env.backup
+
+# Backups de dados — dumps locais do banco, NUNCA versionados.
+backups/
 
 # Python
 __pycache__/

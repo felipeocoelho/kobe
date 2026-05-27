@@ -312,6 +312,8 @@ def build_prompt(
     plugins_section: str = "",
     topic_context: Optional[str] = None,
     missao_ativa_info: Optional[str] = None,
+    conversation_active: Optional[dict] = None,
+    conversation_summaries: Optional[list[dict]] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
@@ -352,6 +354,27 @@ def build_prompt(
         parts.append("[Contexto do tópico]")
         parts.append(topic_context)
 
+    # Chat Manager (Fase 4): header da conversation ativa + cronologia
+    # comprimida das sessions arquivadas dessa conversation. Só aparece
+    # quando o caller passa esses dados (CHAT_MANAGER_ENABLED).
+    if conversation_active:
+        parts.append("")
+        title = conversation_active.get("title") or "(sem título)"
+        started = conversation_active.get("started_at") or ""
+        n_summaries = len(conversation_summaries or [])
+        parts.append(
+            f"[Conversation ativa: '{title}' — iniciada em {started[:10]}, "
+            f"{n_summaries} session(s) arquivada(s)]"
+        )
+
+    if conversation_summaries:
+        parts.append("")
+        parts.append("[Cronologia comprimida (sessions arquivadas desta conversation)]")
+        for i, s in enumerate(conversation_summaries, 1):
+            started = (s.get("started_at") or "")[:10]
+            summary = (s.get("summary") or "").strip()
+            parts.append(f"— Session {i} ({started}): {summary}")
+
     history_lines: list[str] = []
     for msg in history:
         role = msg.get("role", "?")
@@ -359,7 +382,7 @@ def build_prompt(
         history_lines.append(f"{role}: {content}")
     if history_lines:
         parts.append("")
-        parts.append("[Histórico recente da sessão]")
+        parts.append("[Histórico recente da sessão ativa]")
         parts.extend(history_lines)
 
     parts.append("")
