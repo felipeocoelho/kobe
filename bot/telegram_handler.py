@@ -11,6 +11,7 @@ import asyncio
 import io
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -54,7 +55,9 @@ from bot.topic_manager import (
     get_active_conversation_for_topic,
     get_active_session,
     get_conversation_session_summaries,
+    get_last_assistant_message_meta_of_session,
     get_recent_messages,
+    pop_awaiting_slash_response,
     get_topic_slug,
     insert_message,
     load_topic_context,
@@ -132,6 +135,23 @@ def _get_topic_lock(chat_id: int, thread_id: Optional[int]) -> asyncio.Lock:
         lock = asyncio.Lock()
         _topic_locks[key] = lock
     return lock
+
+
+def _parse_iso_dt(raw: Optional[str]) -> Optional[datetime]:
+    """Parse de timestamp ISO 8601 vindo do Supabase em datetime aware.
+
+    Supabase retorna `created_at` como string ISO ('2026-05-28T14:30:00+00:00').
+    `fromisoformat` lida com isso direto. Retorna None se entrada inválida.
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
@@ -334,39 +354,84 @@ async def _handle_user_text(
     # conversation a msg pertence. Trocar de conversation = arquiva
     # session atual e cria nova vinculada à conversation alvo.
     # Falha aqui é silenciosa — bot continua funcionando como antes.
+    #
+    # Bypass de slash command (Fase 2 do fix 2026-05-28): se um plugin
+    # tinha sinalizado "aguardando resposta" via kobe-await-response,
+    # forçamos continue antes mesmo de chamar o detector. Cobre o caso
+    # /flow_lista → operador escolhe projeto, onde a resposta pode ser
+    # genérica ("Kobe") e o detector erraria.
     conversation_active_info: Optional[dict] = None
     conversation_summaries: list[dict] = []
     if config.chat_manager_enabled:
         try:
-            from bot.conversation_detector import detect as _detect_conversation
-            detector_result = await _detect_conversation(
-                db, topic_id=topic_id, message_text=text
-            )
-            if detector_result.action != "continue":
-                # Arquiva session atual + cria nova vinculada à conversation alvo
-                archive_active_session(db, topic_id, status="archived")
-                session_id = ensure_active_session(db, topic_id)
-            set_session_conversation(db, session_id, detector_result.conversation_id)
-            conversation_active_info = get_active_conversation_for_topic(db, topic_id)
-            conversation_summaries = get_conversation_session_summaries(
-                db, detector_result.conversation_id, except_session_id=session_id
-            )
-            if detector_result.notice_text:
-                try:
-                    await message.reply_text(
-                        detector_result.notice_text, message_thread_id=thread_id
+            awaiting = pop_awaiting_slash_response(db, session_id)
+            bypassed_via_awaiting = False
+            if awaiting is not None:
+                active_conv = get_active_conversation_for_topic(db, topic_id)
+                if active_conv is not None:
+                    set_session_conversation(db, session_id, active_conv["id"])
+                    conversation_active_info = active_conv
+                    conversation_summaries = get_conversation_session_summaries(
+                        db, active_conv["id"], except_session_id=session_id
                     )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "chat_manager: falha enviando notice", exc_info=True
+                    logger.info(
+                        "awaiting_slash_bypass plugin=%s conv=%s",
+                        awaiting.get("plugin", "?"),
+                        active_conv["id"][:8],
                     )
-            logger.info(
-                "chat_manager action=%s conv_id=%s confidence=%.3f judge=%s",
-                detector_result.action,
-                detector_result.conversation_id[:8],
-                detector_result.confidence,
-                detector_result.judge_used,
-            )
+                    bypassed_via_awaiting = True
+                # else: sem conv ativa, raro. Cai pro detector normal abaixo.
+
+            if not bypassed_via_awaiting:
+                from bot.conversation_detector import detect as _detect_conversation
+                # Carrega o turno anterior do agente pra detector enxergar
+                # réplica direta (msg do operador reagindo à resposta sem
+                # repetir o termo do tema). Sem isso, detector erra (bug
+                # corrigido em 2026-05-27 — caso real do Fluminense).
+                # Timestamp habilita o bypass "resposta curta a pergunta
+                # direta" (2026-05-28).
+                last_agent_meta = get_last_assistant_message_meta_of_session(
+                    db, session_id
+                )
+                last_agent_content = (
+                    last_agent_meta["content"] if last_agent_meta else None
+                )
+                last_agent_at_raw = (
+                    last_agent_meta["created_at"] if last_agent_meta else None
+                )
+                last_agent_at = _parse_iso_dt(last_agent_at_raw)
+                detector_result = await _detect_conversation(
+                    db,
+                    topic_id=topic_id,
+                    message_text=text,
+                    last_agent_message=last_agent_content,
+                    last_agent_at=last_agent_at,
+                )
+                if detector_result.action != "continue":
+                    # Arquiva session atual + cria nova vinculada à conversation alvo
+                    archive_active_session(db, topic_id, status="archived")
+                    session_id = ensure_active_session(db, topic_id)
+                set_session_conversation(db, session_id, detector_result.conversation_id)
+                conversation_active_info = get_active_conversation_for_topic(db, topic_id)
+                conversation_summaries = get_conversation_session_summaries(
+                    db, detector_result.conversation_id, except_session_id=session_id
+                )
+                if detector_result.notice_text:
+                    try:
+                        await message.reply_text(
+                            detector_result.notice_text, message_thread_id=thread_id
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "chat_manager: falha enviando notice", exc_info=True
+                        )
+                logger.info(
+                    "chat_manager action=%s conv_id=%s confidence=%.3f judge=%s",
+                    detector_result.action,
+                    detector_result.conversation_id[:8],
+                    detector_result.confidence,
+                    detector_result.judge_used,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("chat_manager falhou; seguindo sem ele")
 

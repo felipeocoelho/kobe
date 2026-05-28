@@ -49,8 +49,17 @@ logger = logging.getLogger("kobe.conversation_detector")
 # - Textos do mesmo tema típico: ~0.65-0.85
 # - Textos de temas diferentes: ~0.15-0.30
 # Margem em torno de 0.50 fica como zona cinza onde LLM decide.
+#
+# Recalibração 2026-05-27 (junto com fix do detector cego a réplica
+# direta): LOW baixado de 0.35 → 0.20. Msgs curtas/vagas do mesmo
+# tema têm embedding fraco (sim ~0.25-0.35 contra o centroide), e
+# antes caíam direto em open_new sem judge. Com LOW=0.20, expandem
+# pra zona cinza, judge decide com base nos turnos da conv. Trocas
+# reais de tema (sim ~0.10-0.25) ainda podem cair na zona cinza,
+# mas o judge as identifica corretamente como tema novo. Custo
+# extra estimado: +~$0.10/mês em chamadas adicionais ao judge.
 THRESHOLD_HIGH = 0.55
-THRESHOLD_LOW = 0.35
+THRESHOLD_LOW = 0.20
 
 # Peso da mensagem nova ao atualizar centroide (EMA).
 # 0.1 = conversation "esquece" devagar; vetor preserva tema dominante.
@@ -59,6 +68,17 @@ CENTROID_WEIGHT_NEW = 0.10
 # Modelo do LLM judge. GPT-4o-mini é barato (~$0.15/1M tokens input)
 # e rápido (~500ms-1s por call). Suficiente pra binary classification.
 JUDGE_MODEL = "gpt-4o-mini"
+
+# Bypass "resposta curta a pergunta direta" (2026-05-28). Quando o
+# operador responde de forma muito curta a uma pergunta direta do
+# agente (msg termina em '?'), o detector pula a análise de
+# embedding/judge e força 'continue' na conversation ativa. Cobre
+# caso real: agente "Flow ou Kobe?" → operador "Kobe". Sem o bypass,
+# msg curta tem embedding genérico, judge decide cego e errava (visto
+# em 2026-05-28).
+SHORT_REPLY_MAX_CHARS = 60
+SHORT_REPLY_MAX_WORDS = 6
+SHORT_REPLY_MAX_AGE_SECONDS = 900  # 15 min
 
 
 Action = Literal["continue", "reopen", "open_new"]
@@ -93,17 +113,52 @@ async def detect(
     *,
     topic_id: str,
     message_text: str,
+    last_agent_message: Optional[str] = None,
+    last_agent_at: Optional[datetime] = None,
 ) -> DetectorResult:
     """Decide a qual conversation a mensagem nova pertence.
 
-    Carrega conversations do topic, calcula similarity, decide ação,
-    atualiza estado no banco. Idempotente — chamadas duplicadas com a
-    mesma msg dão mesmo resultado (cache de embedding + estado no banco).
+    Calcula DOIS embeddings (separação deliberada — ver design):
+
+    - `decision_vec`: contextual (turno anterior do agente + msg nova
+      do operador, se houver). Usado SÓ pra comparar contra centroides
+      e decidir continue/reopen/open_new. Sem ele, msg do tipo "ué,
+      como assim?" vira vetor genérico e o detector erra (não enxerga
+      que é réplica direta à resposta anterior do agente).
+
+    - `msg_vec`: limpo (só msg do operador). Usado pra atualizar
+      centroide via EMA e como vetor inicial de conversation nova.
+      Centroide representa "tema da conversation"; misturar resposta
+      do agente nela contaminaria o tema com padrão de diálogo (ex:
+      conversation de futebol cuja resposta foi "não tenho acesso"
+      passaria a representar "limitação técnica" em vez de futebol).
+
+    `last_agent_at` (opcional): timestamp da última msg do agente.
+    Quando presente, habilita o bypass de "resposta curta a pergunta
+    direta" — se a msg do operador é curta e a última fala do agente
+    terminou em '?', força continue na ativa sem chamar embedding/
+    judge. Cobre o caso real `/flow_lista` → 'Kobe' onde o judge
+    decidia cego e errava.
+
+    Idempotente — chamadas duplicadas com mesma msg+contexto dão
+    mesmo resultado (cache de embedding + estado no banco).
     """
     if not message_text.strip():
         raise ValueError("message_text vazia")
 
     msg_vec = await embed(message_text)
+
+    # Contextual só se houver turno anterior. Trunca a resposta do
+    # agente em 2000 chars pra não estourar o limite de tokens do
+    # embedding (8k tokens) com respostas longas — 2000 chars cobre
+    # ~500 tokens de cauda, suficiente pra capturar o "fim" da
+    # resposta que é o que o operador comenta normalmente.
+    if last_agent_message and last_agent_message.strip():
+        agent_tail = last_agent_message.strip()[-2000:]
+        context_text = f"Agente: {agent_tail}\nOperador: {message_text}"
+        decision_vec = await embed(context_text)
+    else:
+        decision_vec = msg_vec
 
     active, dormants = _load_topic_conversations(db, topic_id)
 
@@ -117,10 +172,36 @@ async def detect(
             notice_text=None,  # 1ª conversation do topic — sem aviso, é o esperado
         )
 
-    sim_active = (
-        cosine_similarity(active["centroid_embedding"], msg_vec) if active else None
-    )
-    best_dormant, sim_dormant = _best_dormant_match(dormants, msg_vec)
+    # Caso 1.5: bypass "resposta curta a pergunta direta". Roda antes
+    # da análise de similaridade — quando dispara, ignora embedding/
+    # judge e força continue. Só faz sentido se há ativa pra continuar.
+    if active is not None and _is_short_reply_to_question(
+        message_text=message_text,
+        last_agent_message=last_agent_message,
+        last_agent_at=last_agent_at,
+        now=datetime.now(timezone.utc),
+    ):
+        logger.info(
+            "short_reply_bypass conv_id=%s msg_len=%d agent_tail=%r",
+            active["id"][:8],
+            len(message_text.strip()),
+            (last_agent_message or "")[-80:],
+        )
+        await _do_continue(db, active, msg_vec, sim=1.0)
+        return DetectorResult(
+            action="continue",
+            conversation_id=active["id"],
+            confidence=1.0,
+            notice_text=None,
+        )
+
+    # Similaridade: usa max(contextual, isolada). O contextual cobre o
+    # caso "réplica direta" (msg que reage ao agente sem repetir o tema),
+    # mas pode DILUIR o sinal quando a msg isolada já carrega o tema e
+    # a resposta anterior do agente era genérica/negativa ("não sei",
+    # "vou checar"). Tomar o max preserva o melhor dos dois sem regressão.
+    sim_active = _best_sim(active, decision_vec, msg_vec) if active else None
+    best_dormant, sim_dormant = _best_dormant_match(dormants, decision_vec, msg_vec)
 
     # Caso 2: continua na ativa (alta confiança)
     if sim_active is not None and sim_active >= THRESHOLD_HIGH:
@@ -145,6 +226,7 @@ async def detect(
         # talvez o LLM judge decida que é retomada
         if sim_dormant is not None and sim_dormant > THRESHOLD_LOW:
             decision = await _judge_with_llm(
+                db=db,
                 active=active,
                 dormant=best_dormant,
                 message_text=message_text,
@@ -157,6 +239,7 @@ async def detect(
 
     # Caso 5: zona cinza com ativa → LLM judge decide
     decision = await _judge_with_llm(
+        db=db,
         active=active,
         dormant=best_dormant,
         message_text=message_text,
@@ -224,20 +307,100 @@ def _parse_vector(s: str) -> list[float]:
     return [float(x) for x in s.split(",") if x.strip()]
 
 
+def _best_sim(
+    conv: dict, decision_vec: list[float], msg_vec: list[float]
+) -> float:
+    """max(sim contextual, sim isolada) contra o centroide da conv.
+
+    Tomar o max é deliberado: cada vetor cobre um padrão de msg
+    diferente — contextual ajuda quando msg isolada é genérica
+    (réplica direta); isolada ajuda quando a resposta anterior do
+    agente dilui o sinal. O vetor que melhor case vence; o outro
+    fica como "second opinion" e não atrapalha.
+    """
+    centroid = conv["centroid_embedding"]
+    sim_ctx = cosine_similarity(centroid, decision_vec)
+    if decision_vec is msg_vec:
+        return sim_ctx
+    sim_iso = cosine_similarity(centroid, msg_vec)
+    return max(sim_ctx, sim_iso)
+
+
 def _best_dormant_match(
-    dormants: list[dict], msg_vec: list[float]
+    dormants: list[dict], decision_vec: list[float], msg_vec: list[float]
 ) -> tuple[Optional[dict], Optional[float]]:
-    """Conversation dormant com maior similarity, e o valor. (None, None) se vazio."""
+    """Conversation dormant com maior similarity, e o valor. (None, None) se vazio.
+
+    Usa `_best_sim` por conv — cada candidata é avaliada com
+    max(contextual, isolada) contra seu próprio centroide.
+    """
     if not dormants:
         return None, None
     best: Optional[dict] = None
     best_sim: float = -2.0
     for c in dormants:
-        sim = cosine_similarity(c["centroid_embedding"], msg_vec)
+        sim = _best_sim(c, decision_vec, msg_vec)
         if sim > best_sim:
             best_sim = sim
             best = c
     return best, best_sim
+
+
+# ---------------------------------------------------------------------------
+# Bypass "resposta curta a pergunta direta"
+# ---------------------------------------------------------------------------
+
+
+_TRAILING_PUNCT = set('!.…)"\' \t\r\n')
+
+
+def _is_short_reply_to_question(
+    *,
+    message_text: str,
+    last_agent_message: Optional[str],
+    last_agent_at: Optional[datetime],
+    now: datetime,
+) -> bool:
+    """True se a msg parece resposta curta a uma pergunta recente do agente.
+
+    Critérios (todos devem bater):
+
+    1. msg do operador é "curta" — ≤60 chars OU ≤6 palavras (usa OR
+       deliberado: 'pode mandar sim por favor' tem 5 palavras mas 25
+       chars, ambas formas curtas devem disparar).
+    2. última fala do agente, depois de stripar pontuação repetida
+       final ("?!", "??", "?...") termina em '?'.
+    3. fala do agente é recente — ≤15 min desde agora.
+
+    Quando todas batem, o detector ignora embedding/judge e força
+    continue na conversation ativa. Trade-off documentado:
+
+    - Cobre: respostas legítimas curtas a perguntas (~95% dos casos).
+    - Falsos positivos aceitos: msg curta que MUDA de tema logo após
+      pergunta do agente (ex: 'Bom dia' depois de '...quer listar?').
+      Frequência baixa em uso real. Operador pode `/nova` se quiser
+      separar.
+    """
+    if not last_agent_message or last_agent_at is None:
+        return False
+    trimmed = message_text.strip()
+    if not trimmed:
+        return False
+    n_chars = len(trimmed)
+    n_words = len(trimmed.split())
+    if n_chars > SHORT_REPLY_MAX_CHARS and n_words > SHORT_REPLY_MAX_WORDS:
+        return False
+
+    tail = last_agent_message.rstrip()
+    while tail and tail[-1] in _TRAILING_PUNCT and tail[-1] != "?":
+        tail = tail[:-1]
+    if not tail.endswith("?"):
+        return False
+
+    age = (now - last_agent_at).total_seconds()
+    if age < 0 or age > SHORT_REPLY_MAX_AGE_SECONDS:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +522,27 @@ async def _do_open_new(
 # ---------------------------------------------------------------------------
 
 
+def _format_turns(turns: list[dict], *, max_chars_per_turn: int = 300) -> str:
+    """Formata turnos pra exibição compacta no prompt do judge.
+
+    Cada turno vira uma linha "- Operador: ..." ou "- Agente: ...",
+    truncada a `max_chars_per_turn` chars pra não estourar o contexto
+    do GPT-4o-mini com turnos longos. Roles desconhecidos viram a
+    string crua do role (defensivo — não devemos ter outras roles
+    além de 'user'/'assistant', mas system msgs de compactação podem
+    aparecer e devem ser visíveis).
+    """
+    lines = []
+    for t in turns:
+        role = t.get("role", "?")
+        label = {"user": "Operador", "assistant": "Agente"}.get(role, role)
+        content = (t.get("content") or "").strip().replace("\n", " ")
+        if len(content) > max_chars_per_turn:
+            content = content[:max_chars_per_turn].rstrip() + "…"
+        lines.append(f"   - {label}: {content}")
+    return "\n".join(lines)
+
+
 _openai_client: Optional[AsyncOpenAI] = None
 
 
@@ -374,36 +558,77 @@ def _get_openai() -> AsyncOpenAI:
 
 async def _judge_with_llm(
     *,
+    db: Optional[Client] = None,
     active: Optional[dict],
     dormant: Optional[dict],
     message_text: str,
 ) -> Action:
     """Pergunta ao GPT-4o-mini: continue, reopen, ou open_new?
 
-    Recebe o contexto curto da conversation ativa e do melhor dormant
-    candidato (se houver), e a mensagem nova. Retorna ação como string.
-    Em caso de erro/incerteza, retorna 'open_new' (default conservador).
+    Recebe título e ÚLTIMOS TURNOS da conversation ativa e do melhor
+    dormant candidato (se houver), além da mensagem nova. Carregar
+    turnos (não só título) é crítico: sem isso, o judge decide cego
+    e tende a errar quando a msg nova é réplica direta à resposta
+    anterior do agente (caso típico: "ué, como assim?" sem repetir
+    o tema). Retorna ação como string. Em caso de erro/incerteza,
+    retorna 'open_new' (default conservador).
     """
     if active is None and dormant is None:
         return "open_new"
 
+    # Importação local pra evitar ciclo (topic_manager importa daqui
+    # eventualmente em testes; manter import lazy é defensivo).
+    from bot.topic_manager import get_last_messages_of_conversation
+
+    active_turns = (
+        get_last_messages_of_conversation(db, active["id"], limit=6)
+        if (db is not None and active is not None) else []
+    )
+    dormant_turns = (
+        get_last_messages_of_conversation(db, dormant["id"], limit=6)
+        if (db is not None and dormant is not None) else []
+    )
+
     options = []
     if active is not None:
-        options.append(f"A) Continuar conversa atual: '{active['title']}'")
+        block = f"A) CONTINUAR a conversa atual ('{active['title']}'):"
+        if active_turns:
+            block += "\n" + _format_turns(active_turns)
+        else:
+            block += "\n   (sem turnos registrados)"
+        options.append(block)
     if dormant is not None:
-        options.append(
-            f"B) Retomar conversa anterior dormente: '{dormant['title']}'"
+        block = (
+            f"B) RETOMAR uma conversa dormente anterior "
+            f"('{dormant['title']}'):"
         )
-    options.append("C) Abrir conversa nova com tema diferente")
-    options_text = "\n".join(options)
+        if dormant_turns:
+            block += "\n" + _format_turns(dormant_turns)
+        else:
+            block += "\n   (sem turnos registrados)"
+        options.append(block)
+    options.append("C) ABRIR conversa nova (tema totalmente diferente)")
+    options_text = "\n\n".join(options)
 
-    user_prompt = f"""Mensagem nova do usuário:
+    user_prompt = f"""Decida onde essa mensagem nova do usuário melhor encaixa.
+
+Mensagem nova:
 \"\"\"
 {message_text[:1500]}
 \"\"\"
 
-Decida em qual conversa essa mensagem encaixa melhor. Opções:
+Opções:
+
 {options_text}
+
+REGRAS:
+- Se a mensagem é uma pergunta de follow-up, esclarecimento, reação
+  ao agente, ou continuação natural de um dos diálogos acima →
+  escolha A ou B, mesmo que ela use palavras diferentes do tema.
+- Só escolha C se o assunto é GENUINAMENTE NOVO, sem ligação alguma
+  com o que foi conversado.
+- Em caso de dúvida, prefira continuar/retomar (A ou B) — é mais
+  comum o usuário seguir o assunto do que mudar abruptamente.
 
 Responda APENAS com a letra (A, B ou C). Nada mais."""
 
@@ -415,7 +640,9 @@ Responda APENAS com a letra (A, B ou C). Nada mais."""
                     "role": "system",
                     "content": (
                         "Você classifica mensagens em conversas existentes "
-                        "ou novas. Responda apenas com A, B ou C."
+                        "ou novas. Prefira continuação (A/B) a abertura nova "
+                        "(C) quando houver qualquer ligação temática ou de "
+                        "diálogo. Responda apenas com A, B ou C."
                     ),
                 },
                 {"role": "user", "content": user_prompt},

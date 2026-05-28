@@ -595,3 +595,123 @@ def get_active_conversation_for_topic(
         .execute()
     )
     return res.data[0] if res.data else None
+
+
+def get_last_assistant_message_of_session(
+    db: Client, session_id: str
+) -> Optional[str]:
+    """Última mensagem com role='assistant' da session, ou None.
+
+    Usado pelo Chat Manager pra montar embedding contextual
+    (turno anterior + msg nova) quando decide a qual conversation a
+    msg pertence. Sem isso, msg que é réplica direta à resposta do
+    agente vira "vetor genérico" e o detector erra.
+    """
+    meta = get_last_assistant_message_meta_of_session(db, session_id)
+    return meta["content"] if meta else None
+
+
+def pop_awaiting_slash_response(
+    db: Client, session_id: str
+) -> Optional[dict]:
+    """Lê `sessions.awaiting_slash_response`, limpa, e devolve o conteúdo.
+
+    Retorna `None` quando:
+    - session sem o estado preenchido;
+    - estado expirado (`asked_at + expires_in_seconds` no passado).
+
+    Em qualquer caso (presente válido OU expirado), o campo é zerado
+    no banco após a leitura — bypass é one-shot. Atomicidade aceitável
+    sem transação: o handler do bot serializa msgs por topic via lock,
+    então não há corrida com outra msg do mesmo operador.
+    """
+    res = (
+        db.table("sessions")
+        .select("awaiting_slash_response")
+        .eq("id", session_id)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return None
+    state = res.data[0].get("awaiting_slash_response")
+    if state is None:
+        return None
+    # Limpa sempre — quem fez pergunta consome o estado nessa msg.
+    db.table("sessions").update({"awaiting_slash_response": None}).eq(
+        "id", session_id
+    ).execute()
+    asked_at_raw = state.get("asked_at")
+    ttl_seconds = state.get("expires_in_seconds", 600)
+    if not asked_at_raw or not isinstance(ttl_seconds, (int, float)):
+        return None
+    try:
+        asked_at = datetime.fromisoformat(asked_at_raw.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if asked_at.tzinfo is None:
+        asked_at = asked_at.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - asked_at).total_seconds()
+    if age < 0 or age > ttl_seconds:
+        return None
+    return state
+
+
+def get_last_assistant_message_meta_of_session(
+    db: Client, session_id: str
+) -> Optional[dict]:
+    """Última msg `assistant` da session com `{content, created_at}`.
+
+    Variante do helper acima usada pelo bypass de "resposta curta a
+    pergunta direta" do detector. Precisa do timestamp pra avaliar a
+    janela de relevância (msg recente = mais provável de ser resposta
+    à última pergunta do agente).
+    """
+    res = (
+        db.table("messages")
+        .select("content, created_at")
+        .eq("session_id", session_id)
+        .eq("role", "assistant")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return None
+    row = res.data[0]
+    return {
+        "content": row.get("content"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def get_last_messages_of_conversation(
+    db: Client, conversation_id: str, limit: int = 6
+) -> list[dict]:
+    """Últimas N msgs da conversation (atravessa sessions vinculadas).
+
+    Retorna `[{role, content, created_at}]` em ordem cronológica
+    crescente (mais antiga primeiro). Usado pelo judge GPT-4o-mini
+    no Chat Manager pra decidir com base em diálogo, não só rótulo.
+
+    Faz 2 queries (Supabase API não tem JOIN nativo): primeiro busca
+    ids das sessions da conversation, depois msgs com `session_id in (...)`.
+    """
+    sessions = (
+        db.table("sessions")
+        .select("id")
+        .eq("conversation_id", conversation_id)
+        .execute()
+    )
+    session_ids = [s["id"] for s in (sessions.data or [])]
+    if not session_ids:
+        return []
+    res = (
+        db.table("messages")
+        .select("role, content, created_at")
+        .in_("session_id", session_ids)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return list(reversed(res.data or []))

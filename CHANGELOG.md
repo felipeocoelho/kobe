@@ -2,6 +2,36 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.4] — 2026-05-28
+
+### Corrigido — Chat Manager: resposta curta a pergunta direta
+
+Dois bypasses complementares no detector resolvem o caso em que o
+operador respondia curto a uma pergunta direta do agente (ex:
+`/flow_lista` → "Flow ou Kobe?" → operador "Kobe") e o Chat Manager
+abria conversation nova indevidamente, perdendo contexto.
+
+- **Heurística msg curta** (`bot/conversation_detector.py`): quando a
+  msg do operador é curta (≤60 chars OU ≤6 palavras), a última fala
+  do agente termina em `?` (ignorando pontuação composta como `?!`),
+  o gap é ≤15 min e existe conversation ativa, força `continue` sem
+  chamar embedding/judge. Centroide é atualizado com `msg_vec` limpo.
+- **State explícito de slash command** (`sessions.awaiting_slash_response`
+  JSONB): plugin declara via novo helper `bot/bin/kobe-await-response`
+  que aguarda resposta. Handler lê e limpa a coluna antes do detector
+  rodar; força `continue` com TTL default 600s. Cobre caso onde o
+  bypass heurístico falharia (resposta longa mas conexa).
+- **Plugin Flow**: agent definition atualizada em repo separado pra
+  chamar `kobe-await-response` em perguntas interativas.
+- **Migration 002**: `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS
+  awaiting_slash_response JSONB` (idempotente).
+- **Testes**: 18/18 unit+smoke em `.local/teste-fix-resposta-curta.py`
+  + 5/5 não-regressão dos cenários do fix de 2026-05-27.
+
+Inclui também os dois fixes estruturais de 2026-05-27 que não tinham
+chegado a `main` (estavam em `feature/apolo`): embedding contextual
+no detector + judge GPT-4o-mini recebendo turnos da candidata.
+
 ## [0.13.0] — 2026-05-23
 
 ### Adicionado — Sistema de Missões + Keyko

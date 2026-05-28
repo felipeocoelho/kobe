@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""kobe-await-response — sinaliza que plugin aguarda resposta do operador.
+
+Uso:
+    kobe-await-response [--plugin NAME] [--ttl SECONDS] "<pergunta>"
+
+Quando um plugin (Flow, Coder, etc.) faz uma pergunta interativa
+durante um slash command e espera resposta, chama este helper antes
+de retornar. O Kobe grava o estado em `sessions.awaiting_slash_response`
+— a PRÓXIMA msg do operador (dentro do TTL, default 600s) é tratada
+como continuação da conversation atual, mesmo se curta ou de tema
+aparentemente desconexo, sem passar pelo Chat Manager.
+
+Resolve `chat_id+thread_id → topic → session ativa` via Supabase
+(service role do `.env` do Kobe). Idempotente — chamadas repetidas
+sobrescrevem o estado anterior (caso comum: plugin reformula pergunta).
+
+Envs injetadas pelo bot:
+    KOBE_CHAT_ID     chat do Telegram
+    KOBE_THREAD_ID   (opcional) forum topic; vazio = "general" (sentinela 0)
+
+Lidas do .env de KOBE_HOME:
+    SUPABASE_URL, SUPABASE_KEY
+
+Sai 0 em sucesso, !=0 em falha (mensagem em stderr). Plugins devem
+considerar falha como nice-to-have ausente, não bloqueante.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+_BOT_PARENT = Path(__file__).resolve().parent.parent.parent
+if str(_BOT_PARENT) not in sys.path:
+    sys.path.insert(0, str(_BOT_PARENT))
+
+
+GENERAL_THREAD_ID = 0
+DEFAULT_TTL_SECONDS = 600  # 10 min — alinhado ao SHORT_REPLY_MAX_AGE_SECONDS + folga
+
+
+def _resolve_envs() -> tuple[str, int, int]:
+    """Lê env do .env do KOBE_HOME e ENVs injetados pelo claude_runner."""
+    from dotenv import load_dotenv
+
+    kobe_home_raw = os.environ.get("KOBE_HOME")
+    if kobe_home_raw:
+        load_dotenv(Path(kobe_home_raw).expanduser() / ".env")
+    else:
+        # Fallback: cwd. Caso o helper seja chamado fora do bot.
+        load_dotenv()
+
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+    supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
+    chat_id_raw = os.environ.get("KOBE_CHAT_ID", "").strip()
+    thread_id_raw = os.environ.get("KOBE_THREAD_ID", "").strip()
+
+    if not supabase_url or not supabase_key:
+        raise SystemExit(
+            "kobe-await-response: SUPABASE_URL/SUPABASE_KEY ausentes no .env."
+        )
+    if not chat_id_raw:
+        raise SystemExit(
+            "kobe-await-response: KOBE_CHAT_ID ausente (chame a partir de um "
+            "agente do Kobe)."
+        )
+
+    try:
+        chat_id = int(chat_id_raw)
+    except ValueError as exc:
+        raise SystemExit(f"kobe-await-response: KOBE_CHAT_ID inválido: {exc}")
+
+    thread_id = GENERAL_THREAD_ID
+    if thread_id_raw:
+        try:
+            thread_id = int(thread_id_raw)
+        except ValueError as exc:
+            raise SystemExit(
+                f"kobe-await-response: KOBE_THREAD_ID inválido: {exc}"
+            )
+    return supabase_url, supabase_key, chat_id, thread_id
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="kobe-await-response")
+    parser.add_argument("--plugin", default=None, help="Nome do plugin que chamou")
+    parser.add_argument(
+        "--ttl",
+        type=int,
+        default=DEFAULT_TTL_SECONDS,
+        help=f"TTL em segundos (default {DEFAULT_TTL_SECONDS})",
+    )
+    parser.add_argument("question", help="Texto da pergunta ao operador")
+    args = parser.parse_args()
+
+    question = args.question.strip()
+    if not question:
+        print("kobe-await-response: pergunta vazia", file=sys.stderr)
+        return 2
+
+    try:
+        supabase_url, supabase_key, chat_id, thread_id = _resolve_envs()
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        from supabase import create_client
+    except ImportError:
+        print(
+            "kobe-await-response: pacote 'supabase' indisponível neste python",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = create_client(supabase_url, supabase_key)
+
+    # 1. Topic do (chat_id, thread_id). thread_id=0 é sentinela do general.
+    topic_res = (
+        client.table("topics")
+        .select("id")
+        .eq("telegram_chat_id", chat_id)
+        .eq("telegram_thread_id", thread_id)
+        .limit(1)
+        .execute()
+    )
+    if not topic_res.data:
+        print(
+            f"kobe-await-response: topic não encontrado chat={chat_id} "
+            f"thread={thread_id}",
+            file=sys.stderr,
+        )
+        return 1
+    topic_id = topic_res.data[0]["id"]
+
+    # 2. Session ativa do topic.
+    sess_res = (
+        client.table("sessions")
+        .select("id")
+        .eq("topic_id", topic_id)
+        .eq("status", "active")
+        .limit(1)
+        .execute()
+    )
+    if not sess_res.data:
+        print(
+            f"kobe-await-response: nenhuma session ativa topic={topic_id}",
+            file=sys.stderr,
+        )
+        return 1
+    session_id = sess_res.data[0]["id"]
+
+    # 3. Grava o estado.
+    state = {
+        "plugin": args.plugin or "unknown",
+        "question": question[:1000],  # cap defensivo — pergunta longa não ajuda
+        "asked_at": datetime.now(timezone.utc).isoformat(),
+        "expires_in_seconds": max(60, min(args.ttl, 3600)),
+    }
+    client.table("sessions").update(
+        {"awaiting_slash_response": state}
+    ).eq("id", session_id).execute()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
