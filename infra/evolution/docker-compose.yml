@@ -1,0 +1,98 @@
+# Evolution API v2.3.7 — backend do plugin Apolo
+# ============================================================================
+# Última versão Apache 2.0 antes da Evolution introduzir LICENSE_REQUIRED
+# (v2.4.x exige ativação por email/license). v2.3.7 segue 100% FOSS, baseada
+# em Baileys 7.0.0-rc.9 (protocolo nativo WA, sem Puppeteer/wa-js).
+#
+# Substituiu WPPConnect Server em 2026-05-29 — WPPConnect caía com
+# `disconnectedMobile` em 5-6min por incompatibilidade wa-js × WhatsApp Web
+# atual. Baileys da Evolution não tem esse bug (família diferente).
+#
+# Stack:
+#   - evolution-api    :  REST self-hosted (porta 127.0.0.1:8080 loopback)
+#   - evolution-postgres: Postgres dedicado (instances, contacts cache, etc)
+#   - evolution-redis  :  cache de sessão / pubsub
+#
+# Sobe:
+#   cd $KOBE_HOME/infra/evolution/
+#   sg docker -c "docker compose up -d"
+#
+# Iniciar instância (depois de up):
+#   APIKEY=$(grep AUTHENTICATION_API_KEY .env | cut -d= -f2)
+#   # cria instância (proxy + webhook setados no payload)
+#   curl -X POST http://127.0.0.1:8080/instance/create \
+#     -H "apikey: $APIKEY" -H "Content-Type: application/json" -d '{...}'
+#   # gera QR
+#   curl -H "apikey: $APIKEY" http://127.0.0.1:8080/instance/connect/kobe
+#
+# Runbook completo: docs/migracao-evolution.md
+#
+# Derrubar:
+#   sg docker -c "docker compose down"       # mantém volumes (sessão)
+#   sg docker -c "docker compose down -v"    # apaga sessão pareada
+# ============================================================================
+
+services:
+  evolution-api:
+    container_name: evolution-api
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    depends_on:
+      evolution-postgres:
+        condition: service_healthy
+      evolution-redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"   # ⚠️ loopback only
+    # Pra Evolution conseguir POSTar webhooks no apolo-webhook do host
+    # (rodando em 127.0.0.1:8787 do host), precisa de host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    volumes:
+      - evolution-instances:/evolution/instances
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  evolution-postgres:
+    container_name: evolution-postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: evolution_db
+    volumes:
+      - evolution-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  evolution-redis:
+    container_name: evolution-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - evolution-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  evolution-instances:
+    name: evolution-instances
+  evolution-postgres-data:
+    name: evolution-postgres-data
+  evolution-redis-data:
+    name: evolution-redis-data

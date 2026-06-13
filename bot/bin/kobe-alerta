@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""kobe-alerta — cria alertas e emite eventos de confirmação.
+
+É o helper que o agente (Hal) usa pra operar o Sistema de Alertas. A
+CRIAÇÃO é conversacional: o operador pede em linguagem natural, o Hal
+traduz pros campos e chama este helper — que faz a parte determinística
+(monta o YAML, calcula o 1º disparo, persiste). A confirmação ("já
+marquei") também passa por aqui: vira evento no `<id>.eventos.jsonl`, e a
+AlertasSource aplica a transição. Código é dono do estado.
+
+Subcomandos:
+
+  kobe-alerta criar           # lê JSON da definição no stdin, imprime o id
+  kobe-alerta confirmar <id> [texto]
+  kobe-alerta dispensar <id> [texto]
+  kobe-alerta listar [--all]
+
+JSON de `criar` (stdin):
+
+  {
+    "titulo": "Marcar barbearia",
+    "instrucao": "Lembrar de marcar horário na barbearia esta semana.",
+    "agenda": {"abertura": "0 8 * * 1", "cobranca": "0 8 * * 2,3", "limite": "0 9 * * 3"},
+    "aguarda_confirmacao": true,
+    "confirmacao": {"fecha_quando": "Felipe disser que marcou"},
+    "canal": {"tipo": "whatsapp", "destino": "+55 31 9XXXX-4566"},
+    "limites": {"disparos_dia": 2}
+  }
+
+  Mínimo (one-shot):  {"titulo": "...", "instrucao": "...", "agenda": {"quando": "2026-05-31T15:00:00-03:00"}}
+  Mínimo (recorrente):{"titulo": "...", "instrucao": "...", "agenda": {"abertura": "0 7 * * *"}}
+
+chat_id/thread_id vêm das envs KOBE_CHAT_ID/KOBE_THREAD_ID (injetadas
+pelo bot quando o Hal roda). KOBE_HOME idem.
+
+Sai 0 em sucesso, !=0 em erro (mensagem no stderr).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Re-exec sob o venv do Kobe (que tem supabase/PyYAML/croniter) se ainda
+# não estamos. Detecção via sys.prefix — NÃO via sys.executable: o python
+# do venv é symlink pro interpretador base, então resolver o caminho do
+# binário colapsa os dois e quebraria a detecção.
+_ROOT = Path(__file__).resolve().parent.parent.parent
+_VENV_DIR = _ROOT / ".venv"
+_VENV_PY = _VENV_DIR / "bin" / "python"
+if _VENV_PY.is_file() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
+    os.execv(str(_VENV_PY), [str(_VENV_PY), __file__, *sys.argv[1:]])
+
+import json  # noqa: E402
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from bot.alertas import (  # noqa: E402
+    Agenda,
+    Alerta,
+    Canal,
+    Confirmacao,
+    Estado,
+    Limites,
+    StatusAlerta,
+    TipoEvento,
+    storage,
+)
+from bot.alertas import scheduler  # noqa: E402
+from croniter import croniter  # noqa: E402
+from datetime import datetime  # noqa: E402
+
+
+def _kobe_home() -> Path:
+    home = os.environ.get("KOBE_HOME", "").strip()
+    return Path(home) if home else _ROOT
+
+
+def _erro(msg: str) -> int:
+    print(f"kobe-alerta: {msg}", file=sys.stderr)
+    return 1
+
+
+def _validar_cron(expr: str, campo: str) -> None:
+    if not croniter.is_valid(expr):
+        raise ValueError(f"cron inválido em agenda.{campo}: {expr!r}")
+
+
+def cmd_criar() -> int:
+    home = _kobe_home()
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return _erro("criar: esperava JSON da definição no stdin")
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _erro(f"criar: JSON inválido — {exc}")
+
+    titulo = (spec.get("titulo") or "").strip()
+    instrucao = (spec.get("instrucao") or "").strip()
+    if not titulo or not instrucao:
+        return _erro("criar: 'titulo' e 'instrucao' são obrigatórios")
+
+    agenda_raw = spec.get("agenda") or {}
+    agenda = Agenda(
+        abertura=agenda_raw.get("abertura"),
+        quando=agenda_raw.get("quando"),
+        cobranca=agenda_raw.get("cobranca"),
+        limite=agenda_raw.get("limite"),
+    )
+    aguarda = bool(spec.get("aguarda_confirmacao", False))
+
+    # Validação de agendamento.
+    try:
+        if agenda.is_one_shot:
+            datetime.fromisoformat(agenda.quando)  # type: ignore[arg-type]
+        elif agenda.abertura:
+            _validar_cron(agenda.abertura, "abertura")
+            if agenda.cobranca:
+                _validar_cron(agenda.cobranca, "cobranca")
+            if agenda.limite:
+                _validar_cron(agenda.limite, "limite")
+        else:
+            return _erro("criar: agenda precisa de 'abertura' (cron) ou 'quando' (ISO)")
+    except ValueError as exc:
+        return _erro(f"criar: {exc}")
+
+    if aguarda and not agenda.abertura:
+        return _erro("criar: aguarda_confirmacao=true exige agenda.abertura (cron recorrente)")
+
+    confirmacao = None
+    if aguarda:
+        fecha = ((spec.get("confirmacao") or {}).get("fecha_quando") or "").strip()
+        if not fecha:
+            return _erro("criar: aguarda_confirmacao=true exige confirmacao.fecha_quando")
+        confirmacao = Confirmacao(fecha_quando=fecha)
+
+    canal_raw = spec.get("canal") or {}
+    canal_tipo = (canal_raw.get("tipo") or "telegram").strip()
+    if canal_tipo not in ("telegram", "whatsapp"):
+        return _erro(f"criar: canal.tipo inválido: {canal_tipo!r} (use telegram|whatsapp)")
+    canal = Canal(tipo=canal_tipo, destino=canal_raw.get("destino"))
+    if canal_tipo == "whatsapp" and not canal.destino:
+        return _erro("criar: canal whatsapp exige 'destino' (número)")
+
+    limites_raw = spec.get("limites") or {}
+    limites = Limites(disparos_dia=int(limites_raw.get("disparos_dia", 3)))
+
+    try:
+        chat_id = int(os.environ.get("KOBE_CHAT_ID", "0"))
+    except ValueError:
+        chat_id = 0
+    thread_env = os.environ.get("KOBE_THREAD_ID", "").strip()
+    thread_id = int(thread_env) if thread_env else None
+    if not chat_id:
+        return _erro("criar: KOBE_CHAT_ID ausente (rode a partir de um agente do Kobe)")
+
+    alerta_id = storage.gerar_id(home, titulo)
+    agora = storage.now_iso()
+    alerta = Alerta(
+        id=alerta_id,
+        titulo=titulo,
+        instrucao=instrucao,
+        criado_em=agora,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        agenda=agenda,
+        aguarda_confirmacao=aguarda,
+        confirmacao=confirmacao,
+        canal=canal,
+        limites=limites,
+        estado=Estado(status=StatusAlerta.ATIVO.value, criado_em=agora),
+    )
+
+    # Calcula o 1º disparo já na criação (a source também recalcularia, mas
+    # gravar agora deixa o YAML completo pro operador inspecionar).
+    prox = scheduler.calcular_proximo(
+        alerta, desde=datetime.now(scheduler.OPERATOR_TZ)
+    )
+    if prox is not None:
+        alerta.estado.proximo_disparo = prox.quando.isoformat(timespec="seconds")
+        alerta.estado.proxima_acao = prox.acao.value
+
+    storage.salvar(home, alerta)
+    storage.append_evento(
+        home, alerta_id, TipoEvento.CRIADO,
+        dados={"titulo": titulo, "chat_id": chat_id, "thread_id": thread_id},
+    )
+    # Saída pro Hal: id + quando dispara, pra ele confirmar ao operador.
+    print(json.dumps({
+        "id": alerta_id,
+        "proximo_disparo": alerta.estado.proximo_disparo,
+        "proxima_acao": alerta.estado.proxima_acao,
+    }, ensure_ascii=False))
+    return 0
+
+
+def _emitir(tipo: TipoEvento) -> int:
+    home = _kobe_home()
+    if len(sys.argv) < 3:
+        return _erro(f"{tipo.value}: uso: kobe-alerta {tipo.value} <id> [texto]")
+    alerta_id = sys.argv[2].strip()
+    texto = " ".join(sys.argv[3:]).strip()
+    if not storage.existe(home, alerta_id):
+        return _erro(f"{tipo.value}: alerta {alerta_id!r} não existe")
+    dados = {"texto": texto} if texto else {}
+    storage.append_evento(home, alerta_id, tipo, dados=dados)
+    print(f"ok: evento {tipo.value} registrado em {alerta_id}")
+    return 0
+
+
+def cmd_listar() -> int:
+    home = _kobe_home()
+    todos = "--all" in sys.argv
+    alertas = storage.listar_alertas(home, apenas_vivos=not todos)
+    out = [
+        {
+            "id": a.id, "titulo": a.titulo, "status": a.estado.status,
+            "proximo_disparo": a.estado.proximo_disparo,
+            "chat_id": a.chat_id, "thread_id": a.thread_id,
+        }
+        for a in alertas
+    ]
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 2
+    cmd = sys.argv[1]
+    if cmd == "criar":
+        return cmd_criar()
+    if cmd == "confirmar":
+        return _emitir(TipoEvento.CONFIRMADO)
+    if cmd == "dispensar":
+        return _emitir(TipoEvento.DISPENSADO)
+    if cmd == "listar":
+        return cmd_listar()
+    return _erro(f"subcomando desconhecido: {cmd!r} (criar|confirmar|dispensar|listar)")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -38,6 +39,38 @@ logger = logging.getLogger("kobe.plugins")
 PLUGINS_DIRNAME = "plugins"
 VISIBILITIES = ("public", "private")
 MANIFEST_NAME = "kobe-plugin.md"
+
+# Nome de capacidade (capability) e de verbo: slug enxuto e estável. Validamos
+# contra isto porque o nome vai virar chave de roteamento — caractere solto
+# (espaço, acento, barra) abriria porta pra colisão silenciosa ou injeção.
+_CAPABILITY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+@dataclass
+class ProvidedCapability:
+    """Uma capacidade que um plugin se anuncia capaz de PROVER.
+
+    `handler` é o executável (path absoluto, dentro da raiz do plugin) que a
+    switchboard chama quando alguém invoca esta capacidade. Agnóstico de
+    linguagem: recebe o verbo no argv e o payload no stdin, devolve JSON no
+    stdout (vide `bot/bin/kobe-integrations` e `docs/integrations/`).
+    """
+
+    capability: str
+    handler: Path  # absoluto, resolvido a partir da raiz do plugin
+
+
+@dataclass
+class CapabilityRoute:
+    """Entrada do índice `capacidade → quem provê`.
+
+    Identifica o provedor pelo nome do plugin e guarda o handler a invocar.
+    O consumidor NUNCA vê este objeto — só a switchboard usa pra rotear.
+    """
+
+    capability: str
+    provider: str  # nome do plugin provedor
+    handler: Path  # absoluto
 
 
 @dataclass
@@ -57,6 +90,11 @@ class Plugin:
     # Usado pelo bot pra registrar no menu do Telegram via set_my_commands.
     # Restrições do Telegram: name 1-32 chars [a-z0-9_], description ≤ 256.
     slash_commands: list[dict] = field(default_factory=list)
+    # Kobe Integrations: capacidades que o plugin PROVÊ e CONSOME. `provides`
+    # alimenta o índice de roteamento; `consumes` é só etiqueta declarativa na
+    # v1 (documenta a dependência; NÃO bloqueia o plugin de rodar sem parceiro).
+    provides: list[ProvidedCapability] = field(default_factory=list)
+    consumes: list[str] = field(default_factory=list)
 
 
 def discover_plugins(kobe_home: Path) -> list[Plugin]:
@@ -91,6 +129,133 @@ def discover_plugins(kobe_home: Path) -> list[Plugin]:
                 continue
             found.append(plugin)
     return found
+
+
+def _parse_integrations(
+    raw: object, name: str, plugin_dir: Path
+) -> tuple[list[ProvidedCapability], list[str]]:
+    """Parseia o bloco `integrations:` do frontmatter.
+
+    Trata a entrada como hostil: tudo que não casar com o formato esperado é
+    logado e descartado, sem derrubar a descoberta do plugin. Devolve a lista
+    de capacidades providas (com handler já resolvido pra path absoluto) e a
+    lista de capacidades consumidas (só nomes).
+    """
+    provides: list[ProvidedCapability] = []
+    consumes: list[str] = []
+    if not raw:
+        return provides, consumes
+    if not isinstance(raw, dict):
+        logger.warning("plugin %s: bloco 'integrations' não é mapa — ignorando", name)
+        return provides, consumes
+
+    plugin_root = plugin_dir.resolve()
+
+    raw_provides = raw.get("provides") or []
+    if not isinstance(raw_provides, list):
+        logger.warning("plugin %s: integrations.provides não é lista — ignorando", name)
+        raw_provides = []
+    seen_caps: set[str] = set()
+    for entry in raw_provides:
+        if not isinstance(entry, dict):
+            logger.warning("plugin %s: provides malformado: %r", name, entry)
+            continue
+        cap = (entry.get("capability") or "").strip().lower()
+        handler_rel = (entry.get("handler") or "").strip()
+        if not cap or not handler_rel:
+            logger.warning(
+                "plugin %s: provides faltando capability/handler: %r", name, entry
+            )
+            continue
+        if not _CAPABILITY_RE.match(cap):
+            logger.warning(
+                "plugin %s: capability inválida %r (use [a-z0-9-], minúsculo)", name, cap
+            )
+            continue
+        if cap in seen_caps:
+            logger.warning(
+                "plugin %s: capability %r declarada mais de uma vez no manifest "
+                "— mantendo a 1ª",
+                name,
+                cap,
+            )
+            continue
+        # Segurança: o handler tem que morar DENTRO da raiz do plugin. Um path
+        # tipo `../../bin/algo` (escape via manifest hostil) é rejeitado.
+        handler_abs = (plugin_dir / handler_rel).resolve()
+        try:
+            handler_abs.relative_to(plugin_root)
+        except ValueError:
+            logger.warning(
+                "plugin %s: handler %r escapa da raiz do plugin — ignorando",
+                name,
+                handler_rel,
+            )
+            continue
+        seen_caps.add(cap)
+        provides.append(ProvidedCapability(capability=cap, handler=handler_abs))
+
+    raw_consumes = raw.get("consumes") or []
+    if isinstance(raw_consumes, str):
+        raw_consumes = [raw_consumes]
+    if not isinstance(raw_consumes, list):
+        logger.warning("plugin %s: integrations.consumes não é lista — ignorando", name)
+        raw_consumes = []
+    for item in raw_consumes:
+        if not isinstance(item, str):
+            logger.warning("plugin %s: consumes malformado: %r", name, item)
+            continue
+        cap = item.strip().lower()
+        if not cap:
+            continue
+        if not _CAPABILITY_RE.match(cap):
+            logger.warning("plugin %s: consumes capability inválida %r", name, cap)
+            continue
+        if cap not in consumes:
+            consumes.append(cap)
+
+    return provides, consumes
+
+
+def build_capability_index(
+    plugins: list[Plugin],
+) -> tuple[dict[str, CapabilityRoute], dict[str, list[str]]]:
+    """Monta o índice `capacidade → provedor` a partir dos plugins descobertos.
+
+    Devolve `(index, conflicts)`:
+
+    - `index`: capacidade → `CapabilityRoute` (só as SEM ambiguidade).
+    - `conflicts`: capacidade → lista ordenada de plugins que a declaram, quando
+      há mais de um. Por decisão de design da v1, capacidade em conflito **fica
+      de fora do índice** (trava) e o sistema avisa via log — NUNCA escolhemos um
+      vencedor sozinhos. O operador resolve removendo a duplicidade.
+    """
+    by_cap: dict[str, list[CapabilityRoute]] = {}
+    for plugin in plugins:
+        for prov in plugin.provides:
+            by_cap.setdefault(prov.capability, []).append(
+                CapabilityRoute(
+                    capability=prov.capability,
+                    provider=plugin.name,
+                    handler=prov.handler,
+                )
+            )
+
+    index: dict[str, CapabilityRoute] = {}
+    conflicts: dict[str, list[str]] = {}
+    for cap, routes in by_cap.items():
+        if len(routes) == 1:
+            index[cap] = routes[0]
+            continue
+        providers = sorted(r.provider for r in routes)
+        conflicts[cap] = providers
+        logger.error(
+            "capacidade '%s' declarada por múltiplos plugins (%s) — TRAVADA até "
+            "o operador resolver a duplicidade (nenhum provedor é escolhido)",
+            cap,
+            ", ".join(providers),
+        )
+    return index, conflicts
 
 
 def _parse_manifest(manifest_path: Path, plugin_dir: Path, visibility: str) -> Plugin:
@@ -168,6 +333,10 @@ def _parse_manifest(manifest_path: Path, plugin_dir: Path, visibility: str) -> P
             cmd_desc = cmd_desc[:253] + "…"
         slash_commands.append({"name": cmd_name, "description": cmd_desc})
 
+    provides, consumes = _parse_integrations(
+        front.get("integrations"), name, plugin_dir
+    )
+
     return Plugin(
         name=name,
         visibility=visibility,
@@ -178,6 +347,8 @@ def _parse_manifest(manifest_path: Path, plugin_dir: Path, visibility: str) -> P
         agent_definition=agent_def_abs,
         dependencies=front.get("dependencies") or {},
         slash_commands=slash_commands,
+        provides=provides,
+        consumes=consumes,
     )
 
 

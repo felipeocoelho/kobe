@@ -200,3 +200,96 @@ UPDATE topics
  WHERE telegram_thread_id = 0
    AND telegram_chat_id > 0
    AND current_name IN ('Geral', 'geral');
+
+-- ============================================================================
+-- Apolo — WhatsApp + catálogo de contatos (2026-05-27)
+-- Vide ~/.claude/plans/claude-quero-conversar-com-iterative-sonnet.md pro design.
+--
+-- Tabelas:
+-- 1. contacts          — catálogo unificado (pessoa OU grupo WhatsApp).
+--                       Reaproveitável por outros canais (email, ClickUp etc.).
+-- 2. whatsapp_messages — histórico bruto de OUT/IN do plugin apolo.
+--
+-- Extensão pg_trgm é usada pra busca fuzzy por nome ("Pedro" → "Pedrão").
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- Tabela: contacts (core do Kobe, não amarrado ao plugin apolo)
+CREATE TABLE IF NOT EXISTS contacts (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tipo            TEXT NOT NULL CHECK (tipo IN ('pessoa', 'grupo')),
+  nome_canonico   TEXT NOT NULL,
+  telefone_e164   TEXT,                          -- pessoa: +5511XXX (E.164)
+  whatsapp_jid    TEXT,                          -- pessoa: <num>@s.whatsapp.net; grupo: <id>@g.us
+  email           TEXT,
+  contexto        TEXT,                          -- ex: "sócio do projeto X"
+  notas           TEXT,
+  aliases         TEXT[] NOT NULL DEFAULT '{}',  -- ["Pedrão", "Pedro Silva"]
+  origens         TEXT[] NOT NULL DEFAULT '{}',  -- ["google", "whatsapp_grupo_uso", "manual", ...]
+  oculto          BOOLEAN NOT NULL DEFAULT FALSE,-- peneira reversível (não-delete)
+  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,  -- campos extra por origem
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_telefone_uq
+  ON contacts(telefone_e164) WHERE telefone_e164 IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_jid_uq
+  ON contacts(whatsapp_jid) WHERE whatsapp_jid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS contacts_nome_trgm
+  ON contacts USING gin (nome_canonico gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS contacts_aliases_gin
+  ON contacts USING gin (aliases);
+CREATE INDEX IF NOT EXISTS contacts_tipo_oculto
+  ON contacts(tipo, oculto);
+
+-- Tabela: whatsapp_messages (histórico bruto do canal WhatsApp via Evolution)
+-- direcao='out' = Apolo enviou; direcao='in' = webhook recebeu.
+-- jid_chat sempre identifica o chat (pessoa OU grupo); jid_remetente difere em grupos.
+CREATE TABLE IF NOT EXISTS whatsapp_messages (
+  id              TEXT PRIMARY KEY,              -- message_id da Evolution (dedup natural)
+  jid_chat        TEXT NOT NULL,
+  jid_remetente   TEXT NOT NULL,
+  direcao         TEXT NOT NULL CHECK (direcao IN ('in', 'out')),
+  tipo            TEXT NOT NULL,                 -- text, image, audio, document, video, sticker, ...
+  conteudo        TEXT,                          -- texto livre (caption pra mídia)
+  midia_path      TEXT,                          -- path local relativo a user-data/whatsapp/midia/
+  timestamp       TIMESTAMPTZ NOT NULL,
+  lida            BOOLEAN NOT NULL DEFAULT FALSE,
+  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS wa_msgs_chat_ts
+  ON whatsapp_messages(jid_chat, timestamp DESC);
+CREATE INDEX IF NOT EXISTS wa_msgs_nao_lidas
+  ON whatsapp_messages(timestamp DESC) WHERE lida = FALSE;
+
+-- ============================================================================
+-- New Chat Manager — Fase 2 (2026-06-01)
+-- Detector síncrono → daemon classificador-bibliotecário. Conversation vira
+-- FAIXA derivada de mensagens. Vide migration 003 e o doc de arquitetura:
+--   user-data/knowledge/kobe/brainstorms/new-chat-manager-arquitetura.md
+-- Tudo aditivo; ocioso com CHAT_MANAGER_ENABLED=false.
+-- ============================================================================
+
+-- Faixa de mensagens: carimba conversation_id direto em messages.
+ALTER TABLE messages
+  ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(id);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+  ON messages(conversation_id);
+
+-- Índice ivfflat em messages.embedding (busca vetorial da camada fria).
+CREATE INDEX IF NOT EXISTS idx_messages_embedding
+  ON messages USING ivfflat (embedding vector_cosine_ops);
+
+-- Tag cloud (catálogo frio) — tag por beat fino dentro da conversation.
+CREATE TABLE IF NOT EXISTS conversation_tags (
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  tag TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 1.0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (conversation_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_tags_tag
+  ON conversation_tags(tag);

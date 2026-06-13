@@ -15,6 +15,7 @@ Isso permite um único caminho de upsert atômico via ON CONFLICT.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -32,6 +33,16 @@ GENERAL_THREAD_ID: int = 0
 # Acima disso truncamos e avisamos o operador via Telegram pra ele
 # reorganizar (mover algo pra saved_artifacts, dividir o KB, etc.).
 TOPIC_CONTEXT_CHAR_LIMIT = 20_000
+
+# SPR P1 #3: até este tamanho (chars) a pasta knowledge/ do tópico vai
+# INLINE no prompt (comportamento histórico). Acima disso, injetamos só um
+# ÍNDICE (caminhos + prévia) e o agente lê os arquivos sob demanda com Read
+# — KB grande inflava o prompt a cada turno e atrasava o primeiro token.
+# `prompt.md` (instruções do tópico) vai SEMPRE inline. Rollback: setar a
+# env bem alta e reiniciar o bot.
+TOPIC_KNOWLEDGE_INLINE_LIMIT = int(
+    os.getenv("TOPIC_KNOWLEDGE_INLINE_LIMIT", "8000")
+)
 
 # Sufixo interno que `load_topic_context` adiciona quando a saída foi
 # truncada. O caller no handler remove antes de injetar no prompt e
@@ -204,9 +215,27 @@ def rename_topic_dir(
     return "renamed"
 
 
-def load_topic_context(kobe_home: Path, slug: str) -> Optional[str]:
+def _first_line_preview(content: str, limit: int = 120) -> str:
+    """Primeira linha não-vazia do conteúdo, capada — pra índice da KB."""
+    for line in content.splitlines():
+        line = line.lstrip("# ").strip()
+        if line:
+            return line if len(line) <= limit else line[: limit - 1] + "…"
+    return "(sem prévia)"
+
+
+def load_topic_context(
+    kobe_home: Path, slug: str, *, knowledge_inline_limit: Optional[int] = None
+) -> Optional[str]:
     """Lê `user-data/topics/<slug>/prompt.md` + `knowledge/*` (ordem
     alfabética) e devolve string única pra injetar no prompt do Claude.
+
+    `prompt.md` (instruções permanentes do tópico) vai sempre inline. A
+    pasta `knowledge/` vai inline enquanto o total couber em
+    `knowledge_inline_limit` (default `TOPIC_KNOWLEDGE_INLINE_LIMIT`);
+    acima disso, injeta só um índice (caminho absoluto + prévia de cada
+    arquivo) e instrui o agente a ler sob demanda com `Read` — evita
+    inflar o prompt a cada turno (SPR P1 #3).
 
     Retorna `None` se o diretório do tópico não existir (caso normal —
     nem todo tópico tem KB). Trunca em `TOPIC_CONTEXT_CHAR_LIMIT` chars
@@ -217,6 +246,8 @@ def load_topic_context(kobe_home: Path, slug: str) -> Optional[str]:
     topic_dir = kobe_home / "user-data" / "topics" / slug
     if not topic_dir.is_dir():
         return None
+    if knowledge_inline_limit is None:
+        knowledge_inline_limit = TOPIC_KNOWLEDGE_INLINE_LIMIT
 
     chunks: list[str] = []
 
@@ -230,6 +261,7 @@ def load_topic_context(kobe_home: Path, slug: str) -> Optional[str]:
             logger.warning("topic_context: falhou lendo %s: %s", prompt_md, exc)
 
     knowledge_dir = topic_dir / "knowledge"
+    kfiles: list[tuple[Path, str]] = []
     if knowledge_dir.is_dir():
         for f in sorted(knowledge_dir.iterdir()):
             if not f.is_file():
@@ -240,7 +272,30 @@ def load_topic_context(kobe_home: Path, slug: str) -> Optional[str]:
                 logger.warning("topic_context: falhou lendo %s: %s", f, exc)
                 continue
             if content:
-                chunks.append(f"## {slug}/knowledge/{f.name}\n\n{content}")
+                kfiles.append((f, content))
+
+    total_knowledge = sum(len(c) for _, c in kfiles)
+    if total_knowledge <= knowledge_inline_limit:
+        for f, content in kfiles:
+            chunks.append(f"## {slug}/knowledge/{f.name}\n\n{content}")
+    elif kfiles:
+        idx = [
+            f"## Base de conhecimento de '{slug}' — extensa "
+            f"({total_knowledge} chars), carregada sob demanda",
+            "",
+            "Os arquivos abaixo NÃO estão inline pra não inflar o prompt a "
+            "cada turno. Use a ferramenta `Read` no caminho absoluto SÓ quando "
+            "a mensagem do operador exigir aquele conteúdo:",
+            "",
+        ]
+        for f, content in kfiles:
+            idx.append(f"- `{f}` — {_first_line_preview(content)}")
+        chunks.append("\n".join(idx))
+        logger.info(
+            "topic_context: '%s' knowledge=%d chars > limite %d — modo índice "
+            "(%d arquivo(s) sob demanda)",
+            slug, total_knowledge, knowledge_inline_limit, len(kfiles),
+        )
 
     if not chunks:
         return None
@@ -430,13 +485,39 @@ def get_recent_messages(
     """
     res = (
         db.table("messages")
-        .select("role, content, created_at")
+        .select("role, content, created_at, audio_transcribed")
         .eq("session_id", session_id)
         .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
     return list(reversed(res.data or []))
+
+
+def get_messages_since(
+    db: Client, topic_id: str, since_iso: str, *, limit: int = 50
+) -> list[dict]:
+    """Mensagens do topic com `created_at > since_iso`, ordem cronológica.
+
+    Janela de FRESCOR pra run de background reler o que entrou DEPOIS que ela
+    foi despachada — follow-up do operador, cancelamento, correção (decisão
+    Fase C, 2026-06-05). É um index seek por (topic_id, created_at): barato.
+    Lê por topic (não por session) de propósito: uma conversation pode ter
+    rotacionado de session entre o despacho e o momento de agir.
+
+    Retorna [] quando nada novo chegou — o caller (helper kobe-recall-since)
+    traduz isso em "nenhuma mensagem nova" pro agente.
+    """
+    res = (
+        db.table("messages")
+        .select("role, content, created_at, audio_transcribed")
+        .eq("topic_id", topic_id)
+        .gt("created_at", since_iso)
+        .order("created_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return list(res.data or [])
 
 
 def archive_active_session(

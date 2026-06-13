@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Handler STUB da capacidade `code-tracking` (plugin de exemplo).
+
+Contrato (vide docs/integrations/code-tracking.md):
+
+    Entrada:  verbo no argv[1], payload (JSON) no stdin.
+    Saída:    um objeto JSON no stdout; exit 0 em sucesso.
+
+Verbos:
+    ensure   <- {"briefing": "..."}          -> {"rc":0,"card_id":"...","meta":{...}}
+    finished <- {"card_id":"...","desfecho":"..."} -> {"rc":0}
+
+Este stub NÃO persiste nada — devolve um card_id determinístico derivado do
+briefing, só pra provar que a switchboard roteia ponta-a-ponta. Um provedor
+real (ex: o Flow) substituiria isto pela criação/atualização de card de verdade.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+
+
+def _read_payload() -> dict:
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"payload não é JSON válido: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not isinstance(data, dict):
+        print("payload precisa ser um objeto JSON", file=sys.stderr)
+        raise SystemExit(2)
+    return data
+
+
+def verb_ensure(payload: dict) -> dict:
+    briefing = str(payload.get("briefing", "")).strip()
+    if not briefing:
+        print("ensure exige 'briefing' não-vazio", file=sys.stderr)
+        raise SystemExit(2)
+    # card_id determinístico (achar-ou-criar simulado): mesmo briefing → mesmo id.
+    digest = hashlib.sha1(briefing.encode("utf-8")).hexdigest()[:8]
+    return {
+        "rc": 0,
+        "card_id": f"stub-{digest}",
+        "meta": {"provider": "code-tracking-stub", "created": True},
+    }
+
+
+def verb_finished(payload: dict) -> dict:
+    card_id = str(payload.get("card_id", "")).strip()
+    if not card_id:
+        print("finished exige 'card_id' não-vazio", file=sys.stderr)
+        raise SystemExit(2)
+    return {"rc": 0}
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("uso: track <verbo>  (payload no stdin)", file=sys.stderr)
+        return 2
+    verb = sys.argv[1]
+    payload = _read_payload()
+    if verb == "ensure":
+        result = verb_ensure(payload)
+    elif verb == "finished":
+        result = verb_finished(payload)
+    else:
+        print(f"verbo desconhecido para code-tracking: '{verb}'", file=sys.stderr)
+        return 2
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

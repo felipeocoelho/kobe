@@ -31,6 +31,31 @@ class Config:
     assemblyai_api_key: Optional[str]
     openai_api_key: Optional[str]
     chat_manager_enabled: bool
+    # Despacho de turno pesado em background (cascata de filtros). Quando
+    # ligado, a ENTRADA do turno classifica se o pedido vai gerar trabalho
+    # pesado e, se for, despacha o `claude -p` em background fora do lock do
+    # tópico — mantendo a linha livre pro próximo pedido. Ver
+    # bot/turn_classifier.py e docs/runbooks/despacho-turno-pesado.md.
+    heavy_dispatch_enabled: bool
+    # Retaguarda (teto de tempo): turno que entrou foreground mas estoura
+    # estes segundos segurando o lock se promove sozinho pra background.
+    heavy_promote_after_seconds: float
+    # Cortes do placar da cascata: score >= HIGH → background na entrada;
+    # score <= LOW → foreground; faixa do meio (LOW < score < HIGH) →
+    # acorda o GPT-4o-mini pra desempatar (zona cinza).
+    heavy_score_high: int
+    heavy_score_low: int
+    # Teto de tempo do `claude -p` quando o turno corre no caminho de despacho
+    # pesado (background, na previsão OU na promoção). Por definição é o turno
+    # PESADO — varredura, pesquisa, vários passos — então 300s (o default do
+    # foreground) corta no meio e a resposta chega truncada. Dimensionado pro
+    # trabalho pesado real, não infinito. Só vale com heavy_dispatch_enabled.
+    heavy_timeout_seconds: int
+    # Janela do watchdog de ACK no background: se a run de bg não emitir um
+    # `kobe-notify` (ack na voz do Hal) dentro destes segundos e ainda estiver
+    # rodando, o código manda o aviso enlatado como piso garantido — o operador
+    # nunca fica no escuro mesmo que o Hal não acke. Ver telegram_handler.
+    heavy_ack_fallback_seconds: float
 
 
 def _require(name: str) -> str:
@@ -84,6 +109,18 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or None,
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         chat_manager_enabled=_parse_bool(os.getenv("CHAT_MANAGER_ENABLED")),
+        heavy_dispatch_enabled=_parse_bool(os.getenv("HEAVY_DISPATCH_ENABLED")),
+        heavy_promote_after_seconds=float(
+            os.getenv("HEAVY_DISPATCH_PROMOTE_AFTER_SECONDS", "12")
+        ),
+        heavy_score_high=int(os.getenv("HEAVY_DISPATCH_SCORE_HIGH", "6")),
+        heavy_score_low=int(os.getenv("HEAVY_DISPATCH_SCORE_LOW", "2")),
+        heavy_timeout_seconds=int(
+            os.getenv("HEAVY_DISPATCH_TIMEOUT_SECONDS", "1200")
+        ),
+        heavy_ack_fallback_seconds=float(
+            os.getenv("HEAVY_DISPATCH_ACK_FALLBACK_SECONDS", "20")
+        ),
     )
 
 

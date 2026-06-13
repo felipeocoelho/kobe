@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""kobe-recall-since — janela de frescor pra run de background.
+
+Uso:
+    kobe-recall-since '<ISO_TIMESTAMP>'
+
+Imprime as mensagens do tópico atual que entraram DEPOIS do timestamp
+passado (`messages.created_at > ISO`), em ordem cronológica. É a "janela
+do que veio depois do ack" da Fase C (decisão 2026-06-05): a run de
+background, ANTES de agir, relê só o delta fresco — follow-up do operador,
+cancelamento, correção — sem re-puxar a conversa inteira (corta cota +
+ruído; em background a latência da leitura é grátis).
+
+O timestamp boundary é injetado pelo bot na nota de handoff do prompt da
+run de background — o agente só copia a string, não inventa data.
+
+Variáveis de ambiente (injetadas pelo bot do Kobe ao invocar `claude -p`):
+    KOBE_CHAT_ID      chat do tópico atual
+    KOBE_THREAD_ID    (opcional) forum topic; vazio = "general"
+    SUPABASE_URL / SUPABASE_KEY   acesso ao banco
+
+Sai 0 sempre que conseguir consultar (mesmo sem mensagens novas); !=0 só
+em erro de configuração/conexão.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Roda como subprocess de `claude -p` com cwd = $KOBE_HOME, mas garantimos
+# o import do pacote `bot` resolvendo o KOBE_HOME a partir do próprio path.
+_KOBE_HOME = Path(__file__).resolve().parent.parent.parent
+if str(_KOBE_HOME) not in sys.path:
+    sys.path.insert(0, str(_KOBE_HOME))
+
+
+def _fmt(msg: dict) -> str:
+    role = msg.get("role", "?")
+    created = (msg.get("created_at") or "")[:19].replace("T", " ")
+    content = (msg.get("content") or "").strip()
+    tag = "🎙️ " if msg.get("audio_transcribed") else ""
+    return f"[{created}] {role}: {tag}{content}"
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or not sys.argv[1].strip():
+        print(
+            "uso: kobe-recall-since '<ISO_TIMESTAMP>' "
+            "(o boundary vem na sua nota de handoff)",
+            file=sys.stderr,
+        )
+        return 2
+    since_iso = sys.argv[1].strip()
+
+    chat_id = os.environ.get("KOBE_CHAT_ID", "").strip()
+    thread_id_raw = os.environ.get("KOBE_THREAD_ID", "").strip()
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+    supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
+
+    if not chat_id or not supabase_url or not supabase_key:
+        print(
+            "kobe-recall-since: envs KOBE_CHAT_ID/SUPABASE_URL/SUPABASE_KEY "
+            "ausentes (só funciona chamado de um agente do Kobe)",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        from supabase import create_client
+
+        from bot.topic_manager import ensure_topic, get_messages_since
+
+        db = create_client(supabase_url, supabase_key)
+        thread_id = int(thread_id_raw) if thread_id_raw else None
+        topic_id = ensure_topic(db, thread_id, chat_id=int(chat_id))
+        novas = get_messages_since(db, topic_id, since_iso)
+    except Exception as exc:  # noqa: BLE001 — qualquer falha vira erro claro
+        print(f"kobe-recall-since falhou: {exc}", file=sys.stderr)
+        return 1
+
+    if not novas:
+        print(f"(nenhuma mensagem nova depois de {since_iso})")
+        return 0
+
+    print(f"Mensagens novas depois de {since_iso} ({len(novas)}):")
+    for msg in novas:
+        print(_fmt(msg))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

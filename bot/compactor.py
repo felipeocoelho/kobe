@@ -24,7 +24,7 @@ mensagem tenta de novo).
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from supabase import Client
 
@@ -93,6 +93,7 @@ async def compact_session(
     chat_id: int,
     thread_id: Optional[int],
     bot_token: str,
+    on_start: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> Optional[str]:
     """Compacta a sessão `session_id` e devolve o id da nova sessão.
 
@@ -103,12 +104,28 @@ async def compact_session(
     `chat_id`/`thread_id`/`bot_token` são passados ao runner por uniformidade
     com a chamada principal — os helpers de progresso/anexo não são usados
     aqui (não há `on_event`).
+
+    `on_start`: callback opcional disparado UMA vez, assim que a compactação
+    de fato começa (já confirmado que há histórico, antes da chamada de
+    summary ao Claude). Serve pra avisar o operador em tempo real — o resumo
+    leva alguns segundos e ele não pode achar que o agente travou ou que
+    perdeu contexto. Best-effort: falha no aviso não derruba a compactação.
     """
     # Pega tudo da sessão atual (sem limite — o objetivo é compactar tudo).
     messages = get_recent_messages(db, session_id, limit=10_000)
     if not messages:
         logger.warning("compact: sessão %s vazia, pulando", session_id)
         return None
+
+    # Aviso de "estou compactando" sai AGORA — antes do summary (que custa
+    # alguns segundos de Claude), pra o operador ver em tempo real o que
+    # está acontecendo e ficar tranquilo de que nada se perde. Uma vez por
+    # evento de compactação (este método roda 1x por cruzamento de limiar).
+    if on_start is not None:
+        try:
+            await on_start()
+        except Exception:  # noqa: BLE001 — aviso é best-effort, nunca trava
+            logger.warning("compact: on_start (aviso ao operador) falhou", exc_info=True)
 
     transcript = _format_transcript(messages)
     prompt = SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)

@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""kobe-integrations — a switchboard (central telefônica) de capacidades do Kobe.
+
+É o roteador fino que casa CONSUMIDOR ↔ PROVEDOR de uma capacidade sem que
+nenhum dos dois saiba o nome do outro. Um plugin se anuncia no manifest como
+"eu provejo a capacidade X"; outro pede "quem provê X?". A switchboard resolve
+e encaminha — o consumidor nunca recebe o nome do provedor.
+
+Uso:
+
+    kobe-integrations provider <capacidade>
+        Imprime o nome do plugin que provê a capacidade (1 linha, stdout).
+        Sai !=0 (sem imprimir nada) se não houver provedor ou se a capacidade
+        estiver TRAVADA por conflito (dois plugins declarando a mesma).
+
+    kobe-integrations invoke <capacidade> <verbo> [payload]
+        Resolve o provedor, chama o handler dele (um executável agnóstico de
+        linguagem) passando o VERBO no argv e o PAYLOAD no stdin, e devolve no
+        stdout o JSON que o handler produziu — verbatim. O chamador NUNCA sabe
+        qual plugin respondeu.
+        O payload vem do 4º argumento se presente; senão, do stdin.
+
+Códigos de saída (todos com mensagem clara no stderr):
+    0  sucesso
+    1  nenhum provedor pra capacidade
+    2  uso inválido (argumentos)
+    3  capacidade travada por conflito (>1 provedor)
+    4  handler do provedor ausente / não executável
+    5  handler falhou (rc!=0), estourou timeout, ou não pôde ser executado
+    6  handler devolveu algo que não é JSON
+
+O índice (capacidade → provedor) é reconstruído a cada chamada lendo os
+manifests dos plugins — este helper roda como subprocess detached, sem acesso
+ao índice em memória do bot. A lógica de leitura é a mesma do `bot/plugins.py`
+(fonte única), importada daqui.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# O helper roda como subprocess (cwd = $KOBE_HOME, normalmente). Resolve a raiz
+# do projeto a partir do próprio path pra importar `bot.plugins`.
+_HELPER_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _HELPER_DIR.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from bot.plugins import (  # noqa: E402
+    CapabilityRoute,
+    build_capability_index,
+    discover_plugins,
+)
+
+# Teto de tempo pra um handler responder. Capacidades são chamadas síncronas de
+# coordenação (achar-ou-criar card, etc.), não jobs longos — se passar disto,
+# algo travou e é melhor falhar limpo do que pendurar o consumidor.
+HANDLER_TIMEOUT_S = 120
+
+
+def _kobe_home() -> Path:
+    """Raiz da instalação. Respeita KOBE_HOME (setado pelo bot); senão, deduz."""
+    env = os.environ.get("KOBE_HOME", "").strip()
+    return Path(env) if env else _PROJECT_ROOT
+
+
+def _resolve(capability: str) -> tuple[CapabilityRoute | None, list[str] | None]:
+    """Resolve uma capacidade → (route, conflito).
+
+    - `(route, None)`  → provedor único encontrado.
+    - `(None, [..])`   → capacidade travada por conflito (lista de provedores).
+    - `(None, None)`   → nenhum provedor.
+    """
+    plugins = discover_plugins(_kobe_home())
+    index, conflicts = build_capability_index(plugins)
+    if capability in conflicts:
+        return None, conflicts[capability]
+    return index.get(capability), None
+
+
+def cmd_provider(capability: str) -> int:
+    route, conflict = _resolve(capability)
+    if conflict is not None:
+        print(
+            f"capacidade '{capability}' travada: declarada por mais de um plugin "
+            f"({', '.join(conflict)}). Remova a duplicidade pra destravar.",
+            file=sys.stderr,
+        )
+        return 3
+    if route is None:
+        print(f"nenhum plugin provê a capacidade '{capability}'", file=sys.stderr)
+        return 1
+    print(route.provider)
+    return 0
+
+
+def cmd_invoke(capability: str, verb: str, payload: str) -> int:
+    route, conflict = _resolve(capability)
+    if conflict is not None:
+        print(
+            f"capacidade '{capability}' travada: declarada por mais de um plugin "
+            f"({', '.join(conflict)}). Remova a duplicidade pra destravar.",
+            file=sys.stderr,
+        )
+        return 3
+    if route is None:
+        print(f"nenhum plugin provê a capacidade '{capability}'", file=sys.stderr)
+        return 1
+
+    handler = route.handler
+    if not handler.is_file() or not os.access(handler, os.X_OK):
+        print(
+            f"o handler do provedor '{route.provider}' não existe ou não é "
+            f"executável: {handler}",
+            file=sys.stderr,
+        )
+        return 4
+
+    try:
+        proc = subprocess.run(
+            [str(handler), verb],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            timeout=HANDLER_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"o handler do provedor '{route.provider}' não respondeu em "
+            f"{HANDLER_TIMEOUT_S}s",
+            file=sys.stderr,
+        )
+        return 5
+    except OSError as exc:
+        print(
+            f"não consegui executar o handler do provedor '{route.provider}': {exc}",
+            file=sys.stderr,
+        )
+        return 5
+
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        print(
+            f"o handler do provedor '{route.provider}' falhou (rc={proc.returncode})"
+            + (f": {err}" if err else ""),
+            file=sys.stderr,
+        )
+        return 5
+
+    out = proc.stdout.decode("utf-8", errors="replace").strip()
+    try:
+        json.loads(out)
+    except json.JSONDecodeError as exc:
+        print(
+            f"o handler do provedor '{route.provider}' devolveu algo que não é "
+            f"JSON válido: {exc}",
+            file=sys.stderr,
+        )
+        return 6
+
+    # Repassa o JSON do provedor verbatim — a switchboard não interpreta o
+    # conteúdo, só garante que é JSON e encaminha.
+    print(out)
+    return 0
+
+
+USAGE = (
+    "uso:\n"
+    "  kobe-integrations provider <capacidade>\n"
+    "  kobe-integrations invoke <capacidade> <verbo> [payload]\n"
+    "(sem payload no argv, o invoke lê o payload do stdin)"
+)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        print(USAGE, file=sys.stderr)
+        return 2
+
+    sub = args[0]
+    if sub == "provider":
+        if len(args) != 2:
+            print("uso: kobe-integrations provider <capacidade>", file=sys.stderr)
+            return 2
+        return cmd_provider(args[1])
+
+    if sub == "invoke":
+        if len(args) < 3:
+            print(
+                "uso: kobe-integrations invoke <capacidade> <verbo> [payload]",
+                file=sys.stderr,
+            )
+            return 2
+        capability, verb = args[1], args[2]
+        if len(args) >= 4:
+            payload = args[3]
+        elif not sys.stdin.isatty():
+            payload = sys.stdin.read()
+        else:
+            payload = ""
+        return cmd_invoke(capability, verb, payload)
+
+    print(f"subcomando desconhecido: '{sub}'\n{USAGE}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

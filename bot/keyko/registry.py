@@ -38,12 +38,24 @@ def build_sources(
         sources.append(MissoesSource(kobe_home=kobe_home, bot_token=bot_token))
         logger.info("source registrada: missoes")
 
-    # Futuras:
-    # try:
-    #     from bot.alertas.source import AlertasSource
-    # except ImportError:
-    #     pass
-    # else:
-    #     sources.append(AlertasSource(kobe_home=kobe_home, bot_token=bot_token))
+    # AlertasSource — 2ª fonte (gatilho de tempo: cron/one-shot venceu).
+    try:
+        from bot.alertas.source import AlertasSource
+    except ImportError:
+        logger.exception("AlertasSource indisponível — pacote bot.alertas faltando?")
+    else:
+        sources.append(AlertasSource(kobe_home=kobe_home, bot_token=bot_token))
+        logger.info("source registrada: alertas")
+
+    # ClassifierSource — New Chat Manager (gatilho: debounce por silêncio).
+    # Não acorda o Claude; faz o trabalho do bibliotecário atrás do turno.
+    # Inerte enquanto CHAT_MANAGER_ENABLED=false (checa a flag no tick).
+    try:
+        from bot.chat_manager.source import ClassifierSource
+    except ImportError:
+        logger.exception("ClassifierSource indisponível — pacote bot.chat_manager faltando?")
+    else:
+        sources.append(ClassifierSource(kobe_home=kobe_home, bot_token=bot_token))
+        logger.info("source registrada: chat_manager")
 
     return sources

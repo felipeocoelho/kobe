@@ -30,21 +30,18 @@ projetos/*
 plugins/
 
 # user-data/ — dados do operador, NUNCA versionados no repo público.
-# Só os templates .example são trackados; as cópias preenchidas ficam
-# fora do Git pra não vazar identidade/conhecimento/preferências.
+# BLANKET: ignora TUDO em user-data/, exceto os templates .example que o repo
+# público precisa pra onboarding. Qualquer subdir novo de runtime (alertas,
+# whatsapp, chat-manager, missoes, imports, lembretes, etc.) já nasce protegido
+# — não precisa adicionar regra a cada feature. Esse foi o furo que existia:
+# allowlist por subdir deixava subdir novo escapar pro git.
+user-data/*
+!user-data/identity/
+!user-data/persona/
 user-data/identity/*
-!user-data/identity/*.example
 user-data/persona/*
+!user-data/identity/*.example
 !user-data/persona/*.example
-user-data/knowledge/*
-!user-data/knowledge/.gitkeep
-user-data/topics/
-user-data/transcription-hints.md
-
-# Runtime artifacts dos plugins / agente (privados a cada instalação)
-user-data/artifacts/
-user-data/coder-sessions/
-user-data/claude-presence/
 
 # Logs
 *.log

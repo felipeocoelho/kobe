@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""kobe-recall — puxa contexto do New Chat Manager sob demanda.
+
+Duas formas (camadas QUENTE e FRIO do prompt — vide doc de arquitetura):
+
+  kobe-recall --conversation <id>
+      Despeja a faixa VERBATIM de um assunto (conversation) inteiro, do
+      início até a última mensagem, em ordem cronológica. Use quando o
+      operador apontar pra trás ("voltando ao que a gente falava") e os
+      últimos minutos (camada imediata) não bastarem.
+
+  kobe-recall "<termo ou pergunta>"
+      Busca vetorial (camada FRIO) entre as mensagens DESTE tópico: embeda
+      a query e devolve as mensagens mais próximas, com o assunto a que
+      pertencem. Use pra reencontrar "a gente já voltou nesse assunto antes".
+
+O escopo é sempre o tópico atual (KOBE_CHAT_ID/KOBE_THREAD_ID injetados
+pelo bot) — Dev Kobe não puxa Olimpo. Credenciais (SUPABASE_*, OPENAI_*)
+vêm herdadas do ambiente do bot. Saída em texto no stdout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from supabase import create_client  # noqa: E402
+
+
+def _db():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        print("kobe-recall: SUPABASE_URL/SUPABASE_KEY ausentes.", file=sys.stderr)
+        sys.exit(2)
+    return create_client(url, key)
+
+
+def _resolve_topic_id(db) -> str | None:
+    """topic_id (UUID) a partir de KOBE_CHAT_ID/KOBE_THREAD_ID."""
+    chat_raw = os.environ.get("KOBE_CHAT_ID")
+    thread_raw = os.environ.get("KOBE_THREAD_ID")
+    if not chat_raw:
+        return None
+    try:
+        chat_id = int(chat_raw)
+    except ValueError:
+        return None
+    thread_id = None
+    if thread_raw not in (None, ""):
+        try:
+            thread_id = int(thread_raw)
+        except ValueError:
+            thread_id = None
+    q = db.table("topics").select("id").eq("telegram_chat_id", chat_id)
+    q = q.is_("telegram_thread_id", "null") if thread_id is None else q.eq(
+        "telegram_thread_id", thread_id
+    )
+    res = q.limit(1).execute()
+    return res.data[0]["id"] if res.data else None
+
+
+def _dump_conversation(db, conversation_id: str) -> int:
+    conv = (
+        db.table("conversations")
+        .select("title, started_at, status")
+        .eq("id", conversation_id)
+        .limit(1)
+        .execute()
+    )
+    if conv.data:
+        c = conv.data[0]
+        print(f"# Assunto: {c.get('title')} (status={c.get('status')}, "
+              f"desde {(c.get('started_at') or '')[:10]})\n")
+    res = (
+        db.table("messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", conversation_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = res.data or []
+    if not rows:
+        print("(nenhuma mensagem nessa faixa ainda — o daemon pode não ter "
+              "classificado ainda; tente de novo em ~1 min.)")
+        return 0
+    label = {"user": "Operador", "assistant": "Agente", "system": "Sistema"}
+    for r in rows:
+        who = label.get(r.get("role", ""), r.get("role", "?"))
+        print(f"{who}: {(r.get('content') or '').strip()}\n")
+    return len(rows)
+
+
+def _search(db, topic_id: str, query: str, top_k: int = 8) -> int:
+    from bot.embedding import embed, cosine_similarity
+
+    qvec = asyncio.run(embed(query))
+
+    # Candidatas: mensagens DESTE tópico com embedding. Ranking em Python
+    # (escala de um operador). Cap defensivo pra não puxar histórico imenso.
+    res = (
+        db.table("messages")
+        .select("content, conversation_id, embedding, created_at, role")
+        .eq("topic_id", topic_id)
+        .not_.is_("embedding", "null")
+        .order("created_at", desc=True)
+        .limit(1000)
+        .execute()
+    )
+    rows = res.data or []
+    if not rows:
+        print("(sem mensagens embedadas neste tópico ainda.)")
+        return 0
+
+    def _vec(v):
+        if isinstance(v, str):
+            v = v.strip().lstrip("[").rstrip("]")
+            return [float(x) for x in v.split(",") if x.strip()]
+        return v
+
+    scored = []
+    for r in rows:
+        emb = _vec(r.get("embedding"))
+        if not emb:
+            continue
+        scored.append((cosine_similarity(qvec, emb), r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:top_k]
+
+    # Títulos dos assuntos envolvidos.
+    conv_ids = list({r["conversation_id"] for _, r in top if r.get("conversation_id")})
+    titles = {}
+    if conv_ids:
+        cres = (
+            db.table("conversations")
+            .select("id, title")
+            .in_("id", conv_ids)
+            .execute()
+        )
+        titles = {c["id"]: c.get("title") for c in (cres.data or [])}
+
+    print(f"# Busca por: {query!r} — {len(top)} resultado(s)\n")
+    for sim, r in top:
+        title = titles.get(r.get("conversation_id"), "(sem assunto)")
+        snippet = (r.get("content") or "").strip().replace("\n", " ")
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "…"
+        print(f"[{sim:.2f}] ({title}) {snippet}")
+        if r.get("conversation_id"):
+            print(f"      ↳ assunto inteiro: kobe-recall --conversation {r['conversation_id']}")
+        print()
+    return len(top)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Recall do New Chat Manager")
+    ap.add_argument("--conversation", metavar="ID", help="despeja a faixa inteira")
+    ap.add_argument("query", nargs="*", help="termo/pergunta pra busca vetorial")
+    args = ap.parse_args()
+
+    db = _db()
+
+    if args.conversation:
+        _dump_conversation(db, args.conversation)
+        return 0
+
+    query = " ".join(args.query).strip()
+    if not query:
+        print("Uso: kobe-recall --conversation <id>  |  kobe-recall \"<termo>\"",
+              file=sys.stderr)
+        return 2
+
+    topic_id = _resolve_topic_id(db)
+    if not topic_id:
+        print("kobe-recall: não consegui resolver o tópico atual.", file=sys.stderr)
+        return 2
+    _search(db, topic_id, query)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

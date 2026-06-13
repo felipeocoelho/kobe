@@ -156,6 +156,11 @@ class ProgressReporter:
         # logar "quanto trabalho o Claude fez nessa mensagem". Inclui
         # ações de subagentes, pra refletir o esforço real.
         self.tool_call_count: int = 0
+        # True assim que o agente emite um `kobe-notify` no turno (o ack que
+        # nomeia a ação — vide CLAUDE.md "Avisa antes de agir"). O handler usa
+        # isso na retaguarda do despacho: se o Hal JÁ avisou o operador, não
+        # mandamos o aviso enlatado de background por cima (evita aviso duplo).
+        self.acked: bool = False
 
     async def start(self) -> None:
         """Inicia o timer pra status default ("trabalhando…")."""
@@ -190,6 +195,13 @@ class ProgressReporter:
             # Conta TODA tool_use (inclusive de subagente) — reflete o
             # esforço real da resposta. O filtro de UI vem depois.
             self.tool_call_count += 1
+            # Ack-detection: um Bash chamando `kobe-notify` é o agente avisando
+            # o operador na própria voz. Substring cobre qualquer forma de
+            # invocação (`bot/bin/kobe-notify`, path absoluto, `python …`).
+            if name == "Bash":
+                cmd = (block.get("input") or {}).get("command") or ""
+                if "kobe-notify" in cmd:
+                    self.acked = True
             # Subagentes: ações internas já cobertas por "delegando
             # subtarefa" no evento pai; não detalhamos aqui.
             if is_subagent:

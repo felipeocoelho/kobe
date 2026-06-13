@@ -1,0 +1,21 @@
+[Unit]
+Description=Apolo Webhook — recebe eventos IN do WPPConnect Server
+After=network-online.target
+Wants=network-online.target
+# Não depende do kobe.service nem do Docker do WPPConnect — se cair, só
+# para o IN. OUT continua funcionando.
+
+[Service]
+Type=simple
+WorkingDirectory={{KOBE_HOME}}/plugins/public/apolo
+# PATH explícito (igual ao keyko.service)
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile={{KOBE_HOME}}/.env
+ExecStart={{KOBE_HOME}}/.venv/bin/python {{KOBE_HOME}}/plugins/public/apolo/scripts/webhook_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

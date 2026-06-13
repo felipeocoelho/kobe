@@ -51,6 +51,8 @@ systemctl --user restart kobe   # descoberta acontece no startup
 
 Cada plugin é um repo Git separado com um `kobe-plugin.md` (manifest YAML) declarando `name`, `visibility` (public/private), `description`, `triggers` e opcionalmente um subagente em `claude/agents/<nome>.md`. O bot escaneia `plugins/` no startup, sincroniza os symlinks de subagentes em `.claude/agents/`, e injeta a lista de plugins no prompt — o agente decide quando usar.
 
+Para escrever um plugin (incluindo como **prover/consumir capacidades** via Kobe Integrations, o broker que deixa plugins cooperarem sem se conhecer pelo nome), veja [`docs/plugins-autoria.md`](./docs/plugins-autoria.md). Contratos de capacidade ficam em [`docs/integrations/`](./docs/integrations/).
+
 Tudo em `user-data/` é **do usuário** — fica fora do Git público. O instalador cria as cópias iniciais a partir dos `.example` distribuídos com o produto.
 
 ## Instalação
@@ -128,6 +130,14 @@ INFO kobe.handler: claude_run status=ok elapsed=12.4s prompt_len=3128
 - `/missao_status` — snapshot do painel da missão ativa do tópico.
 - `/missao_abortar` — aborta a missão ativa do tópico.
 - `/missao_lista` — lista missões deste tópico (ativas + 5 últimas encerradas).
+
+### Helpers de runtime (`bot/bin/`)
+
+Primitivas CORE que o agente (e plugins) usam durante a execução:
+
+- `kobe-notify "<texto>"` — manda texto pro chat ativo (sinal de vida em tarefas longas). Aceita `--topic "<nome>"` pra endereçar um tópico pelo nome (resolve via Supabase) — útil em salas de código detached, que nascem sem `KOBE_CHAT_ID`.
+- `kobe-attach <path> [caption]` — envia arquivo como documento no Telegram. Também aceita `--topic "<nome>"`.
+- `kobe-alerta` — helper de alertas proativos (criar/confirmar/dispensar).
 
 ## Sistema de Missões (v0.13) + Keyko
 

@@ -13,8 +13,12 @@ permissão trava o processo até timeout.
 
 Saída em `stream-json` (linha por linha) — permite ao bot capturar
 eventos de uso de ferramenta enquanto o Claude trabalha e devolver
-"sinais de vida" pro operador no Telegram (typing + progresso textual)
-em vez de só silêncio até a resposta final.
+"sinais de vida" pro operador no Telegram (typing + progresso textual
+por etapa via `ProgressReporter`) em vez de só silêncio até a resposta
+final. A resposta em si NÃO é streamada token-a-token pro Telegram
+(decisão 2026-06-01: streaming editado a cada token é UX ruim em
+mensageiro — "pior a emenda que o soneto"); ela sai inteira no fim,
+montada da concatenação de TODOS os blocos de texto do turno.
 """
 
 from __future__ import annotations
@@ -38,6 +42,13 @@ from zoneinfo import ZoneInfo
 # ontem porque o servidor já estava em 13/05 UTC).
 OPERATOR_TZ = ZoneInfo("America/Sao_Paulo")
 
+# Tag que marca, no contexto do prompt, que aquele texto veio de uma
+# mensagem de voz transcrita (Whisper/Groq ou AssemblyAI), não digitada.
+# Fica só no prompt do agente — não é ecoada de volta no chat (o operador
+# já sabe que mandou áudio). Serve pro Hal saber que pode haver ruído de
+# transcrição e que o tom é de fala, não de texto escrito.
+AUDIO_TRANSCRIBED_TAG = "🎤 [áudio transcrito]"
+
 
 logger = logging.getLogger("kobe.claude")
 
@@ -47,7 +58,17 @@ class ClaudeError(Exception):
 
 
 class ClaudeTimeoutError(ClaudeError):
-    """Claude não respondeu dentro de `timeout_seconds`."""
+    """Claude não respondeu dentro de `timeout_seconds`.
+
+    `partial_text` carrega os blocos de texto do agente já COMPLETADOS
+    até o corte (pode ser vazio se estourou no meio do 1º bloco). O
+    handler usa isso pra entregar a resposta parcial em vez de descartar
+    todo o trabalho quando o turno estoura o tempo limite.
+    """
+
+    def __init__(self, message: str, *, partial_text: str = "") -> None:
+        self.partial_text = partial_text
+        super().__init__(message)
 
 
 class ClaudeNotFoundError(ClaudeError):
@@ -97,6 +118,7 @@ class ClaudeRunner:
         chat_id: Optional[int] = None,
         thread_id: Optional[int] = None,
         bot_token: Optional[str] = None,
+        timeout_override: Optional[int] = None,
     ) -> ClaudeResult:
         """Manda `prompt` via stdin pro Claude Code e retorna a resposta.
 
@@ -110,9 +132,15 @@ class ClaudeRunner:
         e `bot/bin/kobe-attach` pra plugins emitirem progresso/anexos em
         tempo real, sem precisar passar pela resposta final do agente.
 
-        O texto final retornado vem do evento `result` (campo `result`).
-        Se por algum motivo não chegar um `result`, montamos a resposta
-        concatenando os blocos de texto de eventos `assistant`.
+        O texto final retornado é a concatenação de TODOS os blocos de
+        texto do AGENTE PRINCIPAL no turno (eventos `assistant` com
+        `parent_tool_use_id` nulo). Isso é deliberado: o campo `result`
+        do evento final carrega só a ÚLTIMA mensagem do assistant (o
+        bloco emitido depois da última tool call) — usá-lo engolia toda
+        a prosa que o agente escreveu ANTES de uma ferramenta (bug
+        2026-06-01: resposta longa virava só o "Anotado em…" pós-tool).
+        O `result` segue sendo lido pra métricas (usage/custo) e como
+        fallback se, por algum path raro, nenhum bloco `assistant` vier.
         """
         cmd = [
             self.binary,
@@ -155,6 +183,11 @@ class ClaudeRunner:
         result_text: Optional[str] = None
         result_usage: dict = {}
         result_cost: float = 0.0
+        # Blocos de texto do AGENTE PRINCIPAL, na ordem em que o turno os
+        # emitiu (prosa antes de uma tool + texto depois dela). É a fonte
+        # de verdade da resposta final — e, no timeout, do parcial já
+        # pronto. Texto de subagente (parent_tool_use_id != None) é
+        # ignorado: não é a resposta ao operador.
         assistant_texts: list[str] = []
         # Buffer dos eventos parseados — usado pra dump diagnóstico quando
         # a resposta final vier vazia (acontece raro mas precisamos de
@@ -192,7 +225,12 @@ class ClaudeRunner:
                         result_cost = float(event.get("total_cost_usd") or 0.0)
                     except (TypeError, ValueError):
                         result_cost = 0.0
-                elif etype == "assistant":
+                elif etype == "assistant" and not event.get("parent_tool_use_id"):
+                    # Só o agente principal (parent_tool_use_id nulo). Cada
+                    # evento `assistant` é uma mensagem COMPLETA — junta os
+                    # blocos de texto dela na ordem. Acumular aqui (em vez
+                    # de pegar só o `result` final) é o que preserva a
+                    # prosa escrita ANTES de uma tool call.
                     msg = event.get("message") or {}
                     for block in msg.get("content") or []:
                         if isinstance(block, dict) and block.get("type") == "text":
@@ -212,16 +250,21 @@ class ClaudeRunner:
             assert proc.stderr is not None
             return await proc.stderr.read()
 
+        # Teto efetivo do turno: o override (caminho de despacho pesado, que
+        # passa um teto maior dimensionado pro turno PESADO) vence o default
+        # do runner. Sem override → comportamento clássico (self.timeout_seconds).
+        effective_timeout = timeout_override or self.timeout_seconds
         try:
             stderr_task = asyncio.create_task(_consume_stderr())
-            await asyncio.wait_for(_consume_stdout(), timeout=self.timeout_seconds)
+            await asyncio.wait_for(_consume_stdout(), timeout=effective_timeout)
             stderr_bytes = await stderr_task
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError as exc:
             proc.kill()
             await proc.wait()
             raise ClaudeTimeoutError(
-                f"Claude não respondeu em {self.timeout_seconds}s."
+                f"Claude não respondeu em {effective_timeout}s.",
+                partial_text=_join_texts(assistant_texts),
             ) from exc
 
         if proc.returncode != 0:
@@ -247,13 +290,16 @@ class ClaudeRunner:
                 cost_usd=result_cost,
             )
 
-        if result_text:
-            return _result(result_text)
-        # Fallback: alguns paths não emitem `result` (errado/raro), mas
-        # vimos blocos `text` em eventos `assistant`. Junta tudo.
-        joined = "\n".join(t.strip() for t in assistant_texts if t.strip()).strip()
+        # Resposta = concatenação de TODOS os blocos de texto do agente
+        # principal (prosa antes de tools + texto depois). É o que corrige
+        # o bug de engolir a prosa pré-tool.
+        joined = _join_texts(assistant_texts)
         if joined:
             return _result(joined)
+        # Fallback raro: nenhum bloco `assistant` foi capturado, mas o
+        # evento `result` trouxe texto. Melhor que devolver vazio.
+        if result_text:
+            return _result(result_text)
 
         # Resposta totalmente vazia. Não levantamos exceção (o caller
         # devolve uma mensagem amigável no Telegram), mas dumpamos o
@@ -272,6 +318,17 @@ class ClaudeRunner:
             dump_path,
         )
         return _result("")
+
+
+def _join_texts(texts: list[str]) -> str:
+    """Concatena blocos de texto do agente, separados por linha em branco.
+
+    Cada bloco é strip-ado nas pontas; blocos vazios são descartados. A
+    linha em branco entre blocos separa a prosa de antes de uma tool do
+    texto emitido depois — sem isso correriam juntos no Telegram
+    ("…fim da fraseAnotado em X").
+    """
+    return "\n\n".join(t.strip() for t in texts if t.strip()).strip()
 
 
 def _dump_empty_stream(
@@ -312,8 +369,13 @@ def build_prompt(
     plugins_section: str = "",
     topic_context: Optional[str] = None,
     missao_ativa_info: Optional[str] = None,
+    alertas_abertos_info: Optional[str] = None,
     conversation_active: Optional[dict] = None,
     conversation_summaries: Optional[list[dict]] = None,
+    chat_manager_section: Optional[str] = None,
+    audio_transcribed: bool = False,
+    background_handoff: Optional[str] = None,
+    quoted_message: Optional[str] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
@@ -337,13 +399,29 @@ def build_prompt(
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
     )
     now_br = datetime.now(OPERATOR_TZ)
-    parts: list[str] = [
-        f"[Telegram] tópico: {topic_label}",
-        f"[Agora (America/Sao_Paulo)] {now_br.isoformat(timespec='minutes')}",
-    ]
+    parts: list[str] = []
+    # Nota de handoff de background (Fase C): quando o turno foi roteado pra
+    # rodar em segundo plano na ENTRADA (previsão do classificador), a run é
+    # um `claude -p` fresco e sem memória da decisão. Esta nota é a única
+    # forma de ela saber que está em bg, por quê, e como se portar (avisar na
+    # própria voz, reler a janela fresca antes de agir). Vai PRIMEIRO, antes
+    # de qualquer contexto, pra ser o que a run lê de cara.
+    if background_handoff:
+        parts.append(background_handoff)
+        parts.append("")
+    parts.extend(
+        [
+            f"[Telegram] tópico: {topic_label}",
+            f"[Agora (America/Sao_Paulo)] {now_br.isoformat(timespec='minutes')}",
+        ]
+    )
 
     if missao_ativa_info:
         parts.append(missao_ativa_info)
+
+    if alertas_abertos_info:
+        parts.append("")
+        parts.append(alertas_abertos_info)
 
     if plugins_section:
         parts.append("")
@@ -354,9 +432,17 @@ def build_prompt(
         parts.append("[Contexto do tópico]")
         parts.append(topic_context)
 
-    # Chat Manager (Fase 4): header da conversation ativa + cronologia
-    # comprimida das sessions arquivadas dessa conversation. Só aparece
-    # quando o caller passa esses dados (CHAT_MANAGER_ENABLED).
+    # New Chat Manager (2026-06-01): bloco residente já mastigado pelo
+    # daemon — ponteiro do quente + catálogo frio + relações + instruções
+    # de pull sob demanda. Substitui o render legado de conversation_active
+    # quando presente (caminho novo do CHAT_MANAGER_ENABLED).
+    if chat_manager_section:
+        parts.append("")
+        parts.append(chat_manager_section)
+
+    # Chat Manager (Fase 4 — legado): header da conversation ativa +
+    # cronologia comprimida das sessions arquivadas. Só no caminho antigo
+    # (mantido pra compat; o caminho novo passa chat_manager_section).
     if conversation_active:
         parts.append("")
         title = conversation_active.get("title") or "(sem título)"
@@ -379,15 +465,35 @@ def build_prompt(
     for msg in history:
         role = msg.get("role", "?")
         content = msg.get("content", "")
+        # Mesma tag de áudio no histórico: mensagens antigas que vieram de
+        # voz aparecem marcadas, mantendo a leitura consistente turno a turno
+        # (o flag `audio_transcribed` é carregado junto do histórico).
+        if msg.get("audio_transcribed"):
+            content = f"{AUDIO_TRANSCRIBED_TAG} {content}"
         history_lines.append(f"{role}: {content}")
     if history_lines:
         parts.append("")
         parts.append("[Histórico recente da sessão ativa]")
         parts.extend(history_lines)
 
+    # Mensagem citada (reply do Telegram): o operador respondeu CITANDO uma
+    # mensagem anterior e emendou texto novo. A citada é o TEMA principal do
+    # turno (não pano de fundo) — sem ela o agente fica cego de metade do
+    # contexto. Vai colada à mensagem nova, logo antes dela, pra a relação
+    # "isto é sobre aquilo" ficar explícita.
+    if quoted_message:
+        parts.append("")
+        parts.append(
+            "[O operador respondeu CITANDO esta mensagem — é o contexto "
+            "principal do que ele diz a seguir]"
+        )
+        parts.append(quoted_message)
+
     parts.append("")
     parts.append("[Mensagem nova do operador]")
-    parts.append(new_message)
+    parts.append(
+        f"{AUDIO_TRANSCRIBED_TAG} {new_message}" if audio_transcribed else new_message
+    )
     parts.append("")
     parts.append("Responda agora, em português, no estilo do agente.")
     return "\n".join(parts)

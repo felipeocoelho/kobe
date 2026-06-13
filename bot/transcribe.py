@@ -35,12 +35,26 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from groq import APIError, Groq
 
 
 logger = logging.getLogger("kobe.transcribe")
+
+
+class TranscriptionResult(NamedTuple):
+    """Texto transcrito + engine usada na chamada.
+
+    Devolver a engine no retorno (em vez de só no atributo compartilhado
+    `last_engine_used`) é o que torna `transcribe()` seguro pra rodar
+    concorrente: várias transcrições em paralelo não competem por um
+    único campo mutável. `last_engine_used` continua setado pra
+    compatibilidade, mas o caller deve preferir `result.engine`.
+    """
+
+    text: str
+    engine: str
 
 WHISPER_MODEL = "whisper-large-v3"
 
@@ -97,16 +111,19 @@ class Transcriber:
             )
         return text
 
-    def transcribe(self, audio_bytes: bytes, filename: str) -> str:
-        """Manda bytes pro Whisper e devolve o texto cru, sem trim.
+    def transcribe(self, audio_bytes: bytes, filename: str) -> TranscriptionResult:
+        """Manda bytes pro Whisper e devolve `(texto, engine)`, sem trim no texto.
 
         `filename` precisa ter extensão coerente com o conteúdo (ex.
         `voice.ogg` pra voice messages do Telegram) — a Groq usa pra
         decidir o decoder.
 
-        Side effect: atualiza `self.last_engine_used` ("groq-whisper" ou
-        "assemblyai-fallback") pra que o caller possa avisar o operador
-        quando o fallback foi acionado.
+        `engine` é "groq-whisper" (caminho normal) ou "assemblyai-fallback"
+        (Whisper falhou, AssemblyAI cobriu) — o caller usa pra avisar o
+        operador quando o fallback foi acionado. `self.last_engine_used`
+        também é atualizado pra compatibilidade, mas como `transcribe()`
+        agora pode rodar concorrente (fora do lock do tópico), o caller
+        deve ler `result.engine` — não o atributo compartilhado.
         """
         kwargs: dict = {
             "file": (filename, audio_bytes),
@@ -132,11 +149,11 @@ class Transcriber:
                     f"Whisper falhou ({exc}) e fallback AssemblyAI também ({fallback_exc})"
                 ) from fallback_exc
             self.last_engine_used = "assemblyai-fallback"
-            return text.strip()
+            return TranscriptionResult(text.strip(), "assemblyai-fallback")
 
         text = result if isinstance(result, str) else getattr(result, "text", "")
         self.last_engine_used = "groq-whisper"
-        return text.strip()
+        return TranscriptionResult(text.strip(), "groq-whisper")
 
     def _transcribe_assemblyai(self, audio_bytes: bytes, filename: str) -> str:
         """Fallback: usa AssemblyAI (sem speakers) quando Whisper falha.

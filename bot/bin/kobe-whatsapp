@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""kobe-whatsapp — envia mensagem WhatsApp pro operador (ou contato/número).
+
+É o ÚNICO ponto de costura entre o core do Kobe e o backend de WhatsApp
+(hoje o plugin Apolo / Evolution). Qualquer componente do Kobe que precise
+mandar WhatsApp — Alertas, agente principal, futuros — chama ESTE helper e
+nunca o Apolo direto. Assim Alertas (e o resto do core) não conhecem o
+Apolo: a dependência mora só aqui. Espelha o papel do `kobe-notify`
+(Telegram), só que pra WhatsApp.
+
+Uso:
+
+    kobe-whatsapp <destino> <texto...>
+
+`destino` pode ser:
+- número E.164 / com formatação: "+55 21 98753-4566" → vira JID individual
+- JID pronto: "5521987534566@s.whatsapp.net" ou "...@g.us" (grupo)
+- nome de contato no catálogo: "Pedro" (resolve via Apolo)
+
+Sai 0 se entregou (status ok), !=0 se falhou (mensagem no stderr). Quem
+chama decide o fallback (ex.: Alertas cai pro Telegram via kobe-notify).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _kobe_home() -> Path:
+    home = os.environ.get("KOBE_HOME", "").strip()
+    if home:
+        return Path(home)
+    # bin/ → bot/ → raiz
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _resolver_destino_args(destino: str) -> list[str]:
+    """Decide entre --jid e --destino (nome) e normaliza número → JID."""
+    if "@" in destino:  # já é JID (individual ou grupo)
+        return ["--jid", destino]
+    # Tem letra? trata como nome de contato (Apolo resolve no catálogo).
+    if re.search(r"[A-Za-zÀ-ÿ]", destino):
+        return ["--destino", destino]
+    # Caso contrário é número — normaliza pros dígitos + sufixo individual.
+    digits = re.sub(r"\D", "", destino)
+    if not digits:
+        return ["--destino", destino]  # deixa o Apolo reclamar com clareza
+    return ["--jid", f"{digits}@s.whatsapp.net"]
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print("uso: kobe-whatsapp <destino> <texto>", file=sys.stderr)
+        return 2
+    destino = sys.argv[1]
+    texto = " ".join(sys.argv[2:]).strip()
+    if not texto:
+        print("kobe-whatsapp: texto vazio", file=sys.stderr)
+        return 2
+
+    home = _kobe_home()
+    send_py = home / "plugins" / "public" / "apolo" / "scripts" / "send.py"
+    venv_py = home / ".venv" / "bin" / "python"
+    if not send_py.is_file():
+        print(
+            "kobe-whatsapp: backend de WhatsApp indisponível "
+            "(plugin Apolo não instalado nesta instalação)",
+            file=sys.stderr,
+        )
+        return 1
+    python = str(venv_py) if venv_py.is_file() else sys.executable
+
+    cmd = [python, str(send_py), *_resolver_destino_args(destino), "--texto", texto]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutError:
+        print("kobe-whatsapp: timeout enviando", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-whatsapp: falha invocando backend: {exc}", file=sys.stderr)
+        return 1
+
+    # send.py imprime JSON com status; repassa pra quem chamou diagnosticar.
+    out = (proc.stdout or "").strip()
+    if out:
+        print(out)
+    if proc.returncode == 0 and '"status": "ok"' in out:
+        return 0
+    err = (proc.stderr or "").strip()
+    if err:
+        print(err, file=sys.stderr)
+    return proc.returncode or 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
