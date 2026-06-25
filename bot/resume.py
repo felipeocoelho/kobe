@@ -170,9 +170,10 @@ def _load_resume_context(
     chat_id = snap.get("telegram_chat_id")
     thread_id = snap.get("telegram_thread_id")
 
-    # Camada imediata: idêntica ao turno normal quando CM on. No legado
-    # (flag off) caímos pro histórico da sessão arquivada do snapshot.
-    if config.chat_manager_enabled:
+    # Camada imediata: idêntica ao turno normal quando working_memory on. No
+    # legado (flag off) caímos pro histórico da sessão arquivada do snapshot.
+    # Decisão de MEMÓRIA — desacoplada da flag de CONVERSAS (Frente 0).
+    if config.working_memory_enabled:
         immediate = get_immediate_messages(db, topic_id)
     else:
         session_id = snap.get("session_id")

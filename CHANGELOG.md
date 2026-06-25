@@ -4,6 +4,33 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Corrigido — Highlander Frente 0: desacopla MEMÓRIA da flag de CONVERSAS
+
+**Operador apontou:** "Chat Manager virou outra coisa, apenas classificação e gerenciamento
+de conversas, não tem mais código sobre memória lá."
+
+**Causa:** a Frente 0 moveu o *código* da memória pra `bot/memory/`, mas deixou o *controle*
+ainda pendurado em `CHAT_MANAGER_ENABLED`: duas decisões de MEMÓRIA — qual janela de
+histórico usar (imediata vs sessão legada) e se a compactação roda — pegavam carona na flag
+de CONVERSAS. Spaghetti residual: trocar de assunto (conversa) e escolher janela de memória
+estavam amarrados na mesma chave.
+
+**Foi feito:** nova flag `WORKING_MEMORY_ENABLED` (default-on) governa SÓ memória —
+`_load_history` (`telegram_handler.py:716`), a compactação (`:667`) e a janela do turno de
+retomada (`resume.py:176`) passam a consultá-la. `CHAT_MANAGER_ENABLED` agora governa **só
+conversas** (activity, ponteiros quente/frio, cronologia, comandos `/retomar` etc. —
+verificados um a um). As duas chaves ficam independentes: dá pra ter memória-moderna com
+conversas-off, e vice-versa.
+
+**Comportamento preservado:** prod roda com `CHAT_MANAGER_ENABLED=true` (= janela imediata +
+sem compactação); `WORKING_MEMORY_ENABLED` default-on entrega exatamente o mesmo. Zero
+regressão; só separação limpa.
+
+**Testes (dev):** import da cadeia; os dois campos coexistem no `Config`; default-on +
+override `=false`; varredura confirmando que todo `chat_manager_enabled` restante é conversa.
+
+**Reversão:** `WORKING_MEMORY_ENABLED=false` volta ao legado; `git revert` desfaz o decouple.
+
 ### Segurança — token do bot deixa de vazar nos logs (httpx → WARNING)
 
 O `httpx`/`httpcore` logam a URL completa de cada request em nível INFO, e a URL da

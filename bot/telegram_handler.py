@@ -655,15 +655,16 @@ async def _handle_user_text(
         except Exception:  # noqa: BLE001 — sinal é best-effort
             logger.warning("chat_manager: touch_activity falhou", exc_info=True)
 
-    # Compactação (v0.12) — APENAS no sistema legado. Com Chat Manager
-    # ligado, o histórico é reconstruído cru do banco a cada turno (janela
-    # imediata, limitada por IMMEDIATE_HARD_CAP), então a compactação é
-    # desnecessária E nociva: ela gera um summary via Claude e o injeta como
-    # role='system' ([Resumo da sessão anterior]) na cronologia do tópico,
-    # que o get_immediate_messages puxa de volta e o agente lê como se fosse
-    # fala do operador. Princípio do Chat Manager: ponteiro, nunca resumo.
-    # Contexto profundo vem do recall sob demanda, não de destilado injetado.
-    if not config.chat_manager_enabled:
+    # Compactação (v0.12) — APENAS no modo de memória legado. Com a memória de
+    # trabalho ligada (working_memory), o histórico é reconstruído cru do banco
+    # a cada turno (janela imediata, limitada por IMMEDIATE_HARD_CAP), então a
+    # compactação é desnecessária E nociva: ela gera um summary via Claude e o
+    # injeta como role='system' ([Resumo da sessão anterior]) na cronologia do
+    # tópico, que o get_immediate_messages puxa de volta e o agente lê como se
+    # fosse fala do operador. Princípio: ponteiro, nunca resumo. Contexto
+    # profundo vem do recall sob demanda, não de destilado injetado. (Decisão de
+    # MEMÓRIA — desacoplada da flag de CONVERSAS na Frente 0.)
+    if not config.working_memory_enabled:
         msg_count = count_messages(db, session_id)
         if msg_count >= config.compact_threshold_messages:
             logger.info(
@@ -708,10 +709,11 @@ async def _handle_user_text(
     # rodam em paralelo, em threads, pra não serializar nem travar o loop.
     # supabase-py usa httpx.Client (thread-safe pra requests concorrentes).
     async def _load_history() -> list[dict]:
-        # Camada IMEDIATA (flag on): últimos ~10 min OU N msgs DESTE tópico,
-        # verbatim — reconstruída do disco a cada turno, então a compactação
-        # vira não-evento (doc §6). Flag off: histórico da session (legado).
-        if config.chat_manager_enabled:
+        # Camada IMEDIATA (working_memory on): últimos ~10 min OU N msgs DESTE
+        # tópico, verbatim — reconstruída do disco a cada turno, então a
+        # compactação vira não-evento (doc §6). Off: histórico da session
+        # (legado). Decisão de MEMÓRIA, desacoplada da flag de CONVERSAS (Frente 0).
+        if config.working_memory_enabled:
             return await asyncio.to_thread(get_immediate_messages, db, topic_id)
         return await asyncio.to_thread(
             get_recent_messages, db, session_id, limit=config.recent_messages_limit
