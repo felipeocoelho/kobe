@@ -2,6 +2,251 @@
 
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Segurança — token do bot deixa de vazar nos logs (httpx → WARNING)
+
+O `httpx`/`httpcore` logam a URL completa de cada request em nível INFO, e a URL da
+API do Telegram embute o token do bot (`.../bot<TOKEN>/metodo`) — isso vazava o token
+em texto puro no journal do systemd (que é persistente). `bot/main.py` agora sobe os
+loggers `httpx`/`httpcore`/`telegram` pra `WARNING` logo após o `basicConfig`, cortando
+o vazamento sem perder erros reais. Vale no próximo restart do bot. Reversível por
+commit. (Descoberto numa sessão do plugin Coder ao investigar o cgroup das salas tmux.)
+
+### Mudado — Highlander default-ON (decisão do operador 2026-06-24)
+
+**Operador pediu:** "não deixe tudo atrás de flag-off esperando o operador apertar botão" —
+as features do Highlander entram ligadas no ambiente de trabalho, prontas pra prod.
+
+**Foi feito:** os defaults de `CURATED_CORE_ENABLED`, `GROUNDING_SIGNALS_ENABLED` e
+`HINDSIGHT_ENABLED` passam a **on** quando a env não está setada (`os.getenv(..., "true")`),
+em `config.py` + `.env.example`. Entram na prod pelo canal sancionado (merge-back + restart
+do Hal) — não foi tocado o `.env` vivo da prod. Para desligar: setar a env como `false` +
+restart.
+
+**Segurança do default-on:** `curated_core` e `grounding` são puro-cômputo (no-op gracioso
+se faltar arquivo/histórico); `hindsight` é best-effort — se o serviço estiver fora, falha
+rápido (connection refused em ms) e o turno segue. **Tradeoff conhecido (repo potencialmente
+público):** instalação fresca sem o serviço Hindsight loga um warning por turno até setar
+`HINDSIGHT_ENABLED=false` — documentado no `.env.example`.
+
+**Reversão:** env=false + restart, ou `git revert`.
+
+### Adicionado — Highlander Frente 2.3: cliente Hindsight no bot (recall + retain)
+
+**Operador pediu:** depois do smoke do Hindsight passar no prod, fiar a memória durável no
+turno do bot.
+
+**Por quê:** com o serviço de pé e o contrato REST verificado ao vivo, o bot pode trazer
+fato durável de volta (recall) e destilar fato novo (retain) — o "trazer assunto velho de
+volta" sem a maquinaria do Chat Manager.
+
+**Foi feito:**
+- `bot/hindsight_client.py`: `retain` / `recall` / `render_recall_section` sobre REST
+  (httpx async), best-effort (qualquer falha → vazio/False, nunca levanta — Hindsight
+  jamais derruba um turno) e por tópico (`bank_id_for_topic`, isolamento como o resto da
+  memória). Coage `metadata` a `dict[str,str]` (o servidor dá 422 com valor int).
+- Wiring no `telegram_handler`: **recall na entrada** → bloco `[Memória durável recuperada]`
+  no prompt (moldura cética: é PISTA, confirme contra a fonte — contrato anti-mentira);
+  **retain fire-and-forget** após persistir a msg, destilando fato **da mensagem do
+  operador** (ground truth), não da resposta gerada (anti-alucinação). Fonte rastreável na
+  metadata (tópico + message_id). Helper `_fire_and_forget` segura a ref da task (senão o GC
+  coleta antes de rodar). `build_prompt` ganha o param `durable_memory`.
+- Flags em `config.py` + `.env.example`: `HINDSIGHT_ENABLED` (default off), `_BASE_URL`
+  (`http://127.0.0.1:8888`), `_TIMEOUT_SECONDS` (10), `_RECALL_LIMIT` (5).
+
+**Testes (contra o serviço VIVO no prod, imagem 0.8.3):** retain → recall ponta a ponta
+(o fato plantado volta renderizado); coerção de metadata (resolve o 422 real); best-effort
+com serviço fora-do-ar (retorna vazio/False sem exceção); `build_prompt` injeta
+`durable_memory` com dado e omite sem. Banks de teste criados foram **deletados** (serviço
+ficou com zero banks).
+
+**Tradeoff conhecido:** o retain roda por mensagem (não por silêncio). Custo do retain é
+mini-tier OpenAI (~2.8k tokens in/retain), negligível, mas pra operador muito tagarela pode
+valer mover pro daemon-por-silêncio depois. Atrás de flag — validar no prod-staging.
+
+**Reversão:** flag off + restart = Kobe como hoje. `git revert` (sem banco do Kobe; o
+Hindsight tem storage próprio isolado).
+
+### Corrigido — tag da imagem do Hindsight (`v0.8.3` → `0.8.3`)
+
+**Sintoma:** `docker compose up -d` falhou no prod com `failed to resolve reference
+"ghcr.io/vectorize-io/hindsight:v0.8.3": not found`.
+
+**Causa (verificada na GHCR):** os releases do GitHub usam tag com `v` (`v0.8.3`), mas a
+**imagem Docker** no GHCR é tagueada **sem o `v`** (`0.8.3`). Pinei pela versão errada.
+
+**Foi feito:** `HINDSIGHT_VERSION` corrigido pra `0.8.3` no compose + `.env.example`, com
+nota explícita do gotcha; referências em README/CHANGELOG/plano alinhadas. Confirmado via
+GHCR registry API que `0.8.3` resolve (HTTP 200) e `v0.8.3` não (404).
+
+**Reversão:** `git revert` (só troca de string de tag).
+
+### Adicionado — Highlander Frente 1.1: sinal de grounding temporal na entrada
+
+**Operador pediu:** continuar a Frente 1 (memória confiável) — os gates de grounding
+baratos resolvidos no código (P2 do v4).
+
+**Por quê:** o contrato manda "nada relativo ao TEMPO sem conferir o tempo" e alerta que
+"retomada depois de um tempo: o contexto recente pode não ser sobre o que ele quer agora".
+O cabeçalho já dá o `[Agora]`, mas faltava **há quanto tempo foi a última troca** — sinal
+que o agente senão narraria de memória (fonte clássica de confabulação ao retomar).
+
+**Foi feito:**
+- `bot/memory/grounding.py`: `render_grounding_signals(history)` lê o `created_at` que já
+  veio no histórico imediato (sem query nova, sem LLM) e injeta uma linha `[Grounding]`
+  com o gap humanizado (min/horas/dias). Só fala quando o gap passa de 30 min (retomada);
+  num papo contínuo fica calado pra não virar ruído. A msg nova ainda não está no histórico
+  na hora da montagem, então o gap é de fato "tempo desde a última troca" (verificado: o
+  handler persiste a msg depois de montar o contexto).
+- Fiado em `build_prompt` (logo após `[Agora]`, mesma natureza temporal) + `telegram_handler`
+  + `resume`. Flag `GROUNDING_SIGNALS_ENABLED` (`config.py` + `.env.example`), default off.
+
+**Testes (dev VPS, venv da prod):** import da cadeia OK; campo `grounding_signals_enabled`
+no `Config`; teste de `render_grounding_signals` (gap curto = None; min/horas/dias;
+histórico vazio/sem timestamp = None); `build_prompt` injeta após `[Agora]` com a flag e
+omite sem ela (off = no-op).
+
+**Reversão:** flag off + restart = comportamento de hoje. `git revert` (sem banco).
+
+**Pendente em 1.1 (não nesta entrega):** o gate P1 (injetar estado de trabalho em
+background lido do `.json`) — overlapa a maquinaria de missão/despacho existente e pede
+cuidado; fica pra um passo seguinte.
+
+### Adicionado — Highlander Frente 1.2: núcleo curado global (USER.md + MEMORY.md auto-injetado)
+
+**Operador pediu:** atacar a confiança na memória — começando pelo núcleo curado
+estilo Hermes (identidade + fatos duráveis auto-injetados).
+
+**Por quê:** hoje o USER.md **não** entra no prompt — depende da instrução "leia o
+USER.md" no CLAUDE.md, que o agente pode pular. O operador não confia numa memória que
+o agente "às vezes lê". Núcleo curado pequeno e estável no topo, por construção todo
+turno, é a base de identidade que faltava (e, de bônus, prefixo mais cacheável).
+
+**Foi feito:**
+- `bot/memory/curated_core.py`: `load_curated_core(kobe_home)` lê
+  `user-data/identity/USER.md` + `MEMORY.md`, monta o bloco `[Núcleo curado]` com TETO
+  fixo (~6000 chars) — USER.md tem prioridade, MEMORY.md espreme — e, perto de 80% do
+  teto, anexa um empurrão pro agente CONSOLIDAR (esquecimento ativo). O código nunca
+  apaga fato sozinho (anti-alucinação): quem consolida é o agente, editando o arquivo.
+  Read-only e tolerante a ausência (None = no-op).
+- `build_prompt` (`claude_runner.py`) e o turno de retomada (`resume.py`) ganham o param
+  `curated_core` e injetam a seção logo após o cabeçalho `[Agora]`, como base de identidade.
+- Flag `CURATED_CORE_ENABLED` (`config.py` + `.env.example`), default **off** = Kobe de
+  hoje. Coletado em `telegram_handler.py` e `resume.py` só quando ligada.
+- `user-data/identity/MEMORY.md.example`: template versionado do núcleo do agente
+  (como USER.md.example), com as regras de uso (pequeno, consolidar, fato confirmado).
+
+**Testes (dev VPS, venv da prod):** import da cadeia (`bot.config`→`telegram_handler`/
+`resume`) OK; campo `curated_core_enabled` presente no `Config`; teste de
+`load_curated_core` com dir temporário (monta USER+MEMORY; trunca no teto; sinaliza
+consolidação); `build_prompt` injeta a seção com a flag e omite sem ela (off = no-op),
+e o núcleo vem antes da `[Mensagem nova]`.
+
+**Reversão:** flag off + restart = comportamento de hoje. `git revert` do commit (sem
+banco). Reversível por construção.
+
+### Adicionado — Highlander Frente 2: infra do Hindsight (memória durável), provisão
+
+**Operador pediu:** subir o Hindsight em modo serviço + Postgres dedicado (pgvector),
+conforme o plano v4 §6, com validação no prod VPS.
+
+**Por quê:** a memória durável (recall cross-sessão) é o que dá "memória infinita" e
+"trazer um assunto velho de volta" sem a maquinaria do Chat Manager. Precisa de storage
+próprio (pgvector) separado do Supabase e da Evolution.
+
+**Foi feito (só infra/autoria — NÃO sobe container, NÃO roda SQL):**
+- `infra/hindsight/docker-compose.yml`: `hindsight-postgres` (`pgvector/pgvector:pg18`,
+  volume dedicado, healthcheck) + `hindsight-app` (`ghcr.io/vectorize-io/hindsight:0.8.3`
+  pinado, Postgres externo via `HINDSIGHT_API_DATABASE_URL`, OpenAI LLM+embedding
+  `text-embedding-3-small`, portas 8888/9999 em loopback). Volume montado no PGDATA do
+  PG18 (`/var/lib/postgresql/18/docker`) pra persistir de verdade.
+- `infra/hindsight/.env.example` (senha + chave OpenAI; `.env` real fica gitignored).
+- `infra/hindsight/smoke_test.py`: smoke isolado via REST (retain→recall de fato plantado,
+  mede latência + `usage`), stdlib só, descobre paths via `/openapi.json`. **Roda no prod VPS.**
+- `infra/hindsight/README.md`: runbook (subir/derrubar/backup), SQL de contingência
+  documentado (`CREATE EXTENSION vector`, rodado pelo operador, não por mim), troubleshooting.
+
+- `infra/hindsight/up_and_smoke.sh`: wrapper que sobe o stack, espera o serviço responder
+  e roda o smoke numa tacada (evita rodar o smoke cedo demais). **Executado pelo
+  Hal/operador no prod VPS** — a sessão Coder não sobe container. README com o passo exato
+  (rodando do worktree, que está fisicamente no prod, sem depender do merge-back).
+
+**Decisões aplicadas:** pg18 default (não pg16); Hindsight 0.8.3 (imagem; release v0.8.3); OpenAI;
+validação no prod VPS (operador não testa em dev).
+
+**Testes (dev):** AST parse do smoke; YAML do compose válido (2 services). O teste real
+(subir stack + smoke) roda no prod VPS pelo operador — é o aceite da Frente 2.2.
+
+**Reversão:** `git revert` (só arquivos novos, nada ligado ainda); no runtime, o stack é
+`docker compose down -v` (isolado, não toca Supabase/Evolution).
+
+### Refatorado — Highlander Frente 0: memória de trabalho ganha casa própria (`bot/memory/`)
+
+**Operador pediu:** implementar o Highlander (reforma da memória) conforme o plano v4
+aprovado — começando por "arrumar a casa" (Frente 0).
+
+**Por quê:** o contexto imediato (memória pura — consulta `messages` só por `topic_id`,
+não toca `conversations`) morava dentro de `bot/chat_manager/`, o gerenciador de
+**conversas**. Isso é o spaghetti que o v4 §0 manda desfazer: cada coisa faz uma coisa,
+com fronteira clara. Regra de ouro (v4 §1): a memória pode consumir dado de conversa, mas
+**conversa nunca monta a janela**.
+
+**Foi feito:**
+- Novo módulo `bot/memory/` (casa da memória de trabalho). `bot/memory/working_set.py`
+  recebe `get_immediate_messages` + `_parse_ts` + constantes `IMMEDIATE_*`, movidos de
+  `bot/chat_manager/context.py` **sem mudar comportamento** (movimento byte-idêntico).
+- `chat_manager/context.py` fica só com os blocos de **conversa** (quente/frio/relações).
+  Mantido o nome `render_chat_manager_section` (e **não** renomeado pra `memory_context`
+  como o v4 sugeria à letra) porque esses blocos são de conversa, não de memória — decisão
+  fundamentada no que o código de fato faz.
+- Call sites atualizados: `telegram_handler.py` e `resume.py` importam
+  `get_immediate_messages` de `bot.memory`.
+- **Não** mexido: `conversation_detector.py` (o v4 dizia "morto", mas é importado por
+  `context.py`/`classifier.py`/`turn_classifier.py` por utils compartilhados — corrigido).
+
+**Testes (dev VPS, venv da prod):** AST parse dos 5 arquivos; import real da cadeia
+completa (`bot.memory` → `bot.telegram_handler`) OK; teste de comportamento da janela
+imediata com fake DB (janela 10 min = 11 msgs; piso sem inventar msg; filtro de
+`[Resumo da sessão` preservado). Sem suite automatizada no repo pra isso ainda.
+
+**Reversão:** `git revert` do commit (refactor puro, sem banco, sem flag). Reversível por
+construção.
+
+### Adicionado — guardrail de fundamentação (anti-confabulação)
+
+Nova seção `## Fundamentação — a regra acima de todas` no topo do `CLAUDE.md`: o
+agente só afirma como fato o que está no contexto ou que acabou de verificar; o
+inverificável (estado do operador, comportamento de app externo, fato do mundo fora
+do contexto) **não se afirma** — no máximo hipótese marcada. Sua própria sugestão não
+é decisão do operador. O verificável (hora, status de trabalho, arquivo) confere antes
+de afirmar.
+
+Saiu da **Auditoria da Verdade** (2026-06). Medido com um arnês de regressão
+(`infra/eval/`, juiz gpt-4o): no caso residual onde o Opus 4.8 ainda escorrega
+(afirmar comportamento de sistema que não observa) a regra leva a confabulação de
+**~40% → 0%** (n=5). Nas demais classes testadas (auto-confirmação, causa-inventada,
+inércia de contexto) o Opus 4.8 já aterra sozinho. Conserto de framework (vale pra
+todo usuário); reversível por commit. Auto-discovery do `CLAUDE.md` → vale no próximo
+turno, sem reinício.
+
+**(2026-06-23) Endurecido com os casos reais** (auto-confirmação pega ao vivo: Mnemosyne
+22/06, modelo-escalonado 09/06): regra macro *"você não tem permissão de mentir, em
+nenhuma circunstância"*; cláusula de proveniência afiada — **o erro mora nos RESUMOS**
+(silêncio / "deixa eu pensar" / mudar de assunto não é aceite nem recusa; nunca escrever
+"você topou/decidiu X" sem fala explícita); + regra de **retomada-após-tempo** (o contexto
+recente pode não ser sobre a intenção atual); + verificar o que **muda com o tempo**
+(status de sala/sessão pode estar defasado). Validação dessas classes é por **uso real** —
+o harness de fixture dá falso-negativo nelas (são contexto-sensíveis).
+
+**(2026-06-23, 2ª rodada) Disciplina de leitura de fonte dinâmica** — cascata real pega ao
+vivo (Dev Kobe, **com o contrato já no ar** → guardrail mole recai, como a auditoria previu):
+ao ler pane/`git`/log/processo/`.jsonl`, **só afirmar o que está literalmente no output**.
+Proibido *input-fantasma* (inferir que o operador digitou algo num pane); `mtime` ≠ atividade;
+output vazio/erro pode ser **falta-de-acesso, não ausência**; não cravar causa de evidência
+parcial. Promovida da memória privada do agente pro contrato (vale pra toda instância). Reduz
+a superfície da classe mais recorrente; não é garantia.
+
 ## [0.15.0] — 2026-06-12 — Consolidação da pilha no main (Apolo + chat-manager v2 + perf SPR + UX + alertas + integrations)
 
 ### Kobe Integrations v1 — broker de capacidades

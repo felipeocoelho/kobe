@@ -46,9 +46,11 @@ from bot.missoes import storage as missoes_storage
 from bot.missoes import orquestrador as missoes_orquestrador
 from bot.alertas.context import render_alertas_abertos
 from bot.chat_manager import activity as cm_activity
-from bot.chat_manager.context import (
+from bot.chat_manager.context import render_chat_manager_section
+from bot.memory import (
     get_immediate_messages,
-    render_chat_manager_section,
+    load_curated_core,
+    render_grounding_signals,
 )
 from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
@@ -76,9 +78,22 @@ from bot.topic_manager import (
     unique_knowledge_path,
 )
 from bot.transcribe import Transcriber, TranscriptionError
+from bot import hindsight_client
 
 
 logger = logging.getLogger("kobe.handler")
+
+# Tasks fire-and-forget (ex.: retain do Hindsight): guardamos a referência num
+# set até concluírem, senão o GC pode coletar a task antes de ela rodar
+# (asyncio só mantém referência fraca). best-effort — não bloqueiam o turno.
+_BG_TASKS: set = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
 
 # Telegram corta mensagens em 4096 caracteres. Mantemos margem pra prefixos
 # de continuação ("…") e quebras de linha.
@@ -772,6 +787,25 @@ async def _handle_user_text(
         audio_transcribed=audio_transcribed,
     )
 
+    # Retain durável (Highlander Frente 2.3): destila fato da mensagem DO
+    # OPERADOR (ground truth — ele disse), não da resposta gerada (que pode
+    # alucinar). Fire-and-forget: async no servidor + best-effort, não bloqueia
+    # nem derruba o turno. Fonte rastreável na metadata (tópico + message_id).
+    if config.hindsight_enabled:
+        _fire_and_forget(
+            hindsight_client.retain(
+                config.hindsight_base_url,
+                hindsight_client.bank_id_for_topic(slug),
+                text,
+                metadata={
+                    "topic": slug or "general",
+                    "message_id": message.message_id,
+                    "source": "telegram",
+                },
+                timeout=config.hindsight_timeout_seconds,
+            )
+        )
+
     # Triagem de missão (v0.13, decisão 4.1=A): se há missão ativa no
     # tópico, o orquestrador peneira a msg ANTES de chamar o Hal. Se a
     # msg é sobre a missão, o orquestrador já respondeu via kobe-notify
@@ -798,6 +832,38 @@ async def _handle_user_text(
         config.kobe_home, message.chat_id, thread_id,
     )
 
+    # Núcleo curado global (Highlander Frente 1.2): identidade + fatos duráveis
+    # auto-injetados, atrás da flag. Off = comportamento de hoje. Read-only,
+    # best-effort — None se a flag está off ou os arquivos não existem.
+    curated_core = (
+        load_curated_core(config.kobe_home)
+        if config.curated_core_enabled
+        else None
+    )
+
+    # Sinais de grounding temporais (Highlander Frente 1.1): há quanto tempo foi
+    # a última troca neste tópico, computado do histórico já carregado. Atrás da
+    # flag; best-effort (None se off ou gap curto).
+    grounding_signals = (
+        render_grounding_signals(history)
+        if config.grounding_signals_enabled
+        else None
+    )
+
+    # Memória durável (Highlander Frente 2.3): recall dos fatos relevantes pra
+    # esta mensagem, por tópico. Best-effort (None se off, serviço fora, ou nada
+    # relevante) — nunca derruba o turno. Adiciona latência só quando ligado.
+    durable_memory: Optional[str] = None
+    if config.hindsight_enabled:
+        _recall = await hindsight_client.recall(
+            config.hindsight_base_url,
+            hindsight_client.bank_id_for_topic(slug),
+            text,
+            limit=config.hindsight_recall_limit,
+            timeout=config.hindsight_timeout_seconds,
+        )
+        durable_memory = hindsight_client.render_recall_section(_recall)
+
     prompt = build_prompt(
         thread_id=thread_id,
         history=history,
@@ -808,6 +874,9 @@ async def _handle_user_text(
         alertas_abertos_info=alertas_abertos_info,
         conversation_summaries=conversation_summaries,
         chat_manager_section=chat_manager_section,
+        curated_core=curated_core,
+        grounding_signals=grounding_signals,
+        durable_memory=durable_memory,
         audio_transcribed=audio_transcribed,
         # Citação extraída da PRÓPRIA mensagem deste turno. Antes do fix de
         # rajada FIFO (card 8b04cf6a), o race do Defeito 1 fazia a msg N+1 ser

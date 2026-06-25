@@ -35,6 +35,20 @@ _KOBE_HOME = Path(__file__).resolve().parent.parent.parent
 if str(_KOBE_HOME) not in sys.path:
     sys.path.insert(0, str(_KOBE_HOME))
 
+# Re-exec no Python do venv do projeto se as deps não estiverem no interpretador
+# atual. O shebang `#!/usr/bin/env python3` resolve pro Python do SISTEMA, que
+# não tem as deps do bot (supabase etc.) — só o venv (.venv) tem. Idempotente:
+# não re-exec se já somos o venv nem se a dep já está disponível.
+import importlib.util  # noqa: E402
+
+_VENV_PY = _KOBE_HOME / ".venv" / "bin" / "python"
+if (
+    _VENV_PY.exists()
+    and sys.executable != str(_VENV_PY)
+    and importlib.util.find_spec("supabase") is None
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
 
 def _fmt(msg: dict) -> str:
     role = msg.get("role", "?")

@@ -47,9 +47,11 @@ from supabase import Client
 from telegram.ext import Application
 
 from bot.alertas.context import render_alertas_abertos
-from bot.chat_manager.context import (
+from bot.chat_manager.context import render_chat_manager_section
+from bot.memory import (
     get_immediate_messages,
-    render_chat_manager_section,
+    load_curated_core,
+    render_grounding_signals,
 )
 from bot.claude_runner import ClaudeError, ClaudeRunner, build_prompt
 from bot.config import Config
@@ -132,6 +134,8 @@ def build_resume_prompt(
     topic_context: Optional[str] = None,
     missao_ativa_info: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
+    curated_core: Optional[str] = None,
+    grounding_signals: Optional[str] = None,
 ) -> str:
     """Monta o prompt do turno de retomada.
 
@@ -149,6 +153,8 @@ def build_resume_prompt(
         alertas_abertos_info=alertas_abertos_info,
         conversation_summaries=conversation_summaries,
         chat_manager_section=chat_manager_section,
+        curated_core=curated_core,
+        grounding_signals=grounding_signals,
     )
 
 
@@ -196,6 +202,20 @@ def _load_resume_context(
         raw = load_topic_context(config.kobe_home, slug) if slug else None
         topic_context, _truncated = consume_truncated_marker(raw)
 
+    # Núcleo curado global (Highlander Frente 1.2): mesma camada do turno
+    # normal, atrás da flag. None se off/ausente.
+    curated_core: Optional[str] = (
+        load_curated_core(config.kobe_home) if config.curated_core_enabled else None
+    )
+
+    # Sinais de grounding temporais (Frente 1.1): há quanto tempo foi a última
+    # troca antes deste ping de retomada. Atrás da flag.
+    grounding_signals: Optional[str] = (
+        render_grounding_signals(immediate)
+        if config.grounding_signals_enabled
+        else None
+    )
+
     # Alertas abertos e missão ativa — linhas baratas de ciência (sem LLM).
     alertas_abertos_info: Optional[str] = None
     missao_ativa_info: Optional[str] = None
@@ -217,6 +237,8 @@ def _load_resume_context(
         "topic_context": topic_context,
         "alertas_abertos_info": alertas_abertos_info,
         "missao_ativa_info": missao_ativa_info,
+        "curated_core": curated_core,
+        "grounding_signals": grounding_signals,
     }
 
 
@@ -297,6 +319,8 @@ async def resume_one_snapshot(app: Application, snap: dict) -> None:
                 topic_context=ctx["topic_context"],
                 missao_ativa_info=ctx["missao_ativa_info"],
                 alertas_abertos_info=ctx["alertas_abertos_info"],
+                curated_core=ctx["curated_core"],
+                grounding_signals=ctx["grounding_signals"],
             )
 
             try:

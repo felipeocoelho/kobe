@@ -31,6 +31,24 @@ class Config:
     assemblyai_api_key: Optional[str]
     openai_api_key: Optional[str]
     chat_manager_enabled: bool
+    # Núcleo curado global (Highlander Frente 1.2): auto-injeta USER.md +
+    # MEMORY.md (identidade + fatos duráveis do agente) no topo do prompt, com
+    # teto e sinal de consolidação. Off = comportamento de hoje (USER.md só
+    # entra se o agente o ler). Ver bot/memory/curated_core.py.
+    curated_core_enabled: bool
+    # Sinais de grounding baratos (Highlander Frente 1.1): injeta no prompt o
+    # que muda com o tempo e o agente senão narraria de memória — hoje, há
+    # quanto tempo foi a última troca neste tópico (anti-confabulação temporal
+    # + lembrete de retomada). Off = comportamento de hoje. Ver bot/memory/grounding.py.
+    grounding_signals_enabled: bool
+    # Memória durável via Hindsight (Highlander Frente 2.3): recall na entrada
+    # (traz fato durável relevante pro prompt) + retain no fim do turno (destila
+    # fato da msg do operador). Serviço REST no host (infra/hindsight/). Off =
+    # Kobe como hoje. Ver bot/hindsight_client.py.
+    hindsight_enabled: bool
+    hindsight_base_url: str
+    hindsight_timeout_seconds: float
+    hindsight_recall_limit: int
     # Despacho de turno pesado em background (cascata de filtros). Quando
     # ligado, a ENTRADA do turno classifica se o pedido vai gerar trabalho
     # pesado e, se for, despacha o `claude -p` em background fora do lock do
@@ -109,6 +127,16 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or None,
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         chat_manager_enabled=_parse_bool(os.getenv("CHAT_MANAGER_ENABLED")),
+        # Highlander: default-ON (decisão do operador 2026-06-24 — "não deixe
+        # atrás de flag-off"). Pra desligar, setar a env como false. curated_core
+        # e grounding são puro-cômputo (no-op gracioso se faltar arquivo/histórico);
+        # hindsight é best-effort (se o serviço estiver fora, falha rápido e segue).
+        curated_core_enabled=_parse_bool(os.getenv("CURATED_CORE_ENABLED", "true")),
+        grounding_signals_enabled=_parse_bool(os.getenv("GROUNDING_SIGNALS_ENABLED", "true")),
+        hindsight_enabled=_parse_bool(os.getenv("HINDSIGHT_ENABLED", "true")),
+        hindsight_base_url=os.getenv("HINDSIGHT_BASE_URL", "http://127.0.0.1:8888"),
+        hindsight_timeout_seconds=float(os.getenv("HINDSIGHT_TIMEOUT_SECONDS", "10")),
+        hindsight_recall_limit=int(os.getenv("HINDSIGHT_RECALL_LIMIT", "5")),
         heavy_dispatch_enabled=_parse_bool(os.getenv("HEAVY_DISPATCH_ENABLED")),
         heavy_promote_after_seconds=float(
             os.getenv("HEAVY_DISPATCH_PROMOTE_AFTER_SECONDS", "12")

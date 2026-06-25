@@ -373,6 +373,9 @@ def build_prompt(
     conversation_active: Optional[dict] = None,
     conversation_summaries: Optional[list[dict]] = None,
     chat_manager_section: Optional[str] = None,
+    curated_core: Optional[str] = None,
+    grounding_signals: Optional[str] = None,
+    durable_memory: Optional[str] = None,
     audio_transcribed: bool = False,
     background_handoff: Optional[str] = None,
     quoted_message: Optional[str] = None,
@@ -416,6 +419,19 @@ def build_prompt(
         ]
     )
 
+    # Sinal de grounding temporal (Highlander Frente 1.1): há quanto tempo foi a
+    # última troca. Cola junto ao [Agora] porque é da mesma natureza (tempo).
+    if grounding_signals:
+        parts.append(grounding_signals)
+
+    # Núcleo curado (Highlander Frente 1.2): identidade do operador (USER.md) +
+    # fatos duráveis do agente (MEMORY.md), auto-injetados. Vai logo após o
+    # cabeçalho [Agora] e antes de tudo, como base de identidade — o resto do
+    # contexto é consequência de quem é o operador e do que o agente já sabe.
+    if curated_core:
+        parts.append("")
+        parts.append(curated_core)
+
     if missao_ativa_info:
         parts.append(missao_ativa_info)
 
@@ -439,6 +455,13 @@ def build_prompt(
     if chat_manager_section:
         parts.append("")
         parts.append(chat_manager_section)
+
+    # Memória durável recuperada (Highlander Frente 2.3): fatos do Hindsight
+    # relevantes pra mensagem atual — o "trazer assunto velho de volta". Vem
+    # como PISTA cética (a própria seção avisa pra confirmar contra a fonte).
+    if durable_memory:
+        parts.append("")
+        parts.append(durable_memory)
 
     # Chat Manager (Fase 4 — legado): header da conversation ativa +
     # cronologia comprimida das sessions arquivadas. Só no caminho antigo

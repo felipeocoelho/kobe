@@ -1,0 +1,35 @@
+# MEMORY — fatos duráveis do agente
+
+> **Template editável.** Este é o núcleo curado do AGENTE (não do operador —
+> esse é o `USER.md`). Quando `CURATED_CORE_ENABLED=true`, o conteúdo daqui é
+> auto-injetado no topo de todo turno (Highlander Frente 1.2). Mantenha PEQUENO
+> e estável: é um núcleo, não um diário. Há um teto (~6000 chars); perto dele o
+> agente é instruído a consolidar (fundir parecidos, descartar o que envelheceu).
+
+> **Como o agente usa este arquivo:** fato durável e confirmado vira uma linha
+> aqui (preferência fixa do operador, decisão arquitetural fechada, pendência
+> recorrente). Use add/replace/remove editando o arquivo. **Não** vire um log de
+> conversa — o histórico cru já vive na janela imediata, e o assunto velho vem
+> do recall. Anti-alucinação (contrato): só registre fato confirmado, e mesmo
+> assim o agente confere contra a fonte antes de afirmar.
+
+## Preferências fixas do operador
+
+- [ex: prefere respostas diretas, sem floreio; updates a cada marco em tarefa longa]
+
+## Decisões arquiteturais fechadas
+
+- [ex: deploy é sempre git, nunca rsync; modelo padrão = Opus, nunca hardcodar modelo]
+
+## Pendências / fios soltos recorrentes
+
+- [ex: validar X em produção quando a feature Y estabilizar]
+
+## Convenções do ambiente
+
+- [ex: dev em /home/.../projetos/<projeto>, prod em /home/.../<projeto>]
+
+---
+
+> Kobe: este é o teu núcleo durável. Consolide quando crescer. Fato aqui não é
+> verdade absoluta — confira contra a fonte viva antes de afirmar (Fundamentação).

@@ -1,9 +1,9 @@
-"""Montagem das camadas de contexto no turno (síncrono, barato, read-only).
+"""Montagem dos blocos de CONVERSA no turno (síncrono, barato, read-only).
 
 O turno é burro e rápido: lê o que o daemon já mastigou e cola no prompt.
-Nada de embedding/LLM aqui (doc §6). Quatro camadas:
+Nada de embedding/LLM aqui (doc §6). Três blocos — todos sobre CONVERSAS
+(a janela imediata de memória mora em `bot/memory/`, Highlander Frente 0):
 
-- IMEDIATO: últimos ~10 min OU últimas N msgs DESTE tópico, verbatim, sempre.
 - QUENTE: ponteiro do assunto corrente (título + tags + marco). Verbatim
   sob demanda via bot/bin/kobe-recall.
 - FRIO: catálogo dos assuntos passados do tópico (tag cloud) + busca
@@ -17,7 +17,6 @@ Tudo filtrado por tópico (predicado obrigatório — Dev Kobe não puxa Olimpo)
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from supabase import Client
@@ -29,76 +28,11 @@ from bot.embedding import cosine_similarity
 logger = logging.getLogger("kobe.chat_manager.context")
 
 
-def _parse_ts(value: str) -> Optional[datetime]:
-    """Parseia timestamp ISO 8601 (created_at do Supabase) com tolerância a
-    sufixo 'Z'. None se vazio/inválido — chamador cai no fallback."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-# Camada imediata — piso híbrido (doc §3): "últimos 10 min OU últimas N
-# msgs, o que for maior". Janela de 10 min (não 2): áudios às vezes
-# demoram minutos pra subir (Telegram/upload), então uma janela curta
-# deixava a fala cair fora do imediato. 10 min cobre o frenesi de envio
-# do operador sem inchar a memória. HARD_CAP dá folga pra janela não ser
-# silenciosamente cortada num pico de mensagens.
-IMMEDIATE_WINDOW_SECONDS = 600
-IMMEDIATE_MIN_COUNT = 8
-IMMEDIATE_HARD_CAP = 60
-
 # Catálogo frio — quantos assuntos passados listar.
 COLD_CATALOG_LIMIT = 12
 # Relações — quantos assuntos relacionados ao corrente destacar.
 RELATED_LIMIT = 3
 RELATED_MIN_SIM = 0.35
-
-
-def get_immediate_messages(
-    db: Client, topic_id: str
-) -> list[dict]:
-    """Camada imediata: piso híbrido (10 min OU N msgs, o que for maior).
-
-    Filtra por tópico (predicado que evita full scan cruzado). Ordem
-    cronológica crescente, pronta pro histórico do prompt.
-    """
-    res = (
-        db.table("messages")
-        .select("role, content, created_at, audio_transcribed")
-        .eq("topic_id", topic_id)
-        .order("created_at", desc=True)
-        .limit(IMMEDIATE_HARD_CAP)
-        .execute()
-    )
-    rows = list(reversed(res.data or []))
-    # Blindagem: jamais deixar um [Resumo da sessão anterior] (role='system'
-    # injetado pelo compactador legado) entrar na janela crua. Com Chat
-    # Manager a compactação não roda mais, mas summaries de antes deste fix
-    # podem estar no fluxo do tópico — filtra pra não poluir o cru. Princípio:
-    # ponteiro, nunca resumo. Contexto profundo vem do kobe-recall, não daqui.
-    rows = [
-        r
-        for r in rows
-        if not (
-            r.get("role") == "system"
-            and (r.get("content") or "").lstrip().startswith("[Resumo da sessão")
-        )
-    ]
-    if not rows:
-        return []
-    # Âncora da janela: timestamp da ÚLTIMA mensagem da conversa, NÃO 'agora'.
-    # Assim "últimos 10 min" são os 10 min finais de CONVERSA real — se o
-    # operador larga o telefone por horas e volta, o imediato ainda traz o fim
-    # do último papo inteiro, em vez de cair pro piso de N msgs decapitado.
-    # Fallback pra now() só se o último created_at vier ilegível.
-    anchor = _parse_ts(rows[-1].get("created_at") or "") or datetime.now(timezone.utc)
-    cutoff = (anchor - timedelta(seconds=IMMEDIATE_WINDOW_SECONDS)).isoformat()
-    within = [r for r in rows if (r.get("created_at") or "") >= cutoff]
-    keep = max(len(within), IMMEDIATE_MIN_COUNT)
-    return rows[-keep:]
 
 
 def _load_active_conversation(db: Client, topic_id: str) -> Optional[dict]:

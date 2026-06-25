@@ -373,6 +373,12 @@ def main() -> None:
         level=config.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Segurança: httpx/httpcore logam a URL completa de cada request em INFO, e a
+    # URL da API do Telegram embute o token do bot (.../bot<TOKEN>/metodo) — isso
+    # vazava o token em texto puro no journal do systemd. Subir esses loggers pra
+    # WARNING corta o vazamento sem perder erros reais.
+    for _noisy_logger in ("httpx", "httpcore", "telegram"):
+        logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
     logger.info(
         "kobe iniciando — usuários autorizados=%d home=%s",
         len(config.allowed_user_ids),

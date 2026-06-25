@@ -1,0 +1,92 @@
+# Hindsight — memória durável do Kobe (Highlander, Frente 2)
+# ============================================================================
+# Serviço de memória de longo prazo (retain / recall / reflect) da Vectorize
+# (https://github.com/vectorize-io/hindsight, MIT). Roda em modo SERVIÇO
+# (container próprio, API MCP sobre HTTP) — NÃO lib embutida — apontando pra um
+# Postgres dedicado NOVO (pgvector), separado do Postgres da Evolution e do
+# Supabase. Esse Postgres é o futuro lar da memória do Kobe (a migração da
+# memória de trabalho vem depois; está FORA do escopo desta rodada).
+#
+# Decisões travadas (plano v4 §6 + operador 2026-06-24):
+#   - Postgres dedicado, imagem pgvector/pgvector:pg18 (default upstream).
+#   - Hindsight pinado em 0.8.3 (tag da imagem; o release no GitHub é v0.8.3,
+#     mas a imagem Docker NÃO usa o 'v') — nunca :latest.
+#   - Provedor LLM/embedding = OpenAI (reusa a OPENAI_API_KEY do Kobe).
+#   - Portas em LOOPBACK (127.0.0.1) — como a Evolution. Acesso externo só via
+#     túnel SSH (igual pgAdmin).
+#
+# AMBIENTE DE VALIDAÇÃO: prod VPS (o operador não testa em dev). Subir aqui,
+# rodar o smoke (smoke_test.py) aqui. Reversível: `docker compose down -v`
+# apaga o container + volume sem tocar Supabase nem Evolution.
+#
+# Sobe:
+#   cd $KOBE_HOME/infra/hindsight/
+#   cp .env.example .env   # e preencha HINDSIGHT_DB_PASSWORD + OPENAI_API_KEY
+#   sg docker -c "docker compose up -d"
+#
+# Derruba:
+#   sg docker -c "docker compose down"       # mantém volume (memória)
+#   sg docker -c "docker compose down -v"     # apaga a memória durável
+#
+# Runbook completo: README.md (mesma pasta).
+# ============================================================================
+
+services:
+  hindsight-db:
+    container_name: hindsight-postgres
+    image: pgvector/pgvector:pg${HINDSIGHT_DB_VERSION:-18}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${HINDSIGHT_DB_USER:-hindsight_user}
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD:?defina HINDSIGHT_DB_PASSWORD no .env}
+      POSTGRES_DB: ${HINDSIGHT_DB_NAME:-hindsight_db}
+    volumes:
+      # PG18 mudou o PGDATA default pra /var/lib/postgresql/<versao>/docker —
+      # montar nesse path (igual ao compose oficial external-pg do Hindsight),
+      # senão o volume não persiste os dados de verdade.
+      - hindsight-postgres-data:/var/lib/postgresql/${HINDSIGHT_DB_VERSION:-18}/docker
+    networks:
+      - hindsight-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${HINDSIGHT_DB_USER:-hindsight_user} -d ${HINDSIGHT_DB_NAME:-hindsight_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  hindsight-app:
+    container_name: hindsight-app
+    image: ghcr.io/vectorize-io/hindsight:${HINDSIGHT_VERSION:-0.8.3}
+    restart: unless-stopped
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8888:8888"   # ⚠️ loopback — API MCP/HTTP
+      - "127.0.0.1:9999:9999"   # ⚠️ loopback — admin UI (acesso via túnel SSH)
+    environment:
+      # --- Provedor LLM/embedding: OpenAI (reusa a chave do Kobe) ---
+      HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_LLM_PROVIDER:-openai}
+      HINDSIGHT_API_LLM_API_KEY: ${OPENAI_API_KEY:?defina OPENAI_API_KEY no .env}
+      # Modelo: deixar o default do Hindsight (mini-tier OpenAI) decidir, salvo
+      # override explícito. Subir o reflect só se a reconciliação ficar fraca.
+      # HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+      # --- Embeddings: OpenAI text-embedding-3-small (decisão v4 §6) ---
+      # Sem isto, o Hindsight cai no embedding LOCAL (onnx, BAAI/bge-small, 384d).
+      # Provider=openai reusa a mesma chave do LLM (HINDSIGHT_API_LLM_API_KEY).
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_EMBEDDINGS_PROVIDER:-openai}
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: text-embedding-3-small
+      # --- Storage: Postgres dedicado externo (pgvector) ---
+      HINDSIGHT_API_DATABASE_URL: postgresql://${HINDSIGHT_DB_USER:-hindsight_user}:${HINDSIGHT_DB_PASSWORD:?defina HINDSIGHT_DB_PASSWORD no .env}@hindsight-db:5432/${HINDSIGHT_DB_NAME:-hindsight_db}
+      HINDSIGHT_API_VECTOR_EXTENSION: pgvector
+    networks:
+      - hindsight-net
+
+networks:
+  hindsight-net:
+    name: hindsight-net
+    driver: bridge
+
+volumes:
+  hindsight-postgres-data:
+    name: hindsight-postgres-data
