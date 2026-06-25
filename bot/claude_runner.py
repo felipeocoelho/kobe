@@ -49,6 +49,15 @@ OPERATOR_TZ = ZoneInfo("America/Sao_Paulo")
 # transcrição e que o tom é de fala, não de texto escrito.
 AUDIO_TRANSCRIBED_TAG = "🎤 [áudio transcrito]"
 
+# Limite do buffer de leitura do stdout do `claude` (StreamReader do asyncio).
+# O default do asyncio é 64KB; o stream-json do claude emite UMA linha por
+# evento, e um resultado gordo de ferramenta (ler arquivo grande / fetch /
+# tool_result extenso) estoura 64KB numa linha só → `readline()` levanta
+# `ValueError` (LimitOverrunError) e, como o erro não é `ClaudeError`, derrubava
+# o turno inteiro — prendendo o "digitando…" no foreground. 10MB cobre qualquer
+# evento realista. (bug do "digitando…" fantasma, 2026-06-25)
+STDOUT_BUFFER_LIMIT_BYTES = 10 * 1024 * 1024
+
 
 logger = logging.getLogger("kobe.claude")
 
@@ -168,6 +177,10 @@ class ClaudeRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # Buffer maior que o default de 64KB: o stream-json do claude
+                # emite uma linha por evento e um tool_result gordo estoura 64KB
+                # numa linha só (ver STDOUT_BUFFER_LIMIT_BYTES).
+                limit=STDOUT_BUFFER_LIMIT_BYTES,
             )
         except FileNotFoundError as exc:
             raise ClaudeNotFoundError(
@@ -199,7 +212,17 @@ class ClaudeRunner:
             nonlocal result_text, non_json_lines, result_usage, result_cost
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    # Degradação amigável: mesmo com o buffer de 10MB, uma linha
+                    # pathológica > limite ainda estouraria. Converte em
+                    # ClaudeError pro `_resolve_claude` tratar (mensagem amigável
+                    # ao operador) em vez de derrubar o turno e prender o typing.
+                    raise ClaudeError(
+                        f"linha do stream do claude excedeu o buffer de "
+                        f"{STDOUT_BUFFER_LIMIT_BYTES} bytes"
+                    ) from exc
                 if not line:
                     break
                 line = line.strip()
@@ -266,6 +289,19 @@ class ClaudeRunner:
                 f"Claude não respondeu em {effective_timeout}s.",
                 partial_text=_join_texts(assistant_texts),
             ) from exc
+        except ClaudeError:
+            # Overrun do buffer (única origem de ClaudeError neste bloco): o
+            # claude segue em voo, bloqueado escrevendo no pipe cheio. Mata o
+            # subprocess e drena o stderr_task pra NÃO vazar processo/task, e
+            # re-levanta pro `_resolve_claude` virar mensagem amigável.
+            proc.kill()
+            await proc.wait()
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            raise
 
         if proc.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()

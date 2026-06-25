@@ -975,112 +975,107 @@ async def _handle_user_text(
 
     # ── Foreground (inline) ───────────────────────────────────────────────
     # Roda o claude como task pra poder aplicar a RETAGUARDA (teto de tempo).
-    typing_task = asyncio.create_task(_keep_typing(message.chat_id, thread_id, bot))
-    reporter = ProgressReporter(
-        chat_id=message.chat_id,
-        thread_id=thread_id,
-        bot=bot,
-        reply_to_message_id=message.message_id,
-    )
-    await reporter.start()
-    claude_started_at = time.monotonic()
-    claude_task = asyncio.create_task(
-        claude.run(prompt, on_event=reporter.on_event, **run_kwargs)
-    )
+    # O "digitando…" vive DENTRO do context manager: ele GARANTE o cancelamento
+    # do loop na saída do bloco — caminho feliz, `return` da promoção OU qualquer
+    # exceção — fechando a assimetria com o caminho background, que já tinha
+    # essa proteção (bug do "digitando…" fantasma, 2026-06-25).
+    async with _typing_indicator(message.chat_id, thread_id, bot):
+        reporter = ProgressReporter(
+            chat_id=message.chat_id,
+            thread_id=thread_id,
+            bot=bot,
+            reply_to_message_id=message.message_id,
+        )
+        await reporter.start()
+        claude_started_at = time.monotonic()
+        claude_task = asyncio.create_task(
+            claude.run(prompt, on_event=reporter.on_event, **run_kwargs)
+        )
 
-    if config.heavy_dispatch_enabled:
-        # Retaguarda: espera o claude até o teto. `shield` garante que o
-        # estouro do wait_for NÃO cancela o claude — ele continua rodando.
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(claude_task),
-                timeout=config.heavy_promote_after_seconds,
-            )
-        except asyncio.TimeoutError:
-            # Estourou o teto segurando o lock → PROMOVE pra background. O
-            # claude (que continua em voo, NÃO recomeça) entrega o resultado
-            # async quando terminar. Encerra o sinal foreground e libera o
-            # lock retornando.
-            logger.info(
-                "heavy_dispatch %s PROMOVIDO após %.1fs (retaguarda)",
-                _topic_label(thread_id),
-                config.heavy_promote_after_seconds,
-            )
-            typing_task.cancel()
+        if config.heavy_dispatch_enabled:
+            # Retaguarda: espera o claude até o teto. `shield` garante que o
+            # estouro do wait_for NÃO cancela o claude — ele continua rodando.
             try:
-                await typing_task
-            except asyncio.CancelledError:
-                pass
-            await reporter.finish(delete=True)
-            # Aviso de promoção (Fase C, decisão item 0): só mandamos o aviso
-            # enlatado se o Hal NÃO avisou nada nesse turno. No caminho normal
-            # do b2-ii ele já emitiu o ack ("vou olhar X, já volto") ANTES das
-            # ferramentas lentas que estouraram o teto — mandar o enlatado por
-            # cima seria aviso duplo. Sem ack (Hal não previu a demora), o
-            # enlatado é a rede que evita o operador ficar no escuro. Aqui a
-            # run em voo NÃO recomeça (Design X), então ela não tem nota de
-            # handoff nem relê janela — só termina e entrega.
-            if not reporter.acked:
-                await _send_background_notice(message, promoted=True)
-            else:
-                logger.info(
-                    "heavy_dispatch %s aviso de promoção SUPRIMIDO (Hal já ackou)",
-                    _topic_label(thread_id),
+                await asyncio.wait_for(
+                    asyncio.shield(claude_task),
+                    timeout=config.heavy_promote_after_seconds,
                 )
-            asyncio.create_task(
-                _run_heavy_in_background(
-                    message=message,
-                    prompt=prompt,
-                    claude=claude,
-                    run_kwargs=run_kwargs,
-                    db=db,
-                    session_id=session_id,
-                    topic_id=topic_id,
-                    history_len=len(history),
-                    claude_task=claude_task,
-                    started_at=claude_started_at,
-                    tool_count_fn=lambda: reporter.tool_call_count,
-                ),
-                name=f"heavy-promoted-{session_id}",
-            )
-            return
-        except Exception:  # noqa: BLE001 — erro do claude cai no _resolve abaixo
-            pass
+            except asyncio.TimeoutError:
+                # Estourou o teto segurando o lock → PROMOVE pra background. O
+                # claude (que continua em voo, NÃO recomeça) entrega o resultado
+                # async quando terminar. Encerra o sinal foreground e libera o
+                # lock retornando — o `_typing_indicator` cancela o typing no
+                # `return` (o background recria o seu próprio).
+                logger.info(
+                    "heavy_dispatch %s PROMOVIDO após %.1fs (retaguarda)",
+                    _topic_label(thread_id),
+                    config.heavy_promote_after_seconds,
+                )
+                await reporter.finish(delete=True)
+                # Aviso de promoção (Fase C, decisão item 0): só mandamos o aviso
+                # enlatado se o Hal NÃO avisou nada nesse turno. No caminho normal
+                # do b2-ii ele já emitiu o ack ("vou olhar X, já volto") ANTES das
+                # ferramentas lentas que estouraram o teto — mandar o enlatado por
+                # cima seria aviso duplo. Sem ack (Hal não previu a demora), o
+                # enlatado é a rede que evita o operador ficar no escuro. Aqui a
+                # run em voo NÃO recomeça (Design X), então ela não tem nota de
+                # handoff nem relê janela — só termina e entrega.
+                if not reporter.acked:
+                    await _send_background_notice(message, promoted=True)
+                else:
+                    logger.info(
+                        "heavy_dispatch %s aviso de promoção SUPRIMIDO (Hal já ackou)",
+                        _topic_label(thread_id),
+                    )
+                asyncio.create_task(
+                    _run_heavy_in_background(
+                        message=message,
+                        prompt=prompt,
+                        claude=claude,
+                        run_kwargs=run_kwargs,
+                        db=db,
+                        session_id=session_id,
+                        topic_id=topic_id,
+                        history_len=len(history),
+                        claude_task=claude_task,
+                        started_at=claude_started_at,
+                        tool_count_fn=lambda: reporter.tool_call_count,
+                    ),
+                    name=f"heavy-promoted-{session_id}",
+                )
+                return
+            except Exception:  # noqa: BLE001 — erro do claude cai no _resolve abaixo
+                pass
 
-    # Concluído dentro do teto (ou flag off): consome, encerra sinais,
-    # entrega e persiste — caminho inline de sempre.
-    reply_text = await _resolve_claude(
-        claude_task,
-        started_at=claude_started_at,
-        prompt_len=len(prompt),
-        history_len=len(history),
-        tool_count_fn=lambda: reporter.tool_call_count,
-        label="fg",
-    )
-    # Encerra a status do reporter, mas MANTÉM o "digitando…" vivo DURANTE a
-    # entrega. A entrega (conversão markdown→HTML + envio, multi-chunk se a
-    # resposta é longa) leva alguns segundos; cancelar o typing antes do envio
-    # deixava um buraco de "nada acontecendo" entre a status sumir e a msg
-    # chegar (relato Felipe 2026-06-05). O typing renovado cobre essa janela —
-    # só cancela depois que a resposta final saiu.
-    await reporter.finish(delete=True)
+        # Concluído dentro do teto (ou flag off): consome, encerra sinais,
+        # entrega e persiste — caminho inline de sempre.
+        reply_text = await _resolve_claude(
+            claude_task,
+            started_at=claude_started_at,
+            prompt_len=len(prompt),
+            history_len=len(history),
+            tool_count_fn=lambda: reporter.tool_call_count,
+            label="fg",
+        )
+        # Encerra a status do reporter, mas MANTÉM o "digitando…" vivo DURANTE a
+        # entrega. A entrega (conversão markdown→HTML + envio, multi-chunk se a
+        # resposta é longa) leva alguns segundos; cancelar o typing antes do envio
+        # deixava um buraco de "nada acontecendo" entre a status sumir e a msg
+        # chegar (relato Felipe 2026-06-05). O typing renovado cobre essa janela —
+        # o `_typing_indicator` só cancela na saída do bloco (após a entrega).
+        await reporter.finish(delete=True)
 
-    # Resposta final inteira, de uma vez (sem streaming). A status já foi
-    # apagada (delete=True); o "digitando…" segue aceso até o envio terminar.
-    sent_message_id = await _send_long_text(message, reply_text)
-    typing_task.cancel()
-    try:
-        await typing_task
-    except asyncio.CancelledError:
-        pass
-    insert_message(
-        db,
-        session_id=session_id,
-        topic_id=topic_id,
-        role="assistant",
-        content=reply_text,
-        telegram_message_id=sent_message_id,
-    )
+        # Resposta final inteira, de uma vez (sem streaming). A status já foi
+        # apagada (delete=True); o "digitando…" segue aceso até o envio terminar.
+        sent_message_id = await _send_long_text(message, reply_text)
+        insert_message(
+            db,
+            session_id=session_id,
+            topic_id=topic_id,
+            role="assistant",
+            content=reply_text,
+            telegram_message_id=sent_message_id,
+        )
 
 
 # ── Despacho de turno pesado: helpers ─────────────────────────────────────
@@ -1411,6 +1406,25 @@ async def _run_heavy_in_background(
         typing_task.cancel()
         try:
             await typing_task
+        except asyncio.CancelledError:
+            pass
+
+
+@contextlib.asynccontextmanager
+async def _typing_indicator(chat_id: int, thread_id: Optional[int], bot):
+    """Mantém o "digitando…" vivo dentro do bloco e GARANTE o cancelamento na
+    saída — sucesso OU exceção. Espelha a proteção try/finally que o caminho
+    background (`_run_heavy_in_background`) já tinha; sem isso, um crash no
+    foreground (ex.: `_resolve_claude` re-levantando um erro não-`ClaudeError`,
+    ou falha em `_send_long_text`) deixava o loop `_keep_typing` órfão,
+    reemitindo "digitando…" pra sempre até o bot reiniciar (bug 2026-06-25)."""
+    task = asyncio.create_task(_keep_typing(chat_id, thread_id, bot))
+    try:
+        yield task
+    finally:
+        task.cancel()
+        try:
+            await task
         except asyncio.CancelledError:
             pass
 

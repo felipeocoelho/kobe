@@ -4,6 +4,46 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fix — "digitando…" fantasma quando o turno foreground crasha (2026-06-25)
+
+**Operador pediu:** corrigir o indicador "digitando…" que ficava preso/fantasma no
+Telegram quando um turno do Kobe crashava (episódio com `LimitOverrunError` ~12:29).
+
+**Por quê (duas camadas, confirmadas no código):**
+- **Gatilho:** o reader do stdout do `claude` (`bot/claude_runner.py`) usava o buffer
+  default do asyncio (64KB). O stream-json emite UMA linha por evento; um tool_result
+  gordo (ler arquivo grande / fetch) estoura 64KB numa linha só → `readline()` levanta
+  `ValueError`/`LimitOverrunError`, que NÃO é `ClaudeError` e derrubava o turno inteiro.
+- **Por que o typing ficava preso:** o "digitando…" é um loop (`_keep_typing`) que
+  reemite a chatAction a cada 4s. No caminho **foreground** (`_handle_user_text`) o
+  `typing_task` era cancelado só no caminho feliz — SEM `try/finally`. Quando o turno
+  morria antes do cancel (o `ValueError` cru fazia o próprio `_resolve_claude`
+  re-levantar), o loop virava órfão e reemitia "digitando…" pra sempre até o bot
+  reiniciar. O caminho **background** já tinha a proteção; a assimetria era o defeito.
+
+**Foi feito:**
+- **Buffer (gatilho):** `STDOUT_BUFFER_LIMIT_BYTES = 10MB` passado como `limit=` ao
+  `create_subprocess_exec`. + degradação amigável: se mesmo assim uma linha estourar o
+  limite, o overrun vira `ClaudeError` (mensagem amigável via `_resolve_claude`) em vez
+  de crash — e o subprocess é morto/reapado (sem vazar processo nem `stderr_task`).
+- **Blindagem (defeito):** novo context manager `_typing_indicator` em
+  `bot/telegram_handler.py` que GARANTE o cancelamento do loop na saída do bloco —
+  caminho feliz, `return` da promoção OU qualquer exceção. O foreground agora usa
+  `async with`, espelhando a proteção que o background já tinha. Remove os cancels
+  manuais duplicados.
+
+**Testes (dev VPS, venv `/home/felipe/projetos/kobe/.venv`):**
+- `tests/test_claude_runner_buffer.py` — fake-claude cuspindo linha JSON > 64KB; passa
+  com o fix e (provado por monkeypatch a 64KB) falha sem ele. Teardown do subprocess no
+  overrun validado (sem warning de "Event loop closed").
+- `tests/test_typing_indicator.py` — cancela o typing na saída normal E quando o corpo
+  levanta exceção (o caso do bug).
+- Suíte completa: 67 passam, 4 falham — as 4 são DÉBITO PRÉ-EXISTENTE de `test_resume.py`
+  (KeyError `curated_core`, do merge Highlander v2; falham idêntico no HEAD limpo, nada a
+  ver com este fix).
+
+**Reversão:** `git revert` dos 2 commits; zero migração/estado. Worktree isolado.
+
 ### Docs — runbooks: deploy rsync → git
 
 Atualiza `docs/runbooks/keyko-e-missoes.md` e `ux-resposta-ack-despacho.md` pra
