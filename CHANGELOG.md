@@ -4,6 +4,219 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Docs — runbooks: deploy rsync → git
+
+Atualiza `docs/runbooks/keyko-e-missoes.md` e `ux-resposta-ack-despacho.md` pra
+refletir a regra vigente "deploy é git, nunca rsync" (prod **puxa a versão** do repo
+dev por `git pull`; `.env`/`user-data/` sobrevivem). Substitui os blocos `rsync
+--delete` por `git push origin main` (dev) + `git pull` (prod). Mudanças que já
+estavam no working tree do dev VPS (não-Highlander); commitadas pra destravar o
+`publish.sh` (que exige árvore limpa). `docs/runbooks/` é excluído do repo público.
+
+### Highlander v2 — F0: régua (arnês de regressão) entra no repo
+
+**Operador pediu:** executar o Highlander v2 (redesenho do recall); F0 = "a régua primeiro,
+gate de tudo: nada sobe sem responder 'resolve quantos dos casos?'".
+
+**Por quê:** o arnês `infra/eval/` vivia untracked no dev VPS — sem ele no repo, todo
+conserto anti-alucinação subia no escuro. A Auditoria da Verdade fixou a regra de ouro:
+medir antes e depois.
+
+**Foi feito:** `infra/eval/{harness.py,README.md,.gitignore}` versionados (os `cases/` e
+`results/` ficam de fora pelo `.gitignore` interno — contêm trecho real de conversa, são
+privados). O arnês reconstrói o prompt via o `build_prompt` REAL do bot e roda `claude -p`
+sandbox (`--tools ""`) por caso, medindo se a alucinação reaparece (keyword_any | llm_judge).
+
+**Testes (dev):** `--dry` valida a montagem dos 6 casos-âncora; baseline `--run --n 3`
+rodado no worktree com o venv do dev VPS (gasto de Opus autorizado pelo operador). Número
+registrado no commit de fechamento da régua.
+
+**Limitação honesta:** o arnês reconstrói histórico + nota de background + `[Agora]` +
+contrato (CLAUDE.md); ainda NÃO injeta as camadas Highlander (curated_core / grounding /
+recall do Hindsight), que o `build_prompt` recebe como `None` no caminho do arnês. Logo a
+régua mede a eficácia do CONTRATO e (na F5) dos GATES — não o efeito do recall do Hindsight.
+
+**Reversão:** `git revert` do commit; o arnês é ferramenta de bancada, zero efeito em runtime.
+
+### Highlander v2 — F5: gates de estado vivo (P1 background + P2 verificável-barato)
+
+**Operador pediu:** a metade da alucinação que o Hindsight NÃO cobre — "estado vivo": o
+"você tá dormindo" respondendo mensagem que ele acabou de mandar, e o status de sala/job
+narrado de memória. A Auditoria marcou P2 como o MAIOR lever (~66% dos casos).
+
+**Foi feito:**
+- **P2 — gate de verificável-barato (estado do operador)** em `bot/memory/grounding.py`: numa
+  retomada (gap > 30 min), além do "última msg há ~N", o bloco agora crava o FATO
+  VERIFICÁVEL que o código conhece — "o operador acabou de te enviar a mensagem deste turno;
+  ele está presente e falando contigo AGORA" — e NOMEIA o atalho proibido ("não afirme que
+  está dormindo/ausente/ocupado; você não observa o estado dele"). Mata o caso-âncora "você
+  está dormindo" na raiz: o prior do modelo ("tarefa longa → noite → dorme") perde pro fato.
+  Atrás da flag existente `GROUNDING_SIGNALS_ENABLED`.
+- **P1 — gate de estado de background vivo** (novo `bot/memory/background_state.py`): a cada
+  turno o código LÊ os arquivos de estado dos trabalhos de background do tópico (Coder
+  `coder-sessions/<thread>/*.json`), carimba a idade (last_activity, janela de 6h, cap 6) e
+  injeta `[Estado de background vivo — LIDO AGORA]` com `state=` real + idade + a regra dura
+  "use ISTO, não memória; o que não está aqui provavelmente terminou". É o conserto que o
+  operador pediu pro usuário 2: o estado vivo EMPURRADO pelo código (como `[Alertas
+  aguardando confirmação]`), não instrução mole que depende do agente lembrar de olhar.
+  Novo param `background_state` no `build_prompt` (renderizado junto do grounding). Flag
+  `BACKGROUND_STATE_GATE_ENABLED` (default-on, no-op sem trabalho recente).
+- **Régua faithful ao P2:** `infra/eval/harness.py` passa a preservar `created_at` e injetar
+  o grounding — assim casos COM timestamp medem o gate, não só o contrato.
+
+**P5 (calibrar o daemon detector) = N/A:** o detector vivo é o daemon do Chat Manager, que a
+F1 aposentou (`CHAT_MANAGER_ENABLED=false`) — não há daemon a calibrar.
+
+**Honestidade sobre a régua (por que não há "resolve quantos" novo):** o baseline (1/18 = 6%)
+já PASSA os casos de estado-do-operador (o contrato segura na reconstrução mínima do arnês);
+o único que falha (`tenta-de-novo-receita`) é inércia-de-contexto (família F2), que NENHUM
+gate de F5 mira (era território do P5, agora N/A). E os casos não têm timestamp, então o
+arnês não dispara o P2. Ou seja: **a régua é estruturalmente cega aos gates** (cases
+sintéticos, prompt mínimo, sem timestamp) — eles atacam modos de falha de PROD que o arnês
+sub-reproduz. Validação real: unit tests (abaixo) + prod (operador). Não gastei Opus
+re-rodando a régua pra reproduzir o mesmo 1/18.
+
+**Testes (dev):** unit completo (`.local/test_f5.py`, fora do git): P2 dispara no gap com o
+fato de presença + nomeia "dormindo"; gap curto → None. P1 lê os JSONs, filtra job velho
+(>6h), ordena por idade, renderiza running+completed com a regra dura; sem job / thread None
+→ None. `py_compile` de todos os 6 arquivos. Harness roda `--dry` limpo pós-edição.
+
+**Reversão:** `GROUNDING_SIGNALS_ENABLED=false` (P2) e `BACKGROUND_STATE_GATE_ENABLED=false`
+(P1); `git revert` desfaz. Read-only, nada destrutivo.
+
+### Highlander v2 — F4: janela imediata bounded por TOKEN (anti-rajada-de-áudio)
+
+**Operador pediu:** janela com teto de TOKEN — "hoje o teto é 60 mensagens; uma rajada de
+áudios longos estoura" (queima o teto de 5h e dilui o contrato).
+
+**Foi feito:**
+- `bot/memory/working_set.py`: além do piso híbrido (10 min OU N msgs) e do hard cap de 60
+  MENSAGENS, agora há `IMMEDIATE_TOKEN_CAP` (default 8000 tokens, env
+  `WORKING_MEMORY_TOKEN_CAP`). `_bound_by_tokens` mantém as msgs mais RECENTES que cabem no
+  teto e descarta as mais antigas da janela. Garante ao menos a última msg (cortar o
+  contexto imediato do turno seria pior que o estouro). Estimativa barata (~4 chars/token,
+  sem tokenizer). Cap ≤ 0 desliga (volta ao pré-F4).
+- O núcleo curado (CURATED_CORE) já fica no TOPO do prompt (Frente 1.2) — a metade
+  "núcleo estável cacheável" do plano já estava satisfeita.
+
+**Deferido honestamente (precisa de observação/experimento, não de código pontual):**
+- **P0b — cache do prefixo:** medir `cache_read_input_tokens`/`input_tokens` por turno
+  exige `claude -p` em `--output-format` com usage + ~1 semana de telemetria. Mexer no
+  formato de saída arrisca o parsing da resposta do bot — NÃO toquei. Fica como
+  instrumentação a fazer com calma (não bloqueia o resto).
+- **P6 — ENCOLHER os ~58 KB:** é experimento (subtrair texto do contrato e medir pela
+  régua se a alucinação cai), não edição cega. Fica pra uma rodada própria com a régua.
+
+**Testes (dev):** unit do `_bound_by_tokens` — under-cap mantém tudo; over-cap corta os
+mais antigos preservando os recentes; última msg gigante sozinha é mantida; ordem
+cronológica preservada; cap=0 vira no-op; vazio → vazio. `py_compile`.
+
+**Reversão:** `WORKING_MEMORY_TOKEN_CAP=0` desliga o teto; `git revert` desfaz.
+
+### Highlander v2 — F3: Hindsight assume o recall (recall cru + reflect citado)
+
+**Operador pediu:** "uma roda de recall só (Hindsight)"; recall cru pro caminho barato,
+reflect citado pro caminho confiável; aposentar o kobe-recall (vai junto com o CM).
+
+**Foi feito:**
+- **recall (caminho barato)** já wired no turno, atrás de `HINDSIGHT_RECALL` (sub-flag da
+  F1). Re-ligar = `HINDSIGHT_RECALL=true` + restart. **Mantido OFF no deploy** (ver nota).
+- **reflect (caminho confiável)**: novo helper `bot/bin/kobe-reflect "<pergunta>"` — resposta
+  sintetizada e CITADA (`based_on.memories`) do bank do tópico atual, cético por construção
+  (skepticism=5/literalism=5 + directive de Fundamentação). Resolve o tópico via
+  `get_topic_slug` (KOBE_CHAT_ID/THREAD_ID) → bank `kobe-<slug>`. Best-effort: serviço fora =
+  avisa e sai. Quando não há registro, diz "não há base; não afirme de memória" (em vez de
+  confabular). `reflect_mission` força resposta em português.
+- **kobe-recall aposentado junto com o CM**: o helper depende das tabelas `conversations`
+  (populadas pelo daemon do Chat Manager). Com `CHAT_MANAGER_ENABLED=false`, o daemon fica
+  inerte → o kobe-recall degrada (sem dado novo). O papel de recall durável passa pro
+  Hindsight. O script fica (aposentar = desligar, não remover).
+
+**Nota honesta sobre a régua (por que recall fica OFF no deploy):** o arnês `infra/eval/`
+NÃO injeta o bloco de recall (o `build_prompt` recebe `durable_memory=None` no caminho do
+arnês), e os casos são conversas sintéticas SEM memória durável correspondente — então a
+régua **não consegue medir** o efeito do recall. O plano (§6) é explícito: "não religar a
+injeção de recall sem a régua medir (risco da dor nº1)". Logo: o código está pronto e
+reversível, mas o FLIP `HINDSIGHT_RECALL=true` fica pro operador validar em prod (onde há
+memória real) — é a validação-de-produto dele, não automatizável aqui. O reflect (helper)
+não tem esse risco (é on-demand, cético+citado, diz "não sei" sem inventar).
+
+**Testes (dev, serviço vivo):** `kobe-reflect` sem arg → usage; com pergunta → reflete
+contra o bank, devolve síntese citada ou "sem registro" (testado: respondeu "não tenho
+informação" em vez de confabular). `py_compile` do helper + client.
+
+**Reversão:** `HINDSIGHT_RECALL=false` (já é o default) mantém o recall mudo; `git revert`
+remove o helper. Nada destrutivo.
+
+### Highlander v2 — F2: re-fia o Hindsight pro best-practice (0.8.3)
+
+**Operador pediu:** corrigir a fiação do Hindsight, que estava fora do manual (retain de
+mensagem solta com id aleatório, sem context/tags, bank sem missão nem disposição).
+
+**Por quê:** o anti-padrão do plano (§6) — "retain de mensagem solta com UUID aleatório
+duplica documento; usar id estável" — era exatamente o que acontecia. E o bank não era
+cético por construção, então o reflect (a peça-ouro anti-alucinação) não tinha como
+"só responder do que está citado".
+
+**Foi feito (verificado contra a API 0.8.3 ao vivo):**
+- **retain agrupado:** `document_id` ESTÁVEL (= `session-<id>`) + `update_mode="append"` —
+  a conversa vira UM documento que cresce, não N memórias soltas. + `context` ("Conversa
+  Telegram, tópico X") e `tags` (`topic:<slug>`, `source:telegram`). Conservador de
+  propósito: só a msg DO OPERADOR (ground truth) — NÃO a resposta gerada (anti-confabulação).
+  A tensão "conversa inteira × só-operador" está documentada no módulo: a resolução grupa a
+  conversa por id estável (conserta a duplicação, o defeito real) sem gravar texto gerado.
+- **bank configurado (idempotente, 1× por processo via `_ensure_bank`):** disposições
+  `skepticism=5`, `literalism=5` (cético+literal por construção) + `retain_mission` /
+  `reflect_mission` (PATCH `/config`) + uma **directive** `kobe-fundamentacao` (POST
+  `/directives`, criada só se não existe) que codifica a regra de Fundamentação como regra
+  dura injetada em todo reflect.
+- **recall melhorado:** `types=['world','experience']`, `budget='mid'`, filtro por `tags`,
+  `include.source_facts` (rastreabilidade `document_id`/`chunk_id` em cada resultado).
+- **reflect novo:** `reflect()` + `render_reflect_section()` — resposta sintetizada CITADA
+  (`based_on.memories`), pro caminho confiável da F3.
+- Gotcha 0.8.3 corrigido: `include.{source_facts|facts}` liga com `{}` (objeto vazio), não
+  `true` (bool dá 422).
+
+**Testes (dev, contra o serviço VIVO):** bank de teste isolado (`kobe-codertest-f2`):
+retain (append, id estável) → recall (1 fato, doc=session-999, com tipo `experience`) →
+reflect ("projeto é Kobe", `based_on:2` citações) → confirmado no `/config` que
+skepticism/literalism=5 + as duas missões + a directive ficaram aplicados. Bank de teste
+removido (DELETE 200) — Hindsight de prod intacto. `py_compile` de client+handler.
+
+**Reversão:** `HINDSIGHT_RETAIN=false` para de gravar; `git revert` volta o client. As
+disposições/missão/directive são config idempotente por bank — sem efeito destrutivo.
+
+### Highlander v2 — F1: aposenta o Chat Manager + de-risca o recall do Hindsight
+
+**Operador pediu:** aposentar o Chat Manager (reversível, sem remover código nem dropar
+tabela) e parar de injetar o destilado do Hindsight todo turno, sem perder a construção da
+memória.
+
+**Por quê:** (1) o Chat Manager virou "armadilha do ponteiro" (título de assunto sem
+conteúdo → o agente inventa o que tinha lá) e incha o prompt (quente/frio todo turno →
+queima o teto de 5h). (2) o Hindsight estava com retain E recall na MESMA flag, ligados;
+o recall injeta um bloco destilado por LLM a cada turno — a própria Auditoria nomeia
+destilação automática como vetor de confabulação (a dor nº1).
+
+**Foi feito:**
+- `HINDSIGHT_ENABLED` continua como MASTER kill-switch; separadas duas sub-flags:
+  `HINDSIGHT_RETAIN` (default ON — segue gravando em silêncio) e `HINDSIGHT_RECALL`
+  (default OFF — para de injetar o destilado). Efetivo = master AND sub-flag.
+  `bot/config.py` (campos + parse), `bot/telegram_handler.py` (gate do retain ~796 e do
+  recall ~859), `.env.example` documentado.
+- Chat Manager aposentado por flag: `CHAT_MANAGER_ENABLED=false` no prod `.env` (aplicado
+  no deploy). O código fica; o daemon classifier vai inerte (checa a flag no tick); a
+  janela imediata (working_memory, default ON) e o núcleo curado seguem intactos —
+  decouple da Frente 0 garante que CM-off NÃO traz a compactação/amnésia de volta
+  (`_load_history` keya em `working_memory_enabled`, não em `chat_manager_enabled`).
+
+**Testes (dev):** `py_compile` de config+handler; teste dos novos campos no `Config` e dos
+defaults (retain=ON, recall=OFF); varredura confirmando que a janela imediata e a
+compactação não dependem de `chat_manager_enabled` (só de `working_memory_enabled`).
+
+**Reversão:** `CHAT_MANAGER_ENABLED=true` religa o CM; `HINDSIGHT_RECALL=true` religa o
+recall; `HINDSIGHT_ENABLED=false` desliga retain+recall. Tudo por env + restart, sem deploy.
+
 ### Corrigido — Highlander Frente 0: desacopla MEMÓRIA da flag de CONVERSAS
 
 **Operador apontou:** "Chat Manager virou outra coisa, apenas classificação e gerenciamento

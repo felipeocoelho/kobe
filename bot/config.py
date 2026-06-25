@@ -48,11 +48,28 @@ class Config:
     # quanto tempo foi a última troca neste tópico (anti-confabulação temporal
     # + lembrete de retomada). Off = comportamento de hoje. Ver bot/memory/grounding.py.
     grounding_signals_enabled: bool
+    # Gate de estado de background vivo (Highlander v2, P1): o código lê os arquivos
+    # de estado dos trabalhos de background do tópico (Coder/Atrus) NESTE turno e
+    # injeta o fato vivo + a regra dura "use isto, não memória" — pra o agente não
+    # narrar status de sala/job de memória (a dor da "sala esperando" que já acabou).
+    # Read-only, best-effort. Off = comportamento de hoje. Ver bot/memory/background_state.py.
+    background_state_gate_enabled: bool
     # Memória durável via Hindsight (Highlander Frente 2.3): recall na entrada
     # (traz fato durável relevante pro prompt) + retain no fim do turno (destila
     # fato da msg do operador). Serviço REST no host (infra/hindsight/). Off =
     # Kobe como hoje. Ver bot/hindsight_client.py.
+    #
+    # `hindsight_enabled` é o MASTER kill-switch (off = nem retain nem recall).
+    # Highlander v2 (F1) separou retain e recall em flags próprias, porque eles
+    # têm perfis de risco opostos:
+    #  - RETAIN (escrita) é silencioso e barato → fica LIGADO (constrói a memória).
+    #  - RECALL (leitura injetada todo turno) é o vetor de confabulação que a
+    #    Auditoria nomeou (destilado por LLM entra no prompt como "fato") →
+    #    fica DESLIGADO até a régua medir e a F3 re-fiar pro best-practice.
+    # Efetivo: retain = master AND retain_enabled; recall = master AND recall_enabled.
     hindsight_enabled: bool
+    hindsight_retain_enabled: bool
+    hindsight_recall_enabled: bool
     hindsight_base_url: str
     hindsight_timeout_seconds: float
     hindsight_recall_limit: int
@@ -145,7 +162,16 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         # hindsight é best-effort (se o serviço estiver fora, falha rápido e segue).
         curated_core_enabled=_parse_bool(os.getenv("CURATED_CORE_ENABLED", "true")),
         grounding_signals_enabled=_parse_bool(os.getenv("GROUNDING_SIGNALS_ENABLED", "true")),
+        background_state_gate_enabled=_parse_bool(
+            os.getenv("BACKGROUND_STATE_GATE_ENABLED", "true")
+        ),
         hindsight_enabled=_parse_bool(os.getenv("HINDSIGHT_ENABLED", "true")),
+        # F1 (Highlander v2): retain ON (segue construindo a memória em silêncio),
+        # recall OFF por padrão (para de injetar o destilado todo turno — de-risca
+        # a confabulação). Re-ligado na F3, medido pela régua. Reverter recall:
+        # HINDSIGHT_RECALL=true. Master HINDSIGHT_ENABLED=false desliga os dois.
+        hindsight_retain_enabled=_parse_bool(os.getenv("HINDSIGHT_RETAIN", "true")),
+        hindsight_recall_enabled=_parse_bool(os.getenv("HINDSIGHT_RECALL", "false")),
         hindsight_base_url=os.getenv("HINDSIGHT_BASE_URL", "http://127.0.0.1:8888"),
         hindsight_timeout_seconds=float(os.getenv("HINDSIGHT_TIMEOUT_SECONDS", "10")),
         hindsight_recall_limit=int(os.getenv("HINDSIGHT_RECALL_LIMIT", "5")),

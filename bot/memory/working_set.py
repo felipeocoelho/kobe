@@ -12,6 +12,7 @@ Dev Kobe não puxa Olimpo).
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -27,6 +28,17 @@ from supabase import Client
 IMMEDIATE_WINDOW_SECONDS = 600
 IMMEDIATE_MIN_COUNT = 8
 IMMEDIATE_HARD_CAP = 60
+
+# Teto de TOKEN da janela (Highlander v2 F4). Os caps de TEMPO e CONTAGEM não
+# protegem do TAMANHO: uma rajada de áudios longos (transcrições de minutos)
+# cabe em 60 msgs / 10 min e mesmo assim estoura o prompt — queima o teto de 5h
+# e dilui o contrato. Este teto corta a janela por TAMANHO, mantendo as msgs
+# mais RECENTES (descarta as mais antigas da janela). Estimativa barata de
+# token (sem tokenizer): ~4 chars/token. Configurável; default generoso o
+# bastante pra não cortar conversa normal, baixo o bastante pra pegar o
+# patológico. 0 ou negativo = desliga o teto (volta ao comportamento pré-F4).
+IMMEDIATE_TOKEN_CAP = int(os.getenv("WORKING_MEMORY_TOKEN_CAP", "8000"))
+_CHARS_PER_TOKEN = 4
 
 
 def _parse_ts(value: str) -> Optional[datetime]:
@@ -81,4 +93,24 @@ def get_immediate_messages(
     cutoff = (anchor - timedelta(seconds=IMMEDIATE_WINDOW_SECONDS)).isoformat()
     within = [r for r in rows if (r.get("created_at") or "") >= cutoff]
     keep = max(len(within), IMMEDIATE_MIN_COUNT)
-    return rows[-keep:]
+    window = rows[-keep:]
+    return _bound_by_tokens(window)
+
+
+def _bound_by_tokens(window: list[dict]) -> list[dict]:
+    """Teto de TAMANHO (F4): mantém as msgs mais RECENTES cujo total estimado cabe
+    em IMMEDIATE_TOKEN_CAP, descartando as mais antigas. Garante ao menos a última
+    msg (o contexto imediato do turno) mesmo que ela sozinha estoure o teto — cortar
+    a mensagem atual seria pior que o estouro. Cap <= 0 desliga (no-op)."""
+    if IMMEDIATE_TOKEN_CAP <= 0 or not window:
+        return window
+    kept: list[dict] = []
+    total = 0
+    for r in reversed(window):  # do mais recente pro mais antigo
+        cost = len(r.get("content") or "") // _CHARS_PER_TOKEN + 1
+        if kept and total + cost > IMMEDIATE_TOKEN_CAP:
+            break
+        kept.append(r)
+        total += cost
+    kept.reverse()  # volta à ordem cronológica crescente
+    return kept

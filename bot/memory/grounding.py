@@ -65,8 +65,19 @@ def render_grounding_signals(
     if gap < GAP_NOTICE_THRESHOLD_SECONDS:
         return None
 
+    # P2 (Highlander v2) — gate de verificável-barato na ENTRADA. Numa retomada
+    # após um gap, o prior do modelo é o vetor da dor nº1 ("tarefa longa → noite →
+    # operador dormindo"). O código NÃO observa o estado do operador (se dorme,
+    # está ausente, ocupado) — mas SABE um fato verificável: a mensagem deste
+    # turno acabou de chegar. Crava esse fato e nomeia o atalho proibido, em vez
+    # de deixar o agente narrar o estado de memória. Ataca o caso-âncora "você
+    # está dormindo" e a família de confabulação de estado do operador.
     return (
         f"[Grounding] A última mensagem neste tópico foi há {_humanize_gap(gap)} "
-        "(antes desta). Se for retomar um assunto antigo, confirme que a mensagem "
-        "nova é de fato sobre ele — pode não ser; na dúvida do antecedente, pergunte."
+        "(antes desta). FATO VERIFICÁVEL: o operador acabou de te enviar a "
+        "mensagem deste turno — ele está presente e falando contigo AGORA. NÃO "
+        "afirme que ele está dormindo, ausente, ocupado ou em qualquer estado que "
+        "você não pode observar; você só sabe que ele acabou de escrever. E se for "
+        "retomar um assunto antigo, confirme que a mensagem nova é de fato sobre "
+        "ele — pode não ser; na dúvida do antecedente, pergunte."
     )

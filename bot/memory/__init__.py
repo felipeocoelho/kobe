@@ -14,6 +14,7 @@ Camadas (a crescer nas próximas frentes):
 - (Frente 1.1) sinais de grounding baratos resolvidos no código (há N min, estado de bg).
 """
 
+from bot.memory.background_state import render_background_state
 from bot.memory.curated_core import (
     CURATED_CORE_CHAR_LIMIT,
     load_curated_core,
@@ -33,5 +34,6 @@ __all__ = [
     "IMMEDIATE_WINDOW_SECONDS",
     "get_immediate_messages",
     "load_curated_core",
+    "render_background_state",
     "render_grounding_signals",
 ]

@@ -50,6 +50,7 @@ from bot.chat_manager.context import render_chat_manager_section
 from bot.memory import (
     get_immediate_messages,
     load_curated_core,
+    render_background_state,
     render_grounding_signals,
 )
 from bot.plugins import Plugin, render_plugins_section
@@ -793,14 +794,22 @@ async def _handle_user_text(
     # OPERADOR (ground truth — ele disse), não da resposta gerada (que pode
     # alucinar). Fire-and-forget: async no servidor + best-effort, não bloqueia
     # nem derruba o turno. Fonte rastreável na metadata (tópico + message_id).
-    if config.hindsight_enabled:
+    if config.hindsight_enabled and config.hindsight_retain_enabled:
+        # F2 (Highlander v2): agrupa por document_id ESTÁVEL (= sessão) com append —
+        # a conversa vira UM documento que cresce, não N memórias soltas (conserta o
+        # anti-padrão "UUID aleatório duplica documento"). context/tags melhoram a
+        # extração e o isolamento. Conservador: só a msg DO OPERADOR (ground truth).
+        _topic = slug or "general"
         _fire_and_forget(
             hindsight_client.retain(
                 config.hindsight_base_url,
                 hindsight_client.bank_id_for_topic(slug),
                 text,
+                document_id=hindsight_client.document_id_for_session(session_id),
+                context=f"Conversa Telegram, tópico {_topic}",
+                tags=[f"topic:{_topic}", "source:telegram"],
                 metadata={
-                    "topic": slug or "general",
+                    "topic": _topic,
                     "message_id": message.message_id,
                     "source": "telegram",
                 },
@@ -852,11 +861,20 @@ async def _handle_user_text(
         else None
     )
 
+    # Estado de background vivo (Highlander v2, P1): lê AGORA os arquivos de estado
+    # dos trabalhos de background DESTE tópico e injeta o fato vivo + a regra dura —
+    # pra o agente não narrar status de sala/job de memória. Read-only, best-effort.
+    background_state = (
+        render_background_state(config.kobe_home, thread_id)
+        if config.background_state_gate_enabled
+        else None
+    )
+
     # Memória durável (Highlander Frente 2.3): recall dos fatos relevantes pra
     # esta mensagem, por tópico. Best-effort (None se off, serviço fora, ou nada
     # relevante) — nunca derruba o turno. Adiciona latência só quando ligado.
     durable_memory: Optional[str] = None
-    if config.hindsight_enabled:
+    if config.hindsight_enabled and config.hindsight_recall_enabled:
         _recall = await hindsight_client.recall(
             config.hindsight_base_url,
             hindsight_client.bank_id_for_topic(slug),
@@ -878,6 +896,7 @@ async def _handle_user_text(
         chat_manager_section=chat_manager_section,
         curated_core=curated_core,
         grounding_signals=grounding_signals,
+        background_state=background_state,
         durable_memory=durable_memory,
         audio_transcribed=audio_transcribed,
         # Citação extraída da PRÓPRIA mensagem deste turno. Antes do fix de

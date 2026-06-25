@@ -375,6 +375,7 @@ def build_prompt(
     chat_manager_section: Optional[str] = None,
     curated_core: Optional[str] = None,
     grounding_signals: Optional[str] = None,
+    background_state: Optional[str] = None,
     durable_memory: Optional[str] = None,
     audio_transcribed: bool = False,
     background_handoff: Optional[str] = None,
@@ -423,6 +424,15 @@ def build_prompt(
     # última troca. Cola junto ao [Agora] porque é da mesma natureza (tempo).
     if grounding_signals:
         parts.append(grounding_signals)
+
+    # Estado de background vivo (Highlander v2, P1): o código leu AGORA os arquivos
+    # de estado dos trabalhos de background deste tópico (Coder/Atrus) e cola o fato
+    # vivo + a regra dura "use isto, não memória". Vai junto do grounding porque é da
+    # mesma natureza (estado que MUDA e o agente senão narraria de memória). None
+    # quando não há trabalho recente — aí o agente não tem status a afirmar.
+    if background_state:
+        parts.append("")
+        parts.append(background_state)
 
     # Núcleo curado (Highlander Frente 1.2): identidade do operador (USER.md) +
     # fatos duráveis do agente (MEMORY.md), auto-injetados. Vai logo após o

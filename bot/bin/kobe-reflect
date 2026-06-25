@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""kobe-reflect — resposta CITADA da memória durável (Hindsight) sob demanda.
+
+O caminho CONFIÁVEL da memória durável (Highlander v2, F3). Enquanto o recall cru
+(quando ligado) injeta PISTAS baratas todo turno, o `reflect` é o motor cético+citado:
+sintetiza uma resposta a partir SÓ das memórias, com as fontes, e o bank é configurado
+cético por construção (skepticism=5, literalism=5) + a directive de Fundamentação. Use
+quando a confiança pesa ("o que a gente decidiu sobre X?", "tenho certeza que o operador
+disse Y?") — a resposta vem fundamentada ou diz que não há registro.
+
+  kobe-reflect "<pergunta>"
+
+Escopo = tópico atual (KOBE_CHAT_ID/KOBE_THREAD_ID injetados pelo bot) → bank
+`kobe-<slug>`. Dev Kobe não puxa Olimpo. Saída em texto no stdout. Best-effort: se o
+serviço Hindsight estiver fora, avisa e sai sem derrubar nada.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Re-exec no venv do projeto se as deps não estiverem no interpretador atual
+# (mesmo padrão do kobe-recall — o shebang resolve pro Python do sistema).
+_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
+if (
+    _VENV_PY.exists()
+    and sys.executable != str(_VENV_PY)
+    and importlib.util.find_spec("httpx") is None
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+from bot import hindsight_client  # noqa: E402
+from bot.topic_manager import get_topic_slug  # noqa: E402
+
+
+def _db():
+    from supabase import create_client
+
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        print("kobe-reflect: SUPABASE_URL/SUPABASE_KEY ausentes.", file=sys.stderr)
+        sys.exit(2)
+    return create_client(url, key)
+
+
+def _resolve_slug() -> str | None:
+    chat_raw = os.environ.get("KOBE_CHAT_ID")
+    thread_raw = os.environ.get("KOBE_THREAD_ID")
+    if not chat_raw:
+        return None
+    try:
+        chat_id = int(chat_raw)
+    except ValueError:
+        return None
+    thread_id = None
+    if thread_raw not in (None, ""):
+        try:
+            thread_id = int(thread_raw)
+        except ValueError:
+            thread_id = None
+    try:
+        return get_topic_slug(_db(), chat_id, thread_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-reflect: não resolvi o tópico ({exc}).", file=sys.stderr)
+        return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Reflect citado da memória durável")
+    ap.add_argument("query", nargs="*", help="a pergunta")
+    args = ap.parse_args()
+    query = " ".join(args.query).strip()
+    if not query:
+        print('Uso: kobe-reflect "<pergunta>"', file=sys.stderr)
+        return 2
+
+    slug = _resolve_slug()
+    bank = hindsight_client.bank_id_for_topic(slug)
+    base_url = os.environ.get("HINDSIGHT_BASE_URL", hindsight_client.DEFAULT_BASE_URL)
+
+    reflection = asyncio.run(hindsight_client.reflect(base_url, bank, query))
+    section = hindsight_client.render_reflect_section(reflection)
+    if not section:
+        print("(sem registro durável que responda isso — ou o serviço está fora. "
+              "Não há base; não afirme de memória.)")
+        return 0
+    print(section)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
