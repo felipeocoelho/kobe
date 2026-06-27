@@ -24,7 +24,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.config import Config
-from bot.missoes import (
+from bot.mission_control import (
     Missao,
     StatusMissao,
     StatusTarefa,
@@ -32,7 +32,7 @@ from bot.missoes import (
     TipoEvento,
     storage,
 )
-from bot.missoes import orquestrador, painel
+from bot.mission_control import orquestrador, painel
 
 
 logger = logging.getLogger("kobe.missoes.handlers")

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from bot.keyko.models import Despertar, Source
-from bot.missoes import (
+from bot.mission_control import (
     Evento,
     Missao,
     StatusMissao,
@@ -35,8 +35,8 @@ from bot.missoes import (
     TipoEvento,
     storage,
 )
-from bot.missoes import painel
-from bot.missoes.prompts import PROMPTS
+from bot.mission_control import painel
+from bot.mission_control.prompts import PROMPTS
 
 
 logger = logging.getLogger("kobe.missoes.source")

@@ -405,6 +405,7 @@ def build_prompt(
     plugins_section: str = "",
     topic_context: Optional[str] = None,
     missao_ativa_info: Optional[str] = None,
+    sala_ativa_info: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
     conversation_active: Optional[dict] = None,
     conversation_summaries: Optional[list[dict]] = None,
@@ -480,6 +481,10 @@ def build_prompt(
 
     if missao_ativa_info:
         parts.append(missao_ativa_info)
+
+    if sala_ativa_info:
+        parts.append("")
+        parts.append(sala_ativa_info)
 
     if alertas_abertos_info:
         parts.append("")

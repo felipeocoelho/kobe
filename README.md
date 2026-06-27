@@ -200,7 +200,7 @@ Quando o orquestrador planeja, vira:
 
 E vai atualizando sozinho (▶️ → ✅) até fechar com 🟢 e o anexo do resultado.
 
-Detalhes operacionais, troubleshoot e rollback em [`docs/runbooks/keyko-e-missoes.md`](./docs/runbooks/keyko-e-missoes.md). Guia rápido pro operador em [`docs/missoes.md`](./docs/missoes.md).
+Detalhes operacionais, troubleshoot e rollback em [`docs/runbooks/keyko-e-missoes.md`](./docs/runbooks/keyko-e-missoes.md). Guia rápido pro operador em [`docs/mission-control.md`](./docs/mission-control.md) (Mission Control: a sala estrategista + a forma fan-out).
 
 ## Troubleshooting
 

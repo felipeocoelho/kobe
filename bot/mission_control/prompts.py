@@ -32,7 +32,7 @@ Funcionamento:
        repinta o painel-mensagem no Telegram automaticamente.
     2. `user-data/missoes/{missao_id}/eventos.jsonl` — append-only.
        Você dispara mudanças escrevendo aqui. Já existem helpers Python
-       em `bot.missoes.storage` (`append_evento`, `mutar`).
+       em `bot.mission_control.storage` (`append_evento`, `mutar`).
 - Você NÃO escreve resposta de texto. Você EDITA arquivos e dispara
   subprocessos. Quando terminar suas ações, simplesmente encerre.
 
@@ -49,7 +49,7 @@ KOBE_TELEGRAM_BOT_TOKEN estão no env.
 
 REGRA DURA — execução de tarefas:
 - Toda tarefa listada em `missao.tarefas` é executada por um SUBPROCESS
-  SEPARADO via `bot/bin/kobe-dispatch -- python3 -m bot.missoes.executor ...`
+  SEPARADO via `bot/bin/kobe-dispatch -- python3 -m bot.mission_control.executor ...`
   (vide PROMPT_PLANEJAR passo 4). Esse subprocess é quem grava `pid`,
   `log_path`, `output_path` em estado.json e emite `tarefa-iniciada`/
   `tarefa-concluida` em eventos.jsonl.
@@ -80,7 +80,7 @@ REGRA DURA — honestidade do estado:
   1. Append evento informativo em eventos.jsonl:
      ```python
      from pathlib import Path
-     from bot.missoes import storage
+     from bot.mission_control import storage
      storage.append_evento(Path("{kobe_home}"), "{missao_id}",
          "inconsistencia-detectada",
          tarefa_id="T?",  # ou None se for geral
@@ -125,7 +125,7 @@ Passos exatos:
 2. Atualize `estado.json` usando o helper Python:
    ```python
    from pathlib import Path
-   from bot.missoes import storage, Tarefa, StatusMissao
+   from bot.mission_control import storage, Tarefa, StatusMissao
 
    with storage.mutar(Path("{kobe_home}"), "{missao_id}") as missao:
        missao.status = StatusMissao.EM_ANDAMENTO.value
@@ -154,7 +154,7 @@ Passos exatos:
       <prompt da T1 aqui>
       EOF
       bot/bin/kobe-dispatch --name "T1 missao {missao_id}" -- \\
-          {kobe_home}/.venv/bin/python -m bot.missoes.executor \\
+          {kobe_home}/.venv/bin/python -m bot.mission_control.executor \\
           --kobe-home "{kobe_home}" \\
           --missao "{missao_id}" \\
           --tarefa T1 \\
@@ -162,7 +162,7 @@ Passos exatos:
       ```
    IMPORTANTE: use SEMPRE `{kobe_home}/.venv/bin/python` — o `python3` do
    sistema não tem as dependências (supabase, etc.) que o executor
-   precisa pra importar `bot.missoes`. Esse caminho é estável (`.venv/`
+   precisa pra importar `bot.mission_control`. Esse caminho é estável (`.venv/`
    na raiz do Kobe).
 
    O kobe-dispatch volta imediato com o PID — você NÃO espera as

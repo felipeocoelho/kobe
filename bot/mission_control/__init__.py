@@ -15,7 +15,7 @@ observa o `eventos.jsonl` e:
 Fonte da verdade do estado: arquivos em `user-data/missoes/<id>/`.
 """
 
-from bot.missoes.models import (
+from bot.mission_control.models import (
     Evento,
     Missao,
     StatusMissao,

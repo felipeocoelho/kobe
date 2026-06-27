@@ -7,7 +7,7 @@ Layout (flat, em `user-data/alertas/`):
     .<id>.lock           sentinel pro flock (criado vazio na 1ª vez)
     .keyko-alertas.json  estado interno da AlertasSource (offsets de leitura)
 
-Concorrência (idêntico a `bot/missoes/storage.py`):
+Concorrência (idêntico a `bot/mission_control/storage.py`):
 
 - A `AlertasSource` (daemon Keyko) e os handlers de slash command podem
   escrever no mesmo `<id>.yaml`. Pra evitar lost update, toda escrita é
@@ -109,7 +109,7 @@ class LockTimeoutError(Exception):
 def _file_lock(lock_path: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
     """Lock exclusivo POSIX via fcntl.flock, com polling até timeout.
 
-    Espelha `bot/missoes/storage._file_lock`. O fd é liberado no close;
+    Espelha `bot/mission_control/storage._file_lock`. O fd é liberado no close;
     damos un-lock explícito por higiene.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)

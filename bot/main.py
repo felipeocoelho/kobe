@@ -36,7 +36,7 @@ from bot.snapshot import (
     load_pending_snapshots,
     save_pending_snapshots,
 )
-from bot.missoes.handlers import (
+from bot.mission_control.handlers import (
     on_command_missao,
     on_command_missao_abortar,
     on_command_missao_lista,

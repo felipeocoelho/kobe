@@ -4,6 +4,198 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Docs — Mission Control: guia + runbook + README (2026-06-26)
+
+**Operador pediu:** commit 7 — documentação do Mission Control.
+
+**Foi feito:**
+- `docs/missoes.md` → `docs/mission-control.md` (git mv): título "Mission Control", seção
+  "Duas formas", e a seção **Sala estrategista** (abrir por linguagem natural, roteamento
+  que não captura o tópico, encerrar só pelo operador nos dois canais, handoff, layout
+  `workspace/` + flag). A forma fan-out (`/missao*`) segue documentada abaixo.
+- `docs/runbooks/keyko-e-missoes.md`: subseção "Mission Control — sala estrategista" (flag
+  `MISSION_CONTROL_SALA_ENABLED`, validação no prod VPS, encerrar só por ato do operador,
+  CLI de debug, layout da sala, nota da migração do Coder como follow-up).
+- `README.md`: referência atualizada `docs/missoes.md` → `docs/mission-control.md`.
+
+**Nota:** o doc de arquitetura na KB (`user-data/knowledge/kobe/arquitetura/
+08-sistema-missoes-keyko.md`) é gitignored e não sincroniza via git — atualização fica como
+tarefa de memória do lado prod (não entra neste commit).
+
+**Testes:** N/A (docs). Links/âncoras conferidos.
+
+### Feat — Mission Control: handoff "nasce aqui → vira Coder" (2026-06-26)
+
+**Operador pediu:** commit 6 — handoff condicional + semi-manual (decisões 4/8): quando a
+missão vira "vamos construir X", o estrategista prepara um brief, PARA no "go" do operador,
+e só então dispara o Coder no projeto-alvo. O "go" vale pelos dois canais.
+
+**Foi feito:**
+- `bot/mission_control/handoff.py` — `coder_run_remote` (resolve o CLI do plugin Coder, ou
+  None se não instalado), `build_handoff_command` (puro), `disparar` (lê
+  `workspace/handoff-brief.md`, valida brief/Coder/cwd, dispara o Coder com o brief como
+  `--task` e o projeto-alvo como `--cwd`) + CLI.
+- `bot/mission_control/sala_prompt.py` — o estrategista, no "go", roda
+  `.venv/bin/python -m bot.mission_control.handoff disparar --missao <id> --cwd <alvo>` e
+  avisa 🤝 [mission]. Condicional: missão não-código ignora o handoff.
+
+**Testes (dev VPS):** `tests/test_mission_control_handoff.py` — `build_handoff_command`
+(puro) e os guards de `disparar` (brief inexistente/vazio, Coder ausente, cwd inexistente —
+tudo antes de invocar o Coder). Verdes. O dispatch real do Coder é validado no prod VPS.
+
+**Reversão:** `git revert`; só é alcançável de dentro de uma sala (flag on).
+
+### Feat — Mission Control: entrada por linguagem natural + roteamento via Hal (2026-06-26)
+
+**Operador pediu:** commit 5 — a porta da sala estrategista por linguagem natural (decisão
+7) e o roteamento de mensagens, com a regra fechada por ele: a sala **não captura o canal**
+(default = conversa com o Hal); repasse só por ato explícito do operador, e se o Hal apenas
+desconfia, **pergunta antes**. Encerramento e aprovação valem pelos **dois canais
+equivalentes** (Telegram via Hal OU direto na sala).
+
+**Por quê:** a decisão de rotear/confirmar é do Hal (LLM), não do código da sala — então o
+handler crítico **não ganha bloco de roteamento**; só uma injeção de ciência read-only.
+Isso de-risca a integração no fluxo de mensagens vivo.
+
+**Foi feito:**
+- **`CLAUDE.md` (instruções do Hal — coração do commit):** nova seção "Mission Control —
+  salas de missão": abrir por linguagem natural (`sala_dispatch abrir`), regra dura de
+  roteamento (sala não captura o canal; repasse só explícito; desconfiou → pergunta),
+  encerrar só por ato do operador (dois canais), handoff/go pelos dois canais.
+- **`bot/telegram_handler.py` (única mudança no handler — ADITIVA, read-only, atrás da
+  flag):** injeta `[Sala de missão ativa neste tópico: …]` no prompt do Hal via
+  `sala_dispatch.render_sala_ativa`. **Sem desvio de fluxo** — não intercepta mensagens.
+- **`bot/claude_runner.build_prompt`:** novo param `sala_ativa_info` (renderiza a linha de
+  ciência; omitido quando ausente).
+- **`bot/mission_control/sala_dispatch.py`:** `render_sala_ativa` (ciência + instrução de
+  não-repasse), `encerrar_sala` (marca `encerrada` + mata tmux — ato explícito), CLI ganha
+  `encerrar` e defaults de `--chat-id/--thread-id` do env. Faxina passa a `ttl_hours=None`.
+- **Ressalva "só o operador fecha" costurada no ciclo de vida:**
+  - `bot/sala/cleanup.should_kill`: `ttl_hours=None` desliga o fecho-por-idade — Mission
+    Control nunca encerra sala viva por inatividade; a faxina só reaproveita tmux de salas
+    já encerradas/mortas.
+  - `bot/sala/room.monitor_sala`: guarda de status terminal — não confunde fecho intencional
+    (`encerrada`) com morte (não dispara `on_death`) e não sobrescreve status terminal com
+    `idle`.
+  - `bot/mission_control/sala_prompt.py`: estrategista sabe encerrar só a pedido do operador
+    (dois canais) e tratar o "go" pelos dois canais.
+
+**Testes (dev VPS):** `test_sala_core.py` (+`should_kill` com `ttl_hours=None`, +2 testes do
+monitor: guarda terminal e reporte de morte) e `test_mission_control_sala.py`
+(+`render_sala_ativa`, +`encerrar_sala`; `_ttl_hours` removido). Todos verdes;
+`build_prompt` renderiza/omite `sala_ativa_info`; `import bot.telegram_handler` OK.
+Comportamento de tmux/claude vivo validado no prod VPS atrás da flag.
+
+**Reversão:** `git revert`; flag off (default) deixa tudo inerte (a injeção de ciência só
+ocorre com flag on + sala ativa).
+
+### Feat — Mission Control: sala estrategista (forma b) sobre `bot/sala/` (2026-06-26)
+
+**Operador pediu:** a sala-única estrategista — prioridade do plano (forma b): janela
+longa de raciocínio numa sala visível, prompt de estrategista (não dev), sem gates de
+codificação, com handoff condicional pro Coder. Commit 4 da sequência.
+
+**Por quê:** trazer a visibilidade do Coder pro orquestrador, mas pra PENSAR (analisar
+pesquisa, estratégia, encadear raciocínio), não pra codar — a missão é um turno longo de
+raciocínio (decisão 1), roda em bypass de verdade sem rito do Coder (decisões 3/4).
+
+**Foi feito (camada A — código do core):**
+- `bot/mission_control/sala_prompt.py` — `sala_name` (prefixo `mission-`), o **system
+  prompt de estrategista** (conversa, registra raciocínio em `workspace/raciocinio.md`,
+  handoff condicional/semi-manual que PARA no "go" do operador, honestidade, disciplina de
+  turno) e o brief de abertura.
+- `bot/mission_control/sala_worker.py` — worker detached que usa o núcleo `bot.sala`:
+  `_start` escreve sysprompt+brief, abre a sala via `room.open_sala` com
+  **`settings_path=None` (bypass, sem guard)** e monitora; `_resume` injeta input via
+  `room.resume_deliver` e trata os outcomes. Notify com prefixos `[mission]` (🧭/💡/🤝/🟡/🟢).
+- `bot/mission_control/sala_dispatch.py` — `abrir_sala`/`retomar_sala` + flag
+  `MISSION_CONTROL_SALA_ENABLED` (default off), faxina por TTL e teto de salas ativas
+  (`MISSION_CONTROL_MAX_SALAS`, default 2), `find_sala_ativa` (localiza sala viva do tópico
+  por `sala.json`). **Não cria `estado.json`** nesta fase pra não ligar a triagem headless
+  antiga — o roteamento das msgs do tópico pra sala é o commit 5.
+- `bot/mission_control/storage.py` — paths da sala (`sala.json`, `sala.sysprompt.txt`,
+  `sala-launch.sh`, `sala.log`) + `workspace/` (`ensure_workspace` cria `rascunhos/`).
+
+**Testes (dev VPS):** `tests/test_mission_control_sala.py` — 8 testes: nome da sala,
+prompt+brief (prefixos, handoff condicional, bypass), layout/workspace, flag+tuning,
+`find_sala_ativa`, guards de `abrir_sala` (flag off / objetivo vazio / limite — retornam
+antes de spawnar), e **wiring do worker `_start`** (tmux monkeypatchado: escreve
+sysprompt+brief, spec sem `--settings`, patcha status=running+pid). Todos verdes; core
+(`test_sala_core.py`) sem regressão. O launch real (tmux+claude) é validado no prod VPS
+atrás da flag — o bot não roda no dev VPS.
+
+**Reversão:** `git revert`; ou flag off (default) deixa tudo inerte. Pacote novo, nada no
+fluxo existente chama a sala ainda (entrada NL é o commit 5).
+
+### Refactor — rename do pacote `bot/missoes/` → `bot/mission_control/` (2026-06-26)
+
+**Operador pediu:** rename "pra valer" do Sistema de Missões pra Mission Control (commit 3
+do plano aprovado, decisão 5). **Comandos slash `/missao*` ficam como estão** (decisão 6 —
+operador quase não usa slash e não quer mudar muscle-memory).
+
+**Por quê:** consistência do nome no projeto inteiro (arquivos + referências de import),
+preparando o terreno pra a sala estrategista nascer já em `bot/mission_control/`.
+
+**Foi feito:**
+- `git mv bot/missoes bot/mission_control` (histórico preservado por arquivo).
+- Imports internos do pacote (`bot.missoes` → `bot.mission_control`) e refs de path em
+  docstrings (8 arquivos).
+- Imports externos atualizados: `bot/keyko/registry.py`, `bot/main.py`, `bot/resume.py`,
+  `bot/telegram_handler.py`; comentários em `bot/alertas/storage.py`; runbook
+  `docs/runbooks/keyko-e-missoes.md`.
+- **Mantidos (decisão 6 / decisão de runtime):** comandos `/missao*`, nomes de função
+  `on_command_missao*`, classe `MissoesSource` e seu `nome="missoes"`, e o path on-disk
+  `user-data/missoes/` (renomear o path orfanaria estado existente em prod).
+
+**Testes (dev VPS):** `py_compile` de todo `bot/` OK; `import bot.mission_control` +
+submódulos OK; `import bot.keyko.registry` e `bot.resume` (que importam o pacote) resolvem.
+`grep` confirma zero referência remanescente a `bot.missoes`/`bot/missoes` no código.
+`tests/test_resume.py` falha por motivo PRÉ-EXISTENTE (`config.working_memory_enabled`
+ausente no fake do teste) — verificado idêntico no `main`, não é regressão deste rename.
+
+**Reversão:** `git revert` do commit (renames + edits de import são revertíveis em bloco).
+
+### Feat — Mission Control: núcleo de sala extraído pro core `bot/sala/` (2026-06-26)
+
+**Operador pediu:** upgrade do Mission Control (Sistema de Missões/Keyko) trazendo a
+visibilidade do Coder (sala tmux `--remote-control` + kobe-notify por marco) pro
+orquestrador. Plano aprovado em `.local/plano-mission-control.md` (9 decisões). Este é o
+**commit 1** da sequência: extrair a maquinaria de sala pra core (decisão A1).
+
+**Por quê:** Mission Control é **core**, mas a mecânica de sala visível só existia no
+**plugin Coder** (`plugins/public/coder/scripts/coder_worker.py`). Core não pode importar
+de um plugin (plugin é opcional, repo separado) — então a sala é extraída pra core, de
+onde tanto o Mission Control (agora) quanto o Coder (migração = commit 2, follow-up) a
+usam. Uma fonte só de verdade.
+
+**Foi feito:**
+- Novo pacote **`bot/sala/`** — toolkit genérico e sem opinião sobre quem usa:
+  - `state.py` — read/write atômico (tmp+rename) + `patch_state` com flock no
+    read-modify-write (mata o lost-update entre workers concorrentes, incident-hardened
+    do Coder 2026-06-23).
+  - `tmux.py` — wrappers do tmux + helpers PUROS `pane_busy`/`extract_pane_last`.
+  - `room.py` — `SalaSpec`, `open_sala` (launcher + new-session), `monitor_sala`
+    (status/morte/heartbeat/owner-check), porteiro `wait_pane_idle`, entrega-com-
+    confirmação `deliver_to_sala`, `resume_deliver`. **Gates plugáveis:** `settings_path`
+    opcional → sem `--settings` = sala em bypass de verdade (caso do Mission Control); o
+    Coder injeta o guard. Mensagens ao operador são **callbacks** (núcleo não conhece
+    prefixos `[coder]`/`[mission]`).
+  - `cleanup.py` — faxina por TTL + contagem de salas ativas, com decisões puras
+    (`should_kill`, `is_active`).
+- **Plugin Coder intacto** neste commit (de-risk do dispatch vivo de prod). A migração do
+  Coder pra `bot/sala/` é o commit 2, declarado como follow-up no plano (§7/§9).
+
+**Testes (dev VPS, venv `/home/felipe/projetos/kobe/.venv`):**
+- `tests/test_sala_core.py` — 10 testes da lógica pura + state atômico: roundtrip/patch,
+  escrita atômica sem `.tmp` órfão, `pane_busy`/`extract_pane_last`, `turn_is_over`,
+  montagem do launcher (com e sem `--settings`), `should_kill`, `is_active`,
+  `count_active` (com `pid_alive` injetado). Todos passam. O comportamento que exige
+  tmux/claude vivos (open/monitor/resume) será validado no prod VPS (staging) atrás de
+  flag — o bot não roda no dev VPS.
+
+**Reversão:** `git revert` do commit, ou apagar `bot/sala/` + `tests/test_sala_core.py`
+(pacote novo, nada importa dele ainda — zero efeito colateral).
+
 ### Fix — "digitando…" fantasma quando o turno foreground crasha (2026-06-25)
 
 **Operador pediu:** corrigir o indicador "digitando…" que ficava preso/fantasma no

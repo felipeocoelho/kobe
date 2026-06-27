@@ -56,7 +56,7 @@ from bot.memory import (
 from bot.claude_runner import ClaudeError, ClaudeRunner, build_prompt
 from bot.config import Config
 from bot.markdown import to_telegram_html
-from bot.missoes import storage as missoes_storage
+from bot.mission_control import storage as missoes_storage
 from bot.snapshot import drop_snapshot, render_resume_message
 from bot.topic_manager import (
     GENERAL_THREAD_ID,

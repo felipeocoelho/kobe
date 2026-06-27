@@ -31,9 +31,9 @@ def build_sources(
 
     # MissoesSource — Fase 1, sempre ativa.
     try:
-        from bot.missoes.source import MissoesSource
+        from bot.mission_control.source import MissoesSource
     except ImportError:
-        logger.exception("MissoesSource indisponível — pacote bot.missoes faltando?")
+        logger.exception("MissoesSource indisponível — pacote bot.mission_control faltando?")
     else:
         sources.append(MissoesSource(kobe_home=kobe_home, bot_token=bot_token))
         logger.info("source registrada: missoes")

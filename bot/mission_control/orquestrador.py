@@ -14,7 +14,7 @@ API principal:
 A função volta IMEDIATO com o Popen — chamador não espera nada.
 
 Chamado por:
-- `bot/missoes/handlers.py` (slash /missao → motivo=planejar)
+- `bot/mission_control/handlers.py` (slash /missao → motivo=planejar)
 - `bot/keyko/...` MissoesSource (marco → motivo=reagir-marco)
 - `bot/telegram_handler.py` (msg em tópico com missão ativa → triar-mensagem)
 
@@ -40,8 +40,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from bot.missoes import storage
-from bot.missoes.prompts import PROMPTS, TRIAGE_NOT_RELATED_MARKER
+from bot.mission_control import storage
+from bot.mission_control.prompts import PROMPTS, TRIAGE_NOT_RELATED_MARKER
 
 
 logger = logging.getLogger("kobe.missoes.orquestrador")

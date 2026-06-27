@@ -3,7 +3,7 @@
 Modo de uso (chamado pelo orquestrador, via subprocess através do
 helper `bot/bin/kobe-dispatch`):
 
-    kobe-dispatch -- python3 -m bot.missoes.executor \\
+    kobe-dispatch -- python3 -m bot.mission_control.executor \\
         --missao <id> --tarefa T1 --prompt-file <path>
 
 Por que arquivo em vez de --prompt na linha de comando: prompts longos
@@ -34,8 +34,8 @@ import sys
 import time
 from pathlib import Path
 
-from bot.missoes import StatusTarefa, TipoEvento
-from bot.missoes import storage
+from bot.mission_control import StatusTarefa, TipoEvento
+from bot.mission_control import storage
 
 
 logger = logging.getLogger("kobe.missoes.executor")
@@ -204,7 +204,7 @@ def _resumo_erro(stderr_text: str, exit_code: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="bot.missoes.executor",
+        prog="bot.mission_control.executor",
         description="Executa uma subtarefa de Missão. Tipicamente invocado via kobe-dispatch.",
     )
     parser.add_argument("--missao", required=True, help="id da missão")

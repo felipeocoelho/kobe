@@ -1,12 +1,81 @@
-# Guia do operador — Sistema de Missões
+# Guia do operador — Mission Control
 
-> Disponível desde v0.13. Pra detalhes operacionais (deploy,
+> Antes "Sistema de Missões" (v0.13). Pra detalhes operacionais (deploy,
 > troubleshoot, rollback), veja
 > [`docs/runbooks/keyko-e-missoes.md`](./runbooks/keyko-e-missoes.md).
 
-## O que é
+## Duas formas
 
-**Missão** é trabalho multi-tarefa coordenado pelo agente. Você descreve
+Uma **missão** é um turno longo de raciocínio do agente. Tem duas formas:
+
+- **Sala estrategista** (forma principal) — uma **sala visível** (tmux
+  `--remote-control`, navegável no Claude Code Desktop) pra pensar fundo,
+  analisar, encadear raciocínio. Prompt de estrategista (não dev), roda em
+  bypass, sem rito de codificação. Abre por **linguagem natural** ("abre uma
+  missão sobre X"). Detalhe na seção [Sala estrategista](#sala-estrategista).
+- **Fan-out** (forma multi-tarefa) — o orquestrador quebra em sub-tarefas
+  paralelas com um painel vivo. Acionado pelos comandos `/missao*`. Detalhe no
+  resto deste guia.
+
+---
+
+## Sala estrategista
+
+A sala estrategista é a forma de "pensar junto" longa: você abre uma missão, o
+agente trabalha o tema numa sala visível e te reporta por `kobe-notify` (prefixos
+🧭/💡/🤝/🟡/🟢 `[mission]`), registrando o raciocínio em `workspace/raciocinio.md`.
+
+**Atrás da flag** `MISSION_CONTROL_SALA_ENABLED` (default off — ligue no `.env` e
+reinicie o bot pra usar).
+
+### Abrir (linguagem natural — sem comando slash)
+
+Fale com o agente: *"abre uma missão sobre a pesquisa dos alunos do Olimpo"*,
+*"quero pensar fundo sobre a migração Supabase→PostgreSQL"*. Ele abre a sala e te
+confirma o `missao_id`.
+
+### Roteamento — a sala NÃO captura o tópico
+
+Ter uma sala aberta **não muda** a conversa: por padrão você continua falando com
+o agente normal, como se a sala não existisse. Pra mandar algo pra sala, seja
+**explícito** ("manda pra sala…", "pra missão…"). Se o agente ficar em dúvida se
+uma mensagem era pra sala, ele **pergunta antes** de repassar. Nada vai pra sala
+por inferência silenciosa.
+
+### Encerrar — só você fecha (dois canais)
+
+A sala fica aberta até **você** mandar fechar — ela nunca se auto-encerra nem é
+fechada por idade. Você encerra de dois jeitos equivalentes: pedindo ao agente no
+Telegram ("encerra a missão X") **ou** digitando dentro da própria sala. Mesma
+coisa pra aprovações (o "go" de um handoff): vale pelos dois canais.
+
+### Handoff pro Coder
+
+Se a missão virar "vamos construir X", o estrategista prepara um brief
+(`workspace/handoff-brief.md`), te mostra e **para pedindo o "go"**. Só depois do
+teu OK é que ele dispara o Coder no projeto certo, carregando o brief. Missão que
+não é sobre código não tem handoff.
+
+### Onde mora
+
+```
+user-data/missoes/<id>/
+├── sala.json              ← estado de runtime da sala (status, pid, turn_count…)
+├── sala.sysprompt.txt     ← prompt de estrategista
+└── workspace/             ← scratch da missão
+    ├── raciocinio.md          o raciocínio registrado (memória durável da sala)
+    ├── rascunhos/
+    └── handoff-brief.md       brief pro Coder, quando houver handoff
+```
+
+Destilação durável sobre o Kobe sai do `workspace/` pra
+`user-data/knowledge/kobe/<area>/` — passo explícito ao fim, não automático.
+
+---
+
+## O que é (forma fan-out)
+
+**Missão fan-out** é trabalho multi-tarefa coordenado pelo agente. Você descreve
 o que quer, o orquestrador quebra em sub-tarefas, dispara em paralelo
 respeitando dependências, e mostra um **painel vivo** no Telegram que se
 atualiza sozinho. Quando termina, manda o resultado consolidado como

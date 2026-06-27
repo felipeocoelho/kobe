@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 from zoneinfo import ZoneInfo
 
-from bot.missoes.models import Evento, Missao, TipoEvento
+from bot.mission_control.models import Evento, Missao, TipoEvento
 from bot.topic_manager import slugify
 
 
@@ -94,6 +94,45 @@ def path_output_tarefa(
 
 def path_log_orquestrador(kobe_home: Path, missao_id: str) -> Path:
     return missao_dir(kobe_home, missao_id) / "orquestrador.log"
+
+
+# --- paths da sala estrategista (forma b — sala-única visível) ----------
+# Convivem com estado.json/eventos.jsonl na MESMA pasta da missão. A sala é a
+# camada de runtime (processo/tmux); o estado.json segue sendo a metadata da
+# missão. Layout aprovado no plano (decisão 9 / §3 pend.2).
+
+def path_sala_json(kobe_home: Path, missao_id: str) -> Path:
+    """State de runtime da sala (status/pid/turn_count/...). Gerido pelo
+    worker via `bot.sala.state`."""
+    return missao_dir(kobe_home, missao_id) / "sala.json"
+
+
+def path_sala_sysprompt(kobe_home: Path, missao_id: str) -> Path:
+    """System prompt de estrategista, file-based (`--append-system-prompt-file`)."""
+    return missao_dir(kobe_home, missao_id) / "sala.sysprompt.txt"
+
+
+def path_sala_launcher(kobe_home: Path, missao_id: str) -> Path:
+    """Script bash que vira o comando da sala tmux."""
+    return missao_dir(kobe_home, missao_id) / "sala-launch.sh"
+
+
+def path_sala_log(kobe_home: Path, missao_id: str) -> Path:
+    """Log do worker da sala (stdout/stderr do processo de monitor)."""
+    return missao_dir(kobe_home, missao_id) / "sala.log"
+
+
+def workspace_dir(kobe_home: Path, missao_id: str) -> Path:
+    """Scratch bruto da missão (raciocinio.md, rascunhos/, handoff-brief.md).
+    Separado da KB curada — a destilação durável é passo explícito ao fim."""
+    return missao_dir(kobe_home, missao_id) / "workspace"
+
+
+def ensure_workspace(kobe_home: Path, missao_id: str) -> Path:
+    """Cria o `workspace/` (e `rascunhos/`) da missão. Idempotente."""
+    ws = workspace_dir(kobe_home, missao_id)
+    (ws / "rascunhos").mkdir(parents=True, exist_ok=True)
+    return ws
 
 
 # --- geração de id ------------------------------------------------------

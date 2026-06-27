@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from bot.missoes.models import Missao, StatusMissao, StatusTarefa, Tarefa
+from bot.mission_control.models import Missao, StatusMissao, StatusTarefa, Tarefa
 
 
 logger = logging.getLogger("kobe.missoes.painel")
@@ -98,7 +98,7 @@ def render(missao: Missao, *, agora: Optional[str] = None) -> str:
         linhas.append("")
 
     if agora is None:
-        from bot.missoes.storage import now_iso
+        from bot.mission_control.storage import now_iso
         agora = now_iso()
     # Pega só HH:MM:SS — economiza char e operador entende.
     hora_curta = agora.split("T")[-1].split("-")[0].split("+")[0][:8]

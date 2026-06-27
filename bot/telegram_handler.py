@@ -42,8 +42,9 @@ from bot.handoff import (
 from bot.handoff.destilador import MIN_MESSAGES_FOR_HANDOFF
 from bot.handoff.paths import ensure_topic_handoff_dirs
 from bot.markdown import to_telegram_html
-from bot.missoes import storage as missoes_storage
-from bot.missoes import orquestrador as missoes_orquestrador
+from bot.mission_control import storage as missoes_storage
+from bot.mission_control import orquestrador as missoes_orquestrador
+from bot.mission_control import sala_dispatch as mission_control_sala
 from bot.alertas.context import render_alertas_abertos
 from bot.chat_manager import activity as cm_activity
 from bot.chat_manager.context import render_chat_manager_section
@@ -836,6 +837,18 @@ async def _handle_user_text(
         # Fase 1 (operador vê resposta, sessão fica sem trace dela).
         return
 
+    # Ciência de sala de missão ativa (Mission Control, forma b) — read-only,
+    # atrás da flag. NÃO é roteamento: é só contexto pro Hal reconhecer
+    # endereçamento explícito ("manda pra sala") e decidir (com confirmação, se
+    # incerto) se repassa pra sala. A sala NÃO captura o canal (§10b). Best-effort.
+    try:
+        sala_ativa_info = mission_control_sala.render_sala_ativa(
+            config.kobe_home, message.chat_id, thread_id,
+        )
+    except Exception:  # noqa: BLE001 — ciência é nice-to-have, nunca derruba o turno
+        logger.warning("falha computando ciência de sala de missão", exc_info=True)
+        sala_ativa_info = None
+
     # Alertas abertos (aguardando confirmação) deste tópico — pro Hal
     # captar um "já marquei" na conversa normal e fechar o ciclo via
     # kobe-alerta. Best-effort; None quando não há alerta aberto aqui.
@@ -891,6 +904,7 @@ async def _handle_user_text(
         plugins_section=render_plugins_section(plugins),
         topic_context=topic_context,
         missao_ativa_info=missao_ativa_info,
+        sala_ativa_info=sala_ativa_info,
         alertas_abertos_info=alertas_abertos_info,
         conversation_summaries=conversation_summaries,
         chat_manager_section=chat_manager_section,
