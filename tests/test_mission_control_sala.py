@@ -270,7 +270,10 @@ def test_worker_start_wiring() -> None:
             captured["launcher_path"] = launcher_path
             return _room.OpenResult(ok=True, claude_pid=4242)
 
-        def fake_monitor(state_path, sala, **kw):
+        # Fake que ESPELHA a assinatura real de monitor_sala (sem **kw, sem
+        # kobe_home): se o worker reintroduzir kobe_home= (o bug da Entrega 1),
+        # esta chamada estoura TypeError e o teste pega no fluxo de wiring real.
+        def fake_monitor(state_path, sala, *, on_heartbeat=None, on_death=None):
             captured["monitored"] = sala
             return 0
 
@@ -302,6 +305,46 @@ def test_worker_start_wiring() -> None:
     _ok("worker_start_wiring")
 
 
+# --- regra sagrada: retomar NUNCA barra --------------------------------
+
+def test_retomar_nunca_barra() -> None:
+    """Regra sagrada: `retomar` não pode ser barrado pela contagem de slots — o
+    endurecimento da Entrega 2 não pode encostar nisso. Prova estrutural:
+    `count_active` levanta se for chamado; `retomar_sala` numa sala existente
+    retorna ok SEM nunca consultar o teto (e sem spawnar worker real)."""
+    with tempfile.TemporaryDirectory() as d:
+        kh = Path(d)
+        mid = "2026-07-07-retomar"
+        _mk_sala(kh, mid, chat_id=1, thread_id=None, status="idle")
+
+        def _boom(*a, **k):
+            raise AssertionError("retomar_sala NÃO pode consultar count_active (regra sagrada)")
+
+        orig_spawn = sala_dispatch._spawn_worker
+        orig_count = sala_dispatch.sala_cleanup.count_active
+        sala_dispatch._spawn_worker = lambda *a, **k: 777  # sem subprocess real
+        sala_dispatch.sala_cleanup.count_active = _boom
+        try:
+            res = sala_dispatch.retomar_sala(kobe_home=kh, missao_id=mid, texto="continua aí")
+        finally:
+            sala_dispatch._spawn_worker = orig_spawn
+            sala_dispatch.sala_cleanup.count_active = orig_count
+
+        assert res.get("ok") is True, res
+        assert res.get("worker_pid") == 777, res
+        # o input pendente foi gravado pra sala
+        st = sala_state.read_state(storage.path_sala_json(kh, mid))
+        assert st.get("pending_input") == "continua aí", st
+        # missão inexistente → erro (mas ainda sem tocar na contagem)
+        sala_dispatch.sala_cleanup.count_active = _boom
+        try:
+            r2 = sala_dispatch.retomar_sala(kobe_home=kh, missao_id="nao-existe", texto="x")
+        finally:
+            sala_dispatch.sala_cleanup.count_active = orig_count
+        assert r2.get("error") == "sala_inexistente", r2
+    _ok("retomar_nunca_barra")
+
+
 def main() -> int:
     print("test_mission_control_sala:")
     test_sala_name()
@@ -314,6 +357,7 @@ def main() -> int:
     test_render_sala_ativa()
     test_encerrar_sala()
     test_worker_start_wiring()
+    test_retomar_nunca_barra()
     print("TODOS OS TESTES PASSARAM ✅")
     return 0
 

@@ -162,13 +162,19 @@ def test_should_kill() -> None:
 
 
 def test_is_active_with_injected_pid() -> None:
+    """Endurecimento: 'ocupa slot' olha o WORKER (worker_pid), não o pid do claude
+    (que vive o tempo todo em que a sala está aberta)."""
     alive = lambda pid: pid == 100
-    assert cleanup.is_active({"status": "running", "pid": 100}, pid_alive=alive) is True
-    assert cleanup.is_active({"status": "running", "pid": 999}, pid_alive=alive) is False
-    # starting sem pid → ativo (ainda subindo)
+    # running + worker vivo → ativa
+    assert cleanup.is_active({"status": "running", "worker_pid": 100}, pid_alive=alive) is True
+    # running + worker morto → NÃO ativa (mesmo com o pid do claude vivo:
+    # o claude não resgata mais a contagem — é o coração da Entrega 2)
+    assert cleanup.is_active({"status": "running", "pid": 100, "worker_pid": 999},
+                             pid_alive=alive) is False
+    # starting sem worker_pid → ativa (janela de boot; guard de corrida de abrir)
     assert cleanup.is_active({"status": "starting"}, pid_alive=alive) is True
-    # idle → não ativo
-    assert cleanup.is_active({"status": "idle", "pid": 100}, pid_alive=alive) is False
+    # idle → não ativa
+    assert cleanup.is_active({"status": "idle", "worker_pid": 100}, pid_alive=alive) is False
     _ok("is_active_with_injected_pid")
 
 
@@ -176,10 +182,12 @@ def test_count_active() -> None:
     with tempfile.TemporaryDirectory() as d:
         files = []
         specs = [
-            {"session_id": "a", "status": "running", "pid": 100},   # ativo
-            {"session_id": "b", "status": "running", "pid": 999},   # pid morto
-            {"session_id": "c", "status": "idle", "pid": 100},      # idle
-            {"status": "running", "pid": 100},                       # sem session_id → ignora
+            {"session_id": "a", "status": "running", "worker_pid": 100},        # ativo
+            {"session_id": "b", "status": "running", "worker_pid": 999},        # worker morto
+            # claude vivo (pid 100) mas worker morto (999) → NÃO conta:
+            {"session_id": "d", "status": "running", "pid": 100, "worker_pid": 999},
+            {"session_id": "c", "status": "idle", "worker_pid": 100},           # idle
+            {"status": "running", "worker_pid": 100},                            # sem session_id → ignora
         ]
         for i, s in enumerate(specs):
             f = Path(d) / f"{i}.json"
@@ -226,6 +234,62 @@ def test_monitor_reports_death_when_not_terminal() -> None:
     _ok("monitor_reports_death_when_not_terminal")
 
 
+def test_monitor_running_to_idle() -> None:
+    """Transição running → idle (estava SEM cobertura): sala pensa (busy) e depois
+    para (idle,idle) → o monitor grava `running` durante o turno e `idle` ao fim,
+    e sai 0. É a transição que o worker morto (Entrega 1) nunca deixava acontecer."""
+    import bot.sala.tmux as _tmux
+    with tempfile.TemporaryDirectory() as d:
+        sp = Path(d) / "sala.json"
+        state.write_state(sp, {"worker_pid": None, "status": "running"})
+
+        # Sequência de panes: 1x busy ("esc to interrupt"), depois 2x idle.
+        # pane_busy/extract_pane_last reais operam sobre esse texto.
+        panes = ["trabalhando... esc to interrupt", "pronto\n> ", "pronto\n> "]
+        seen_statuses = []
+        orig_has, orig_cap = _tmux.has_session, _tmux.capture_pane
+
+        def fake_capture(name):
+            # registra o status corrente a cada volta (pra provar que passou por running)
+            seen_statuses.append(state.read_state(sp).get("status"))
+            return panes.pop(0) if panes else "pronto\n> "
+
+        _tmux.has_session = lambda name: True
+        _tmux.capture_pane = fake_capture
+        try:
+            rc = room.monitor_sala(sp, "mission-x", poll_s=0, my_pid=None)
+        finally:
+            _tmux.has_session, _tmux.capture_pane = orig_has, orig_cap
+
+        assert rc == 0, rc
+        # terminou em idle (turno acabou)
+        assert state.read_state(sp)["status"] == "idle", state.read_state(sp)
+        # passou por running enquanto pensava (primeira volta, pane busy)
+        assert "running" in seen_statuses, seen_statuses
+    _ok("monitor_running_to_idle")
+
+
+def test_monitor_call_signature_matches_worker() -> None:
+    """Guarda de regressão da Entrega 1: a forma de chamada usada pelo
+    sala_worker (on_heartbeat/on_death, SEM kobe_home) casa com a assinatura de
+    monitor_sala; reintroduzir kobe_home= volta a quebrar."""
+    import inspect
+    sig = inspect.signature(room.monitor_sala)
+    # kobe_home NÃO é parâmetro aceito
+    assert "kobe_home" not in sig.parameters, list(sig.parameters)
+    # a chamada real do worker (2 posicionais + os 2 callbacks) casa
+    sig.bind(object(), "mission-x", on_heartbeat=lambda *a: None, on_death=lambda *a: None)
+    # reintroduzir kobe_home= tem que estourar (o exato bug da Entrega 1)
+    try:
+        sig.bind(object(), "mission-x", kobe_home=Path("/x"),
+                 on_heartbeat=lambda *a: None, on_death=lambda *a: None)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("bind com kobe_home= deveria falhar (assinatura sem kobe_home)")
+    _ok("monitor_call_signature_matches_worker")
+
+
 def main() -> int:
     print("test_sala_core:")
     test_state_roundtrip_and_patch()
@@ -240,6 +304,8 @@ def main() -> int:
     test_count_active()
     test_monitor_terminal_guard()
     test_monitor_reports_death_when_not_terminal()
+    test_monitor_running_to_idle()
+    test_monitor_call_signature_matches_worker()
     print("TODOS OS TESTES PASSARAM ✅")
     return 0
 

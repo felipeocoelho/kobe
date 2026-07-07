@@ -107,7 +107,7 @@ def _start(kobe_home: Path, sala_json: Path) -> int:
     _notify(kobe_home,
             f"🟢 [mission] sala `{sala}` aberta e visível no Claude Code Desktop. "
             f"Pensando na missão; reporto os marcos por aqui.")
-    return room.monitor_sala(sala_json, sala, kobe_home=kobe_home,
+    return room.monitor_sala(sala_json, sala,
                              on_heartbeat=_on_heartbeat(kobe_home),
                              on_death=_on_death(kobe_home))
 
@@ -136,7 +136,7 @@ def _resume(kobe_home: Path, sala_json: Path) -> int:
                 f"A sala está viva e o input preservado — tenta de novo.")
         return 1
     # DELIVERED → monitora o turno.
-    return room.monitor_sala(sala_json, sala, kobe_home=kobe_home,
+    return room.monitor_sala(sala_json, sala,
                              on_heartbeat=_on_heartbeat(kobe_home),
                              on_death=_on_death(kobe_home))
 

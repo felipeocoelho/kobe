@@ -54,14 +54,27 @@ def should_kill(state: dict, *, now: datetime, ttl_hours: Optional[float],
 
 
 def is_active(state: dict, *, pid_alive: Callable[[int], bool]) -> bool:
-    """Sessão conta como ativa? status starting/running E (sem pid OU pid vivo).
-    `pid_alive` é injetado pra testar sem processos reais."""
+    """Sessão OCUPA slot? Só quando um TURNO está de fato rodando: status
+    starting/running E o WORKER daquele turno vivo (`worker_pid` sinalizável).
+    `pid_alive` é injetado pra testar sem processos reais.
+
+    Endurecimento: antes a régua caía no `pid` do processo `claude` — que fica
+    vivo o tempo TODO em que a sala está aberta (mesmo parada/idle), então uma
+    sala presa em `running` com o worker/monitor morto travava um slot pra
+    sempre. Agora olha o `worker_pid`: o worker existe só durante um turno
+    monitorado e sai quando a sala fica idle, então "worker vivo" é proxy preciso
+    de "turno rodando agora". Sala presa em running/starting com worker morto →
+    NÃO conta mais."""
     if state.get("status") not in ("starting", "running"):
         return False
-    pid = state.get("pid") or state.get("worker_pid")
-    if not pid:
+    wpid = state.get("worker_pid")
+    if not wpid:
+        # Janela de boot do abrir_sala (state gravado antes do worker registrar o
+        # worker_pid): conta como ativa pra fechar a brecha de corrida entre dois
+        # "abrir" simultâneos. NÃO é o caso do bug — sala presa em running com
+        # worker morto tem worker_pid preenchido e morto → cai no pid_alive.
         return True
-    return pid_alive(int(pid))
+    return pid_alive(int(wpid))
 
 
 # --- IO ----------------------------------------------------------------

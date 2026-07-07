@@ -4,6 +4,22 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fix — Mission Control: monitor da sala + contagem de slot (2026-07-07)
+
+**Problema:** duas falhas silenciosas no Mission Control. (1) O monitor da sala era
+ligado com um argumento `kobe_home=` que a função-alvo não aceita — a exceção matava
+o worker enquanto o Claude da sala seguia vivo, congelando o status numa mentira
+(sensor morto). (2) A regra de "sala ocupa slot" confiava só no campo de status, então
+uma sala presa em `running` com worker morto travava o slot indefinidamente.
+
+**Foi feito:**
+- `bot/mission_control/sala_worker.py`: remove o argumento `kobe_home=` inválido das 2
+  chamadas do monitor (confirmado contra a assinatura real da função).
+- `bot/sala/cleanup.py`: "ocupa slot" agora exige status `running` **E** worker vivo de
+  verdade (checagem de PID) — sala com worker morto não trava mais slot. Regra sagrada
+  "retomar nunca barra" preservada e coberta por teste.
+- Testes novos cobrindo a transição `running→idle` do monitor (antes sem cobertura).
+
 ### Docs — Mission Control: guia + runbook + README (2026-06-26)
 
 **Operador pediu:** commit 7 — documentação do Mission Control.
