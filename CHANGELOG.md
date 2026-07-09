@@ -4,6 +4,22 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Trava 2 — pedido de código ⇒ sessão Coder, sempre (regra dura no CLAUDE.md) (2026-07-09)
+
+**Operador pediu:** garantir que, sempre que ele pede pra codificar algo (escrever/refatorar/corrigir código) — em qualquer forma, e sobretudo quando usa a palavra "Coder" — o Hal **abra uma sessão Coder**, nunca code na mão no próprio turno, nunca reinterprete o pedido de código de outro jeito. Exceção única: o operador dizer EXPLICITAMENTE que NÃO quer sessão Coder. Travar o rito de disparo do lado do Hal (não mexer em runtime de nada). Decisão do operador: enforcement **só via regra no CLAUDE.md** (sem hook `PreToolUse` no Hal).
+
+**Por quê:** a decisão "isto é pedido de código?" é julgamento sobre a INTENÇÃO da mensagem, que só o Hal (LLM) lê no início do turno — um hook vê chamadas de ferramenta, não intenção, e o Hal (agente mais externo) não tem canal de aprovação externa como o Coder tem, então um hook no Hal ou fica rígido demais (bloqueia edições legítimas de memória/knowledge) ou é auto-bypassável (inútil). Logo a trava certa e durável é o **system prompt do Hal** (o `CLAUDE.md` do Kobe), que ele lê todo turno. Além disso, o próprio CLAUDE.md tinha trechos que **mandavam** o Hal codar na mão ("Criação de projeto novo: crie a pasta, monte a estrutura…", "Continuação de projeto: retome de onde parou") — conflito a reconciliar.
+
+**Foi feito:** (só `CLAUDE.md`)
+- Nova seção **"Pedido de código ⇒ sessão Coder, sempre (regra dura)"** antes de "Plugins": caminho único pro Coder em pedido de código; exceção única (operador dispensar o Coder explicitamente); escopo preciso do que é "código" (runtime: `bot/`, `plugins/`, `infra/`, `keyko/`, scripts, `projetos/` de código); e o que a regra NÃO alcança (memória/identidade/knowledge, projeto não-código, ler/greppar código, docs puras). "Na dúvida, pergunte" nos dois lados.
+- Reconciliados os três subtópicos de "Comportamento por tipo de solicitação" que contradiziam a regra: "Criação de projeto novo" e "Continuação de projeto" passam a rotear trabalho **de código** pro Coder e manter só o **não-código** com o Hal; "Disparo de processo empacotado" esclarece que **rodar** um pipeline existente segue com o Hal, mas **mexer no código** dele é Coder.
+
+**Testes (ambiente de desenvolvimento):** mudança é de instrução (governa o comportamento do Hal, um LLM) — não tem teste unitário automatizável. Verificação = revisão do texto + reconciliação dos conflitos internos do CLAUDE.md (feita) + runbook de cenários pro operador validar no uso real (pedido de código → dispatcha; "edita você mesmo" → coda na mão; editar knowledge/memória → segue direto; rodar pipeline → segue direto). Não há como um hook decidir "é pedido de código?" de forma confiável (indecidível por código) — por isso a decisão do operador de ficar só na regra dura.
+
+**Commits:** não commitado nesta sessão (proibido por rito da missão — deploy é do operador, na mão).
+
+**Reversão:** aditiva/localizada — `git revert` do commit quando houver, ou remover a seção nova e restaurar os três subtópicos. Nenhum estado/runtime envolvido (é só texto de instrução).
+
 ### Fix — Mission Control: monitor da sala + contagem de slot (2026-07-07)
 
 **Problema:** duas falhas silenciosas no Mission Control. (1) O monitor da sala era
