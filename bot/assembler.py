@@ -178,10 +178,21 @@ class MessageAssembler:
             return self._quiet_term
         return self._quiet
 
+    def _cancel_timer(self, buf: _Buffer) -> None:
+        """Cancela o timer de debounce pendente — NUNCA o task corrente.
+
+        Quando o flush vem pelo timer (o caminho de toda mensagem normal),
+        `buf.timer` É o task que está executando o flush agora: cancelá-lo mata
+        o próprio flush no primeiro ponto de suspensão — que é o `await cb(...)`
+        do despacho do turno. Só cancela quem veio de fora (flush_now).
+        """
+        timer, buf.timer = buf.timer, None
+        if timer is not None and timer is not asyncio.current_task():
+            timer.cancel()
+
     def _arm(self, key, buf: _Buffer, delay: float) -> None:
         """(Re)arma o timer de debounce. Cancela o anterior (padrão debounce)."""
-        if buf.timer is not None:
-            buf.timer.cancel()
+        self._cancel_timer(buf)
         # Cap de espera máxima desde o 1º fragmento: se já passou, dispara já.
         if time.monotonic() - buf.first_at >= self._max_wait:
             delay = 0.0
@@ -203,8 +214,7 @@ class MessageAssembler:
         # até o cap de espera máxima — depois flusha com o que tem (não trava).
         pending = [s for s in buf.slots if not s.resolved]
         if pending and (time.monotonic() - buf.first_at) < self._max_wait:
-            if buf.timer is not None:
-                buf.timer.cancel()
+            self._cancel_timer(buf)
             buf.timer = asyncio.create_task(
                 self._flush_after(key, self._pending_poll)
             )
@@ -212,8 +222,7 @@ class MessageAssembler:
 
         # Pronto: remove o buffer (novos fragmentos abrem ciclo novo) e processa.
         self._buffers.pop(key, None)
-        if buf.timer is not None:
-            buf.timer.cancel()
+        self._cancel_timer(buf)
 
         ordered = sorted(buf.slots, key=lambda s: s.index)
         texts = [s.text for s in ordered if s.resolved and s.text and s.text.strip()]
@@ -228,5 +237,16 @@ class MessageAssembler:
             return
         try:
             await cb(agg_text, audio, message)
+        except asyncio.CancelledError:
+            # Um flush cancelado no meio do despacho não pode sumir calado: foi
+            # exatamente assim que o bug do auto-cancelamento derrubou TODO turno
+            # normal em produção sem deixar um traço no journal. Loga e PROPAGA —
+            # engolir faria o task ignorar o pedido de cancelamento e poderia
+            # travar o encerramento do bot (shutdown), trocando um bug por outro.
+            logger.warning(
+                "assembler: flush CANCELADO no meio do despacho (%d frags) — turno abortado",
+                len(texts),
+            )
+            raise
         except Exception:  # noqa: BLE001 — cb não deve derrubar o assembler
             logger.exception("assembler: flush_cb levantou")
