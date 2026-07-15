@@ -378,6 +378,43 @@ def unique_knowledge_path(kobe_home: Path, slug: str, basename: str) -> Path:
         i += 1
 
 
+def topic_uploads_dir(kobe_home: Path, slug: str) -> Path:
+    """Pasta onde anexos de turno do operador são salvos no formato ORIGINAL.
+
+    Separada do `knowledge/` (KB curada, que entra em todo turno): uploads são
+    material de trabalho efêmero, correlacionados à instrução do turno, e só
+    viram KB permanente sob comando explícito ("guarda na base"). Parte da nova
+    arquitetura de borda (Peça D) — ver bot/uploads.py.
+    """
+    return kobe_home / "user-data" / "topics" / slug / "uploads"
+
+
+def unique_upload_path(kobe_home: Path, slug: str, basename: str) -> Path:
+    """Path único em `uploads/` preservando a EXTENSÃO ORIGINAL do arquivo.
+
+    Diferente de `unique_knowledge_path` (que força `.md` porque a KB é
+    markdown), aqui o formato original é preservado — a imagem continua `.png`,
+    o PDF continua `.pdf` — porque o agente lê o arquivo por path (imagem via a
+    tool Read multimodal, documento via texto extraído). Sanitiza separadores de
+    caminho (Telegram aceita filenames com `/`) e adiciona sufixo `-2/-3`… se já
+    existir arquivo com o mesmo nome (não sobrescreve).
+    """
+    safe = basename.replace("/", "_").replace("\\", "_").strip() or "anexo"
+    p = Path(safe)
+    stem = p.stem or "anexo"
+    suffix = p.suffix  # preserva a extensão original (ex.: .png, .pdf)
+    target_dir = topic_uploads_dir(kobe_home, slug)
+    target = target_dir / f"{stem}{suffix}"
+    if not target.exists():
+        return target
+    i = 2
+    while True:
+        candidate = target_dir / f"{stem}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
 def consume_truncated_marker(context: Optional[str]) -> tuple[Optional[str], bool]:
     """Retorna `(contexto_limpo, foi_truncado)`. Tira o marcador interno
     antes de injetar no prompt.

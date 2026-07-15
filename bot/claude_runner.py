@@ -61,6 +61,13 @@ STDOUT_BUFFER_LIMIT_BYTES = 10 * 1024 * 1024
 
 logger = logging.getLogger("kobe.claude")
 
+# Peça C (separação rascunho/resposta): ferramentas que NÃO contam como
+# "trabalho" pra separar rascunho de resposta. São housekeeping interno do
+# agente (lista de tarefas, agendamento) — se o modelo responde e depois chama
+# uma delas, isso não deve empurrar a resposta pro balde de "rascunho pré-tool".
+# Mesmas que o ProgressReporter já ignora na UI.
+_NON_CUTTING_TOOLS = frozenset({"TodoWrite", "ScheduleWakeup"})
+
 
 class ClaudeError(Exception):
     """Falha ao invocar ou obter resposta do Claude Code."""
@@ -128,6 +135,7 @@ class ClaudeRunner:
         thread_id: Optional[int] = None,
         bot_token: Optional[str] = None,
         timeout_override: Optional[int] = None,
+        clean_response: bool = False,
     ) -> ClaudeResult:
         """Manda `prompt` via stdin pro Claude Code e retorna a resposta.
 
@@ -202,6 +210,12 @@ class ClaudeRunner:
         # pronto. Texto de subagente (parent_tool_use_id != None) é
         # ignorado: não é a resposta ao operador.
         assistant_texts: list[str] = []
+        # Peça C: índice em `assistant_texts` no momento da ÚLTIMA ferramenta de
+        # trabalho do agente principal. Os textos ANTES desse ponto são rascunho
+        # pré-ferramenta ("deixa eu olhar o handler…"); os DEPOIS são a resposta
+        # final. Fica 0 se o turno não usou ferramenta (papo puro) → resposta é
+        # tudo (comportamento idêntico ao de hoje). Só usado com clean_response.
+        cut_at_last_tool: int = 0
         # Buffer dos eventos parseados — usado pra dump diagnóstico quando
         # a resposta final vier vazia (acontece raro mas precisamos de
         # evidência pra entender em qual cenário do Claude isso dispara).
@@ -210,6 +224,7 @@ class ClaudeRunner:
 
         async def _consume_stdout() -> None:
             nonlocal result_text, non_json_lines, result_usage, result_cost
+            nonlocal cut_at_last_tool
             assert proc.stdout is not None
             while True:
                 try:
@@ -256,10 +271,21 @@ class ClaudeRunner:
                     # prosa escrita ANTES de uma tool call.
                     msg = event.get("message") or {}
                     for block in msg.get("content") or []:
-                        if isinstance(block, dict) and block.get("type") == "text":
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
                             txt = block.get("text") or ""
                             if txt:
                                 assistant_texts.append(txt)
+                        elif btype == "tool_use":
+                            # Peça C: marca o corte no ponto de cada ferramenta
+                            # de trabalho — o texto até aqui é rascunho pré-tool.
+                            # Housekeeping (TodoWrite/ScheduleWakeup) não conta:
+                            # responder e depois agendar não joga a resposta pro
+                            # balde de rascunho.
+                            if block.get("name") not in _NON_CUTTING_TOOLS:
+                                cut_at_last_tool = len(assistant_texts)
 
                 if on_event is not None:
                     try:
@@ -326,10 +352,23 @@ class ClaudeRunner:
                 cost_usd=result_cost,
             )
 
-        # Resposta = concatenação de TODOS os blocos de texto do agente
-        # principal (prosa antes de tools + texto depois). É o que corrige
-        # o bug de engolir a prosa pré-tool.
-        joined = _join_texts(assistant_texts)
+        # Resposta final. Dois modos:
+        # - clean_response OFF (legado): concatena TODOS os blocos de texto do
+        #   agente principal (prosa pré-tool + texto pós-tool). Corrige o bug de
+        #   2026-06-01 (usar só `result` engolia prosa pré-tool).
+        # - clean_response ON (Peça C): só o texto APÓS a última ferramenta de
+        #   trabalho é a resposta; a prosa pré-tool (rascunho) fica fora — ela
+        #   aparece ao vivo no canal de progresso e some. Guard anti-engolir: se
+        #   não houver texto pós-tool (modelo terminou numa ferramenta), cai pro
+        #   join completo — melhor a resposta inteira que vazia (não reintroduz
+        #   o bug antigo). Turno sem ferramenta → cut=0 → join completo (idêntico
+        #   ao legado no caso papo-puro, que é o mais comum).
+        if clean_response and cut_at_last_tool > 0:
+            joined = _join_texts(assistant_texts[cut_at_last_tool:])
+            if not joined:
+                joined = _join_texts(assistant_texts)
+        else:
+            joined = _join_texts(assistant_texts)
         if joined:
             return _result(joined)
         # Fallback raro: nenhum bloco `assistant` foi capturado, mas o
@@ -417,6 +456,7 @@ def build_prompt(
     audio_transcribed: bool = False,
     background_handoff: Optional[str] = None,
     quoted_message: Optional[str] = None,
+    attachments_section: Optional[str] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
@@ -562,6 +602,15 @@ def build_prompt(
             "principal do que ele diz a seguir]"
         )
         parts.append(quoted_message)
+
+    # Anexos deste turno (Peça D da borda nova): imagens/documentos que o
+    # operador enviou junto do pedido, já normalizados pela borda (path do
+    # original + texto extraído quando doc). Vai colado à mensagem nova porque é
+    # parte do intent do turno — a instrução "faça X com a imagem" e o anexo têm
+    # que se encontrar aqui. None quando não há anexo (flag off ou turno só-texto).
+    if attachments_section:
+        parts.append("")
+        parts.append(attachments_section)
 
     parts.append("")
     parts.append("[Mensagem nova do operador]")

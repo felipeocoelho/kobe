@@ -67,6 +67,7 @@ from bot.telegram_handler import (
     on_forum_topic_edited,
     on_forum_topic_reopened,
     on_error,
+    on_photo,
     on_text,
     on_voice,
     send_welcome,
@@ -339,6 +340,9 @@ def build_application(config: Config) -> Application:
     # Upload de anexo na KB do tópico (v0.11): operador manda .txt/.md/.pdf/.docx
     # e o bot extrai texto e salva em user-data/topics/<slug>/knowledge/.
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    # Foto/imagem comprimida (Peça D da borda nova, atrás de EDGE_UPLOADS_ENABLED):
+    # sem a flag o handler no-op e a foto segue ignorada como antes.
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     # Eventos administrativos de forum topics (v0.10): captura nome do
     # tópico pra popular topics.current_name — base do slug usado pela
     # knowledge base por tópico.

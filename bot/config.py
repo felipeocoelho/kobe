@@ -98,6 +98,35 @@ class Config:
     # rodando, o código manda o aviso enlatado como piso garantido — o operador
     # nunca fica no escuro mesmo que o Hal não acke. Ver telegram_handler.
     heavy_ack_fallback_seconds: float
+    # ── Nova arquitetura de borda ─────────────────────────────────────────
+    # Peça D (anexos multimodais): quando ligado, a borda aceita QUALQUER anexo
+    # (paridade single-tenant com o Claude Desktop), salva o original em
+    # uploads/ do tópico (separado do knowledge/ curado), cataloga num markdown
+    # único, e correlaciona anexo+instrução no mesmo turno (foto passa a
+    # funcionar; caption entra no turno). Off = comportamento legado
+    # (.txt/.md/.pdf/.docx → knowledge/, foto ignorada). Ver bot/uploads.py.
+    edge_uploads_enabled: bool
+    # Peça A (Message Assembler): quando ligado, mensagens picadas de um tópico
+    # são agregadas por debounce de silêncio num intent único (1 turno) antes do
+    # FIFO. Off = disparo imediato de hoje (1 msg = 1 turno). Ver bot/assembler.py.
+    edge_assembler_enabled: bool
+    # Janela de silêncio base (ms) antes de flushar o buffer. Adaptativa: uma
+    # frase terminada em pontuação usa a janela curta (_terminated_ms).
+    edge_assembler_quiet_ms: float
+    edge_assembler_quiet_terminated_ms: float
+    # Teto de espera (ms) desde o 1º fragmento — flusha mesmo se ainda chegam
+    # mensagens, pra não represar indefinidamente.
+    edge_assembler_max_wait_ms: float
+    # Peça C (separação rascunho/resposta): quando ligado, a resposta final vem
+    # LIMPA (só o texto após a última ferramenta); a prosa pré-ferramenta
+    # (rascunho) aparece efêmera no canal de progresso e some. Off = concatena
+    # tudo (comportamento de hoje, fix de 2026-06-01). Ver bot/claude_runner.py.
+    edge_clean_response_enabled: bool
+    # Peça B (Liveness Protocol): quando ligado, o ACK das tarefas pesadas vira
+    # GARANTIA da borda (LIV-ack semântico escrito por modelo barato) e o aviso
+    # enlatado de background é aposentado. Off = comportamento de hoje (ack
+    # model-driven + enlatado + watchdog). Ver bot/liveness.py.
+    edge_liveness_enabled: bool
 
 
 def _require(name: str) -> str:
@@ -187,6 +216,28 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         heavy_ack_fallback_seconds=float(
             os.getenv("HEAVY_DISPATCH_ACK_FALLBACK_SECONDS", "20")
         ),
+        # Nova arquitetura de borda — Peça D (anexos). Default OFF: rollback
+        # trivial (flag off + restart) volta ao on_document legado e à foto
+        # ignorada. Ligar quando validado.
+        edge_uploads_enabled=_parse_bool(os.getenv("EDGE_UPLOADS_ENABLED")),
+        # Peça A (Message Assembler). Default OFF: rollback trivial volta ao
+        # disparo imediato (1 msg = 1 turno). Janelas tunáveis (calibração no uso).
+        edge_assembler_enabled=_parse_bool(os.getenv("EDGE_ASSEMBLER_ENABLED")),
+        edge_assembler_quiet_ms=float(os.getenv("EDGE_ASSEMBLER_QUIET_MS", "2500")),
+        edge_assembler_quiet_terminated_ms=float(
+            os.getenv("EDGE_ASSEMBLER_QUIET_TERMINATED_MS", "700")
+        ),
+        edge_assembler_max_wait_ms=float(
+            os.getenv("EDGE_ASSEMBLER_MAX_WAIT_MS", "9000")
+        ),
+        # Peça C (resposta limpa). Default OFF: rollback trivial volta à
+        # concatenação de todos os blocos de texto (fix de 2026-06-01).
+        edge_clean_response_enabled=_parse_bool(
+            os.getenv("EDGE_CLEAN_RESPONSE_ENABLED")
+        ),
+        # Peça B (Liveness). Default OFF: rollback trivial volta ao ack
+        # model-driven + enlatado + watchdog de hoje.
+        edge_liveness_enabled=_parse_bool(os.getenv("EDGE_LIVENESS_ENABLED")),
     )
 
 

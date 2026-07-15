@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import logging
 import time
 from datetime import datetime, timezone
@@ -17,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from supabase import Client
-from telegram import Audio, Document, Message, Update, Voice
+from telegram import Audio, Document, Message, PhotoSize, Update, Voice
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -81,6 +80,10 @@ from bot.topic_manager import (
 )
 from bot.transcribe import Transcriber, TranscriptionError
 from bot import hindsight_client
+from bot import uploads
+from bot.uploads import UploadDescriptor
+from bot.assembler import MessageAssembler
+from bot import liveness
 
 
 logger = logging.getLogger("kobe.handler")
@@ -276,6 +279,83 @@ async def _serve(chat_id: int, thread_id: Optional[int]):
         await ticket.complete()
 
 
+# ── Buffer de anexos pendentes por tópico (Peça D, Fase 1b) ───────────────
+#
+# Um anexo SEM caption não tem instrução — a instrução vem na PRÓXIMA mensagem
+# ("faça X com a imagem"). Este buffer segura o(s) anexo(s) já normalizado(s)
+# até o próximo turno de texto/voz do MESMO tópico, que os DRENA e injeta no
+# prompt (correlação anexo↔instrução). Anexo COM caption vira turno na hora
+# (a caption é a instrução) — ele passa por aqui e é drenado no mesmo tick.
+#
+# Ordem garantida pelo mesmo sequenciador FIFO: append e drain acontecem DENTRO
+# da seção crítica do tópico (um por vez, na ordem de chegada), então um anexo
+# que chegou antes de um texto é sempre drenado por ele. São ops síncronas de
+# dict — sem race.
+#
+# LIMITAÇÃO conhecida (Fase 1b): um anexo sem caption que nunca recebe follow-up
+# fica pendente e gruda no PRÓXIMO texto, ainda que de outro assunto. É aceitável
+# no MVP (o caminho comum é caption ou follow-up imediato) e some na Fase 2: o
+# Message Assembler junta anexo+texto na mesma janela de silêncio, dispensando o
+# buffer de espera indefinida. Este buffer é a SEMENTE do Assembler, não andaime.
+_pending_uploads: dict[tuple[int, Optional[int]], list[UploadDescriptor]] = {}
+
+
+def _push_pending_upload(
+    chat_id: int, thread_id: Optional[int], descriptor: UploadDescriptor
+) -> None:
+    """Guarda um anexo normalizado pra ser drenado pelo próximo turno do tópico.
+    Chamar DENTRO da seção crítica do FIFO (preserva ordem de chegada)."""
+    _pending_uploads.setdefault((chat_id, thread_id), []).append(descriptor)
+
+
+def _drain_pending_uploads(
+    chat_id: int, thread_id: Optional[int]
+) -> list[UploadDescriptor]:
+    """Retira e devolve os anexos pendentes do tópico (lista vazia se nenhum).
+    Chamar DENTRO da seção crítica (mesma ordem do push)."""
+    return _pending_uploads.pop((chat_id, thread_id), [])
+
+
+# ── Message Assembler (Peça A, Fase 2) — singleton + callback de flush ────
+#
+# Um único assembler pro processo (buffers por tópico dentro dele). Criado lazy
+# a partir da config na 1ª mensagem com a flag ligada.
+_assembler: Optional[MessageAssembler] = None
+
+
+def _get_assembler(config: Config) -> MessageAssembler:
+    global _assembler
+    if _assembler is None:
+        _assembler = MessageAssembler(
+            quiet_ms=config.edge_assembler_quiet_ms,
+            quiet_terminated_ms=config.edge_assembler_quiet_terminated_ms,
+            max_wait_ms=config.edge_assembler_max_wait_ms,
+        )
+    return _assembler
+
+
+def _make_flush_cb(
+    config: Config, db: Client, claude: ClaudeRunner, plugins: list[Plugin]
+):
+    """Fabrica o callback que o Assembler chama quando o buffer flusha: roda o
+    turno AGREGADO dentro da seção crítica do FIFO (um flush = um ticket = um
+    turno), preservando a ordem entre flushes do mesmo tópico."""
+
+    async def _cb(agg_text: str, audio: bool, message: Message) -> None:
+        async with _serve(message.chat_id, message.message_thread_id):
+            await _handle_user_text(
+                message=message,
+                text=agg_text,
+                audio_transcribed=audio,
+                config=config,
+                db=db,
+                claude=claude,
+                plugins=plugins,
+            )
+
+    return _cb
+
+
 def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
     user = update.effective_user
     return user is not None and user.id in allowed_ids
@@ -306,6 +386,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         len(text),
     )
 
+    # ── Message Assembler (Peça A): agrega mensagens picadas num intent único ──
+    # Só texto livre entra no buffer. Comando slash (ex.: /algo desconhecido que
+    # cai aqui) NÃO é debounce-ado — é controle imediato; e antes de processá-lo
+    # flushamos o que estava acumulado, pra o texto pendente não ficar órfão.
+    if config.edge_assembler_enabled:
+        assembler = _get_assembler(config)
+        if not text.startswith("/"):
+            idx = assembler.reserve(message.chat_id, message.message_thread_id)
+            await assembler.fill(
+                message.chat_id,
+                message.message_thread_id,
+                idx,
+                text,
+                audio=False,
+                message=message,
+                flush_cb=_make_flush_cb(config, db, claude, plugins),
+            )
+            return
+        await assembler.flush_now(message.chat_id, message.message_thread_id)
+
     # Texto não tem preparo pesado: tira o ticket e espera a vez na própria
     # entrada da seção crítica. A ordem de chegada vira a ordem de resposta.
     async with _serve(message.chat_id, message.message_thread_id):
@@ -318,6 +418,99 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             claude=claude,
             plugins=plugins,
         )
+
+
+async def _download_and_transcribe(
+    message: Message,
+    media,
+    transcriber: Transcriber,
+    thread_id: Optional[int],
+) -> Optional[str]:
+    """Baixa e transcreve o áudio FORA de qualquer seção crítica (preparo puro,
+    em paralelo). Mantém o "digitando…" vivo durante o preparo. Em falha/vazio,
+    JÁ responde ao operador e retorna None. Em sucesso, avisa fallback (se
+    AssemblyAI cobriu) e retorna o texto. Compartilhado pelo caminho do Assembler
+    e pelo legado (ticket).
+
+    Transcrição é função pura (bytes→texto), sem estado compartilhado nem escrita
+    no DB — por isso roda fora da seção crítica, em paralelo com o preparo de
+    outras mensagens do tópico (fix latência de áudio, 2026-06-04). A ordem de
+    chegada é carimbada ANTES desta chamada (ticket FIFO no legado; reserve do
+    Assembler no caminho novo), então áudio lento não perde a vez pra texto rápido.
+    """
+    filename = _audio_filename(media)
+    # Feedback imediato: "digitando…" já aqui, antes do download — sem isso o
+    # operador via silêncio total durante a transcrição.
+    bot = message.get_bot()
+    feedback_task = asyncio.create_task(_keep_typing(message.chat_id, thread_id, bot))
+    download_elapsed = transcribe_elapsed = 0.0
+    engine = ""
+    text = ""
+    try:
+        try:
+            t0 = time.monotonic()
+            tg_file = await media.get_file()
+            audio_bytes = bytes(await tg_file.download_as_bytearray())
+            download_elapsed = time.monotonic() - t0
+            # Transcrição é HTTP síncrono (Groq/AssemblyAI) e leva segundos —
+            # roda em thread pra não travar o event loop (SPR P1 #5).
+            t1 = time.monotonic()
+            text, engine = await asyncio.to_thread(
+                transcriber.transcribe, audio_bytes, filename
+            )
+            transcribe_elapsed = time.monotonic() - t1
+        except TranscriptionError:
+            await message.reply_text(
+                "Não consegui transcrever esse áudio. Tenta de novo?",
+                message_thread_id=thread_id,
+            )
+            return None
+        except Exception:  # noqa: BLE001 — rede/IO do Telegram
+            logger.exception("falha baixando áudio do Telegram")
+            await message.reply_text(
+                "Tive um problema baixando o áudio. Tenta de novo?",
+                message_thread_id=thread_id,
+            )
+            return None
+    finally:
+        feedback_task.cancel()
+        try:
+            await feedback_task
+        except asyncio.CancelledError:
+            pass
+
+    logger.info(
+        "audio_transcribe %s dur=%ss download=%.1fs transcribe=%.1fs engine=%s chars=%d",
+        _topic_label(thread_id),
+        media.duration,
+        download_elapsed,
+        transcribe_elapsed,
+        engine or "?",
+        len(text or ""),
+    )
+
+    if not text:
+        await message.reply_text(
+            "Não consegui entender nada nesse áudio.",
+            message_thread_id=thread_id,
+        )
+        return None
+
+    # Aviso de fallback: se o Whisper falhou e AssemblyAI cobriu, operador precisa
+    # saber pra contexto (qualidade pode diferir). `engine` vem do retorno.
+    if engine == "assemblyai-fallback":
+        try:
+            await message.reply_text(
+                "⚠️ Áudio transcrito via <b>AssemblyAI</b> (fallback — "
+                "Whisper/Groq indisponível). Pode haver pequenas "
+                "diferenças de transcrição em relação ao usual.",
+                message_thread_id=thread_id,
+                parse_mode="HTML",
+            )
+        except Exception:  # noqa: BLE001 — aviso é nice-to-have
+            logger.warning("falha enviando aviso de fallback", exc_info=True)
+
+    return text
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -336,126 +529,46 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     thread_id = message.message_thread_id
+    user_id = update.effective_user.id if update.effective_user else None
+    logger.info(
+        "áudio recebido user=%s %s dur=%ss",
+        user_id,
+        _topic_label(thread_id),
+        media.duration,
+    )
 
-    # Ticket FIFO tirado JÁ NA ENTRADA, antes do download/transcrição: carimba
-    # a ordem de chegada do áudio. O preparo (download + transcrição) roda fora
-    # da seção crítica, em PARALELO com o preparo das outras mensagens do tópico
-    # (fix latência de áudio, 2026-06-04 — ver bloco abaixo). Só a ENTRADA na
-    # seção crítica (`ticket.wait_turn()`, lá embaixo) respeita a vez. Assim um
-    # áudio que chega 1º mas demora a transcrever NÃO perde a vez pra um texto
-    # que chegou depois — FIFO de verdade. `complete()` em finally garante que
-    # qualquer abort no preparo (transcrição falha, áudio vazio) libere a vez;
-    # sem isso o tópico travaria no primeiro áudio problemático.
+    # ── Message Assembler (Peça A): reserva a ordem de chegada SÍNCRONA na
+    # entrada (antes da transcrição, como o ticket fazia), transcreve em paralelo
+    # e preenche o slot. Áudio lento não perde a posição pra texto rápido. ──
+    if config.edge_assembler_enabled:
+        assembler = _get_assembler(config)
+        idx = assembler.reserve(message.chat_id, thread_id)
+        try:
+            text = await _download_and_transcribe(message, media, transcriber, thread_id)
+        except Exception:  # noqa: BLE001 — libera o slot antes de propagar
+            await assembler.release(message.chat_id, thread_id, idx)
+            raise
+        if text is None:
+            await assembler.release(message.chat_id, thread_id, idx)
+            return
+        await assembler.fill(
+            message.chat_id,
+            thread_id,
+            idx,
+            text,
+            audio=True,
+            message=message,
+            flush_cb=_make_flush_cb(config, db, claude, plugins),
+        )
+        return
+
+    # ── Legado (flag off): ticket FIFO tirado na entrada, transcrição fora da
+    # seção crítica, entrada na seção crítica na ordem de chegada. ──
     ticket = _take_ticket(message.chat_id, thread_id)
     try:
-        user_id = update.effective_user.id if update.effective_user else None
-        filename = _audio_filename(media)
-        logger.info(
-            "áudio recebido user=%s %s file=%s dur=%ss",
-            user_id,
-            _topic_label(thread_id),
-            filename,
-            media.duration,
-        )
-
-        # Download + transcrição rodam FORA da seção crítica do tópico (fix
-        # latência de áudio, 2026-06-04). Antes o lock era pego ANTES da
-        # transcrição "pra preservar ordem voice+text" — mas o efeito colateral
-        # era grave: como o lock só liberava quando o claude_run anterior do
-        # mesmo tópico terminava (60–300s), cada áudio ficava ENFILEIRADO atrás
-        # do LLM do áudio anterior antes de sequer poder ser transcrito. Nos
-        # logs: áudio de 24s recebido às 22:42 só transcrito 241s depois, e
-        # bursts de 5 voice notes em fila por ~5min — embora a transcrição em si
-        # leve 3–4s.
-        #
-        # Transcrição é função pura (bytes → texto): sem estado compartilhado,
-        # sem escrita no DB. Fora da seção crítica, transcrições de áudios em
-        # fila no mesmo tópico rodam em PARALELO (cada uma em sua thread)
-        # enquanto um turno anterior ainda processa no Claude. A seção crítica
-        # (`_handle_user_text`: insert + claude) é o que serializa — e agora, com
-        # o ticket tirado na entrada, ELA respeita a ordem de chegada (não mais a
-        # ordem de conclusão da transcrição, que era a fonte da resposta fora de
-        # ordem em rajada voice+text).
-        #
-        # Feedback imediato: dispara "digitando…" já aqui, antes do download —
-        # sem isso o operador via silêncio total durante a transcrição (a voice
-        # note some e nada acontece por segundos). É o "primeiro byte rápido" da
-        # camada Tempo Real do manual.
-        bot = message.get_bot()
-        feedback_task = asyncio.create_task(
-            _keep_typing(message.chat_id, thread_id, bot)
-        )
-        download_elapsed = transcribe_elapsed = 0.0
-        engine = ""
-        try:
-            try:
-                t0 = time.monotonic()
-                tg_file = await media.get_file()
-                audio_bytes = bytes(await tg_file.download_as_bytearray())
-                download_elapsed = time.monotonic() - t0
-                # Transcrição é HTTP síncrono (Groq/AssemblyAI) e leva segundos —
-                # roda em thread pra não travar o event loop (e todos os outros
-                # tópicos) durante a chamada (SPR P1 #5).
-                t1 = time.monotonic()
-                text, engine = await asyncio.to_thread(
-                    transcriber.transcribe, audio_bytes, filename
-                )
-                transcribe_elapsed = time.monotonic() - t1
-            except TranscriptionError:
-                await message.reply_text(
-                    "Não consegui transcrever esse áudio. Tenta de novo?",
-                    message_thread_id=thread_id,
-                )
-                return
-            except Exception:  # noqa: BLE001 — rede/IO do Telegram
-                logger.exception("falha baixando áudio do Telegram")
-                await message.reply_text(
-                    "Tive um problema baixando o áudio. Tenta de novo?",
-                    message_thread_id=thread_id,
-                )
-                return
-        finally:
-            feedback_task.cancel()
-            try:
-                await feedback_task
-            except asyncio.CancelledError:
-                pass
-
-        logger.info(
-            "audio_transcribe %s dur=%ss download=%.1fs transcribe=%.1fs engine=%s chars=%d",
-            _topic_label(thread_id),
-            media.duration,
-            download_elapsed,
-            transcribe_elapsed,
-            engine or "?",
-            len(text or ""),
-        )
-
-        if not text:
-            await message.reply_text(
-                "Não consegui entender nada nesse áudio.",
-                message_thread_id=thread_id,
-            )
+        text = await _download_and_transcribe(message, media, transcriber, thread_id)
+        if text is None:
             return
-
-        # Aviso de fallback: se o Whisper falhou e AssemblyAI cobriu, operador
-        # precisa saber pra contexto (qualidade pode diferir). Usa `engine` do
-        # retorno (não o atributo compartilhado), seguro sob concorrência.
-        if engine == "assemblyai-fallback":
-            try:
-                await message.reply_text(
-                    "⚠️ Áudio transcrito via <b>AssemblyAI</b> (fallback — "
-                    "Whisper/Groq indisponível). Pode haver pequenas "
-                    "diferenças de transcrição em relação ao usual.",
-                    message_thread_id=thread_id,
-                    parse_mode="HTML",
-                )
-            except Exception:  # noqa: BLE001 — aviso é nice-to-have
-                logger.warning("falha enviando aviso de fallback", exc_info=True)
-
-        # Espera a vez do ticket — entra na seção crítica na ordem de chegada.
-        # A transcrição (acima) já rodou em paralelo; aqui só serializa o
-        # insert + claude, que é onde a ordem realmente importa.
         await ticket.wait_turn()
         await _handle_user_text(
             message=message,
@@ -635,6 +748,15 @@ async def _handle_user_text(
     thread_id = message.message_thread_id
     topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session_id = ensure_active_session(db, topic_id)
+
+    # Anexos pendentes deste tópico (Peça D): anexos que chegaram SEM caption e
+    # esperavam a instrução deste turno. Drena (na ordem de chegada, dentro da
+    # seção crítica do FIFO) e correlaciona no prompt via a seção [Anexos]. Vazio
+    # → None. Flag off → nunca há pendente (handlers rodam o caminho legado).
+    attachments_section: Optional[str] = None
+    if config.edge_uploads_enabled:
+        pending = _drain_pending_uploads(message.chat_id, thread_id)
+        attachments_section = uploads.render_attachments_section(pending)
 
     # New Chat Manager (2026-06-01): o turno NÃO classifica mais. O
     # detector síncrono saiu do caminho crítico (era a fornalha de
@@ -923,6 +1045,7 @@ async def _handle_user_text(
         # é imutável no objeto Message, então extrair aqui (no turno) == extrair
         # na entrada: o que faltava era a ORDEM, não o momento da extração.
         quoted_message=_extract_quoted_message(message),
+        attachments_section=attachments_section,
     )
 
     bot = message.get_bot()
@@ -930,6 +1053,9 @@ async def _handle_user_text(
         "chat_id": message.chat_id,
         "thread_id": message.message_thread_id,
         "bot_token": config.telegram_bot_token,
+        # Peça C: resposta limpa (só texto pós-última-ferramenta). Vale pros dois
+        # caminhos (fg e bg). Off → concatenação legada. Ver claude_runner.
+        "clean_response": config.edge_clean_response_enabled,
     }
     # Com despacho pesado ligado, QUALQUER turno que rode além de
     # `heavy_promote_after_seconds` (≈12s) é promovido pra background — ou seja,
@@ -962,15 +1088,23 @@ async def _handle_user_text(
             decision.reason,
         )
         if decision.route == ROUTE_BACKGROUND:
-            # Previsão (Fase C): o ACK preferido é o do próprio Hal, na voz
-            # dele — a run de bg recebe uma nota de handoff que a manda abrir
-            # com um `kobe-notify` que NOMEIA a ação e reler a janela fresca
-            # antes de agir. Como isso depende do modelo ackar cedo, armamos um
-            # watchdog (ack_watchdog_seconds): se o Hal não ackar a tempo, o
-            # código manda o enlatado de piso — ACK confiável garantido sem
-            # matar a voz do Hal no caminho feliz. O boundary é o instante do
-            # despacho (mensagens daqui pra frente são follow-up).
-            bg_prompt = _background_handoff_note(_now_utc_iso()) + "\n\n" + prompt
+            # Peça B (Liveness ligado): a BORDA garante o LIV-ack semântico — um
+            # modelo barato lê o pedido e escreve o "entendi, vou X, já te
+            # retorno". Consistente (borda dispara) E semântico (modelo escreve).
+            # O aviso enlatado e o watchdog são aposentados; a nota de handoff
+            # diz à run de bg pra NÃO ackar de novo (evita duplo).
+            #
+            # Liveness DESLIGADO (legado): o ACK preferido é o do próprio Hal na
+            # run de bg (nota manda ele `kobe-notify` cedo); o watchdog é a rede
+            # que manda o enlatado de piso se o Hal não ackar a tempo.
+            liveness_on = config.edge_liveness_enabled
+            if liveness_on:
+                await _send_liveness_ack(message, text)
+            bg_prompt = (
+                _background_handoff_note(_now_utc_iso(), owns_ack=liveness_on)
+                + "\n\n"
+                + prompt
+            )
             asyncio.create_task(
                 _run_heavy_in_background(
                     message=message,
@@ -981,7 +1115,9 @@ async def _handle_user_text(
                     session_id=session_id,
                     topic_id=topic_id,
                     history_len=len(history),
-                    ack_watchdog_seconds=config.heavy_ack_fallback_seconds,
+                    ack_watchdog_seconds=(
+                        None if liveness_on else config.heavy_ack_fallback_seconds
+                    ),
                 ),
                 name=f"heavy-{session_id}",
             )
@@ -999,6 +1135,8 @@ async def _handle_user_text(
             thread_id=thread_id,
             bot=bot,
             reply_to_message_id=message.message_id,
+            # Peça C: mostra a prosa pré-ferramenta (rascunho) ao vivo e efêmera.
+            show_reasoning=config.edge_clean_response_enabled,
         )
         await reporter.start()
         claude_started_at = time.monotonic()
@@ -1026,16 +1164,17 @@ async def _handle_user_text(
                     config.heavy_promote_after_seconds,
                 )
                 await reporter.finish(delete=True)
-                # Aviso de promoção (Fase C, decisão item 0): só mandamos o aviso
-                # enlatado se o Hal NÃO avisou nada nesse turno. No caminho normal
-                # do b2-ii ele já emitiu o ack ("vou olhar X, já volto") ANTES das
-                # ferramentas lentas que estouraram o teto — mandar o enlatado por
-                # cima seria aviso duplo. Sem ack (Hal não previu a demora), o
-                # enlatado é a rede que evita o operador ficar no escuro. Aqui a
-                # run em voo NÃO recomeça (Design X), então ela não tem nota de
-                # handoff nem relê janela — só termina e entrega.
+                # Rede dos ~30s: a tarefa foi classificada leve mas rendeu longa
+                # (cruzou o teto). Só avisamos se o Hal NÃO ackou por conta
+                # (senão é aviso duplo). Peça B ligada: o aviso é o LIV-ack
+                # TARDIO ("isso rendeu — já te volto", modelo barato nomeia o que
+                # já observou), aposentando o enlatado. Desligada: o enlatado de
+                # piso. A run em voo NÃO recomeça, então não relê janela.
                 if not reporter.acked:
-                    await _send_background_notice(message, promoted=True)
+                    if config.edge_liveness_enabled:
+                        await _send_liveness_ack(message, text, late=True)
+                    else:
+                        await _send_background_notice(message, promoted=True)
                 else:
                     logger.info(
                         "heavy_dispatch %s aviso de promoção SUPRIMIDO (Hal já ackou)",
@@ -1248,7 +1387,7 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _background_handoff_note(boundary_iso: str) -> str:
+def _background_handoff_note(boundary_iso: str, *, owns_ack: bool = False) -> str:
     """Nota injetada no TOPO do prompt da run de background (previsão, Fase C).
 
     A run despachada na entrada é um `claude -p` fresco: não participou da
@@ -1257,9 +1396,28 @@ def _background_handoff_note(boundary_iso: str) -> str:
     — avisar na própria voz (não o aviso enlatado; quem narra é o Hal) e reler
     só o delta de mensagens que entrou DEPOIS do despacho antes de agir.
 
+    `owns_ack=True` (Peça B / Liveness ligado): a BORDA já mandou o LIV-ack
+    semântico ("entendi, vou X, já te retorno"). A run NÃO deve mandar outro ack
+    — seria aviso duplo. O passo 1 vira "não precisa avisar que começou".
+
     `boundary_iso` é o instante do despacho (de `_now_utc_iso`); o agente copia
     a string pro `kobe-recall-since`, não inventa data.
     """
+    if owns_ack:
+        step1 = (
+            "1. NÃO mande um \"já te retorno\" — a borda JÁ avisou o operador que "
+            "você pegou o pedido (LIV-ack). Mandar outro seria aviso duplo. Vá "
+            "direto ao trabalho (pode usar `kobe-notify` só pra progresso real, "
+            "se fizer sentido).\n"
+        )
+    else:
+        step1 = (
+            "1. Avise o operador NA SUA VOZ que pegou o pedido e já vai atrás — um "
+            "`bot/bin/kobe-notify` curto que NOMEIA o que você vai fazer (não um "
+            "\"ok\" genérico). É o sinal de que o trabalho começou; sem ele o "
+            "operador fica no escuro.\n"
+            "   Ex.: bot/bin/kobe-notify \"Vou varrer o repo e cruzar com X — já te volto.\"\n"
+        )
     return (
         "[VOCÊ ESTÁ RODANDO EM BACKGROUND — leia isto antes de tudo]\n"
         "\n"
@@ -1270,11 +1428,7 @@ def _background_handoff_note(boundary_iso: str) -> str:
         "\n"
         "Antes de agir, nesta ordem:\n"
         "\n"
-        "1. Avise o operador NA SUA VOZ que pegou o pedido e já vai atrás — um "
-        "`bot/bin/kobe-notify` curto que NOMEIA o que você vai fazer (não um "
-        "\"ok\" genérico). É o sinal de que o trabalho começou; sem ele o "
-        "operador fica no escuro.\n"
-        "   Ex.: bot/bin/kobe-notify \"Vou varrer o repo e cruzar com X — já te volto.\"\n"
+        + step1 +
         "\n"
         "2. Releia a janela de frescor — o que o operador disse DEPOIS que este "
         "pedido foi despachado (follow-up, correção, \"deixa pra lá\") — rodando "
@@ -1286,6 +1440,19 @@ def _background_handoff_note(boundary_iso: str) -> str:
         "3. Faça o trabalho e entregue a resposta completa normalmente — sua "
         "resposta final é enviada ao operador quando você terminar."
     )
+
+
+async def _send_liveness_ack(
+    message: Message, intent_text: str, *, late: bool = False
+) -> None:
+    """Peça B: envia o LIV-ack semântico (a borda decide QUANDO; o modelo barato
+    escreve O QUÊ, nomeando a ação). Garantido e consistente. Best-effort — nunca
+    derruba o despacho. `late=True` é a rede dos ~30s (tarefa leve que rendeu)."""
+    ack = await liveness.write_ack(intent_text, late=late)
+    try:
+        await message.reply_text(ack, message_thread_id=message.message_thread_id)
+    except Exception:  # noqa: BLE001 — aviso é best-effort
+        logger.warning("falha enviando LIV-ack", exc_info=True)
 
 
 async def _send_background_notice(message: Message, *, promoted: bool) -> None:
@@ -2073,30 +2240,205 @@ async def on_forum_topic_created(
 def _extract_text(suffix: str, raw: bytes) -> str:
     """Extrai texto plano de bytes de arquivo, conforme extensão.
 
-    - `.txt`/`.md`: decode UTF-8 (errors='replace')
-    - `.pdf`: pypdf concatena page.extract_text() de todas as páginas
-    - `.docx`: python-docx concatena texto de parágrafos
-    Outras extensões: raise ValueError — o caller pré-filtra.
+    Delega pra `bot.uploads.extract_text_from_bytes` (movido pra lá pra ser
+    compartilhado pela borda nova sem import circular). Mantido como alias pro
+    caminho legado do `on_document` (flag off).
     """
-    if suffix in {".txt", ".md"}:
-        return raw.decode("utf-8", errors="replace")
-    if suffix == ".pdf":
-        import pypdf
+    return uploads.extract_text_from_bytes(suffix, raw)
 
-        reader = pypdf.PdfReader(io.BytesIO(raw))
-        parts: list[str] = []
-        for page in reader.pages:
-            try:
-                parts.append(page.extract_text() or "")
-            except Exception:  # noqa: BLE001 — alguma página pode ter glyph quebrado
-                logger.warning("pypdf: falha extraindo página, pulando", exc_info=True)
-        return "\n\n".join(p.strip() for p in parts if p.strip())
-    if suffix == ".docx":
-        import docx
 
-        doc = docx.Document(io.BytesIO(raw))
-        return "\n".join(p.text for p in doc.paragraphs if p.text and p.text.strip())
-    raise ValueError(f"extensão não suportada: {suffix}")
+# Teto de download da borda nova (Peça D). O Telegram Bot API já limita download
+# a ~20MB; mantemos um teto de RECURSO explícito (não é peneira de TIPO — aceita
+# qualquer tipo; é só pra não estourar disco/memória num arquivo gigante).
+EDGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+
+async def _handle_media_upload(
+    *,
+    message: Message,
+    config: Config,
+    db: Client,
+    claude: ClaudeRunner,
+    plugins: list[Plugin],
+    filename: str,
+    file_size: Optional[int],
+    mime: Optional[str],
+    download,
+) -> None:
+    """Caminho comum da borda nova pra QUALQUER anexo (foto ou documento).
+
+    `download` é um callable async que baixa e devolve os bytes (a origem —
+    PhotoSize ou Document — fica no handler). Aceita qualquer tipo, normaliza
+    (salva original em uploads/ + extrai texto se doc), cataloga, e:
+      - COM caption → vira turno na hora (a caption é a instrução, anexo drenado);
+      - SEM caption → fica pendente pro próximo turno + confirmação curta.
+
+    Roda DENTRO da seção crítica do FIFO (o handler abre `_serve`), então push/
+    turno respeitam a ordem de chegada.
+    """
+    thread_id = message.message_thread_id
+
+    if file_size and file_size > EDGE_UPLOAD_MAX_BYTES:
+        await message.reply_text(
+            (
+                f"Arquivo grande demais ({file_size:,} bytes; teto "
+                f"{EDGE_UPLOAD_MAX_BYTES:,}). Divide em pedaços e me manda separado."
+            ),
+            message_thread_id=thread_id,
+        )
+        return
+
+    slug = get_topic_slug(db, message.chat_id, thread_id)
+    if not slug:
+        await message.reply_text(
+            (
+                "Esse tópico ainda não tem nome registrado — manda um texto "
+                "primeiro pra eu reconhecer, ou renomeia o tópico no Telegram."
+            ),
+            message_thread_id=thread_id,
+        )
+        return
+
+    try:
+        raw = await download()
+    except Exception:  # noqa: BLE001 — rede/IO do Telegram
+        logger.exception("falha baixando anexo (borda nova)")
+        await message.reply_text(
+            "Não consegui baixar esse anexo do Telegram. Tenta de novo?",
+            message_thread_id=thread_id,
+        )
+        return
+
+    try:
+        descriptor = uploads.ingest_upload(
+            config.kobe_home, slug, filename, raw, mime=mime
+        )
+    except OSError:
+        logger.exception("falha salvando/normalizando anexo (borda nova)")
+        await message.reply_text(
+            "Não consegui gravar esse anexo agora. Olha o log do bot.",
+            message_thread_id=thread_id,
+        )
+        return
+
+    # Guard de RECURSO no texto extraído (não trava o anexo — só evita inflar o
+    # prompt com um doc gigante; o original fica salvo e o path é injetado).
+    if (
+        descriptor.extracted_text
+        and len(descriptor.extracted_text) > UPLOAD_MAX_EXTRACTED_CHARS
+    ):
+        descriptor = UploadDescriptor(
+            kind=descriptor.kind,
+            filename=descriptor.filename,
+            path=descriptor.path,
+            rel_path=descriptor.rel_path,
+            size=descriptor.size,
+            extracted_text=(
+                descriptor.extracted_text[:UPLOAD_MAX_EXTRACTED_CHARS]
+                + "\n\n[…texto truncado no teto de contexto; original completo "
+                f"em {descriptor.path}]"
+            ),
+        )
+
+    user_id = message.from_user.id if message.from_user else None
+    logger.info(
+        "anexo (borda nova) user=%s %s file=%r kind=%s size=%d caption=%s",
+        user_id,
+        _topic_label(thread_id),
+        descriptor.filename,
+        descriptor.kind,
+        descriptor.size,
+        bool((message.caption or "").strip()),
+    )
+
+    _push_pending_upload(message.chat_id, thread_id, descriptor)
+
+    caption = (message.caption or "").strip()
+    if caption:
+        # A caption É a instrução. Com o Assembler ligado, a caption entra no
+        # buffer de debounce (pra agregar/ordenar com texto vizinho e não furar a
+        # ordem); o anexo fica em pending e é drenado quando esse flush rodar.
+        # Sem o Assembler, vira turno na hora (drenando este anexo no mesmo tick).
+        if config.edge_assembler_enabled:
+            assembler = _get_assembler(config)
+            idx = assembler.reserve(message.chat_id, thread_id)
+            await assembler.fill(
+                message.chat_id,
+                thread_id,
+                idx,
+                caption,
+                audio=False,
+                message=message,
+                flush_cb=_make_flush_cb(config, db, claude, plugins),
+            )
+        else:
+            await _handle_user_text(
+                message=message,
+                text=caption,
+                audio_transcribed=False,
+                config=config,
+                db=db,
+                claude=claude,
+                plugins=plugins,
+            )
+        return
+
+    # Sem caption: fica pendente pro próximo texto. Confirmação curta pro operador
+    # saber que chegou (na Fase 2 o Assembler junta anexo+texto na mesma janela e
+    # esta confirmação some).
+    await message.reply_text(
+        (
+            f"📎 Recebi <code>{descriptor.filename}</code>. Manda o que você quer "
+            f"que eu faça com {'ela' if descriptor.kind == uploads.KIND_IMAGE else 'ele'} "
+            f"que eu já uso no mesmo pedido."
+        ),
+        message_thread_id=thread_id,
+        parse_mode="HTML",
+    )
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Recebe foto/imagem comprimida (Peça D da borda nova).
+
+    Sem a flag `EDGE_UPLOADS_ENABLED`, foto some sem handler (comportamento
+    legado). Com a flag, baixa o maior `PhotoSize`, normaliza e correlaciona com
+    a instrução (caption ou próximo turno). Imagem enviada como *documento*
+    (sem compressão) cai no `on_document`, não aqui.
+    """
+    config: Config = context.application.bot_data["config"]
+    if not config.edge_uploads_enabled:
+        return  # legado: foto ignorada
+    db: Client = context.application.bot_data["db"]
+    claude: ClaudeRunner = context.application.bot_data["claude"]
+    plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
+    message = update.effective_message
+    if message is None or not _user_authorized(update, config.allowed_user_ids):
+        return
+
+    photos: tuple[PhotoSize, ...] = message.photo or ()
+    if not photos:
+        return
+    # O Telegram manda várias resoluções; a última é a maior.
+    largest = photos[-1]
+    # Foto do Telegram não tem filename — sintetiza um a partir do file_unique_id.
+    filename = f"foto-{largest.file_unique_id}.jpg"
+
+    async def _download() -> bytes:
+        tg_file = await largest.get_file()
+        return bytes(await tg_file.download_as_bytearray())
+
+    async with _serve(message.chat_id, message.message_thread_id):
+        await _handle_media_upload(
+            message=message,
+            config=config,
+            db=db,
+            claude=claude,
+            plugins=plugins,
+            filename=filename,
+            file_size=largest.file_size,
+            mime="image/jpeg",
+            download=_download,
+        )
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2113,6 +2455,8 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
+    claude: ClaudeRunner = context.application.bot_data["claude"]
+    plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
     if message is None or not _user_authorized(update, config.allowed_user_ids):
         return
@@ -2121,7 +2465,8 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if doc is None:
         return
 
-    # Apolo intercept: .vcf / .csv viram importação de contatos (não vão pra KB)
+    # Apolo intercept: .vcf / .csv viram importação de contatos (não vão pra KB).
+    # Vale nas duas bordas (legada e nova) — contatos não são anexo de turno.
     _fname_lower = (doc.file_name or "").lower()
     if _fname_lower.endswith(".vcf") or _fname_lower.endswith(".csv"):
         from bot.apolo_handlers import on_document_for_apolo
@@ -2132,6 +2477,27 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     filename = (doc.file_name or "anexo").strip()
     suffix = Path(filename).suffix.lower()
 
+    # ── Borda nova (Peça D): aceita QUALQUER tipo, uploads/ + correlação ──────
+    if config.edge_uploads_enabled:
+        async def _download() -> bytes:
+            tg_file = await doc.get_file()
+            return bytes(await tg_file.download_as_bytearray())
+
+        async with _serve(message.chat_id, thread_id):
+            await _handle_media_upload(
+                message=message,
+                config=config,
+                db=db,
+                claude=claude,
+                plugins=plugins,
+                filename=filename,
+                file_size=doc.file_size,
+                mime=doc.mime_type,
+                download=_download,
+            )
+        return
+
+    # ── Borda legada (flag off): peneira de tipo → knowledge/ como .md ────────
     if suffix not in UPLOAD_ALLOWED_SUFFIXES:
         await message.reply_text(
             (

@@ -96,6 +96,16 @@ def describe_tool_use(name: str, input_: dict) -> str:
     return base
 
 
+def _short_reasoning(prose: str) -> str:
+    """Compacta a prosa de rascunho pra uma linha curta de status. Pega a 1ª
+    linha não-vazia e trunca — o status é efêmero e só dá o sinal do que o
+    agente está pensando, não o texto inteiro."""
+    first = next((ln.strip() for ln in prose.splitlines() if ln.strip()), "")
+    if len(first) > 180:
+        first = first[:180].rstrip() + "…"
+    return first or "pensando…"
+
+
 def _short_path(path: str) -> str:
     """Compacta path absoluto pra ler bem na status: `bot/main.py`."""
     if not path:
@@ -138,12 +148,21 @@ class ProgressReporter:
         *,
         reply_to_message_id: Optional[int] = None,
         delay_seconds: float = DEFAULT_DELAY_SECONDS,
+        show_reasoning: bool = False,
     ) -> None:
         self._chat_id = chat_id
         self._thread_id = thread_id
         self._bot = bot
         self._reply_to = reply_to_message_id
         self._delay = delay_seconds
+        # Peça C (separação rascunho/resposta): quando ligado, a prosa que o
+        # agente escreve ANTES de uma ferramenta (o "deixa eu olhar o handler…")
+        # é mostrada aqui, ao vivo e efêmera (some no fim), em vez de vazar na
+        # resposta final. A resposta final vem limpa (só o texto pós-ferramenta,
+        # cuidado no claude_runner). Norte de UX: a setinha colapsável do Desktop.
+        self._show_reasoning = show_reasoning
+        # Prosa do agente ainda não confirmada como pré-tool (ver on_event).
+        self._pending_reasoning: Optional[str] = None
 
         self._message_id: Optional[int] = None
         self._last_label: Optional[str] = None
@@ -187,7 +206,20 @@ class ProgressReporter:
         for block in msg.get("content") or []:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") != "tool_use":
+            btype = block.get("type")
+            # Peça C: prosa do agente principal é BUFFERIZADA — só vira status
+            # efêmero se uma ferramenta a seguir de fato (aí é rascunho pré-tool
+            # genuíno). Se o turno terminar sem ferramenta depois, aquele texto
+            # era a RESPOSTA (papo puro) e nunca é mostrado como status — evita
+            # o flicker de mostrar a resposta e depois enviá-la. A resposta final
+            # continua limpa (o claude_runner exclui a prosa pré-tool dela).
+            if btype == "text":
+                if self._show_reasoning and not is_subagent:
+                    prose = (block.get("text") or "").strip()
+                    if prose:
+                        self._pending_reasoning = prose
+                continue
+            if btype != "tool_use":
                 continue
             name = block.get("name") or ""
             if not name:
@@ -210,8 +242,15 @@ class ProgressReporter:
             # pro operador. Idem nossos próprios reminders.
             if name in {"TodoWrite", "ScheduleWakeup"}:
                 continue
-            label = describe_tool_use(name, block.get("input") or {})
-            await self._set_status(label)
+            # Confirmou que há ferramenta a seguir → a prosa pendente ERA
+            # rascunho pré-tool. Mostra ela (mais rica que "lendo X": diz o
+            # PORQUÊ) e limpa; senão, mostra o rótulo mecânico da ferramenta.
+            if self._show_reasoning and self._pending_reasoning:
+                await self._set_status(_short_reasoning(self._pending_reasoning))
+                self._pending_reasoning = None
+            else:
+                label = describe_tool_use(name, block.get("input") or {})
+                await self._set_status(label)
 
     async def _set_status(self, label: str) -> None:
         """Envia ou edita a status message com `label`, respeitando throttle."""

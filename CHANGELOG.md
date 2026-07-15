@@ -4,6 +4,63 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Nova arquitetura de borda — Fase 3 (Peças B+C: Liveness + resposta limpa) (2026-07-14)
+
+**Operador pediu:** Fase 3 (o coração da comunicação). **Peça C** — a resposta final chega LIMPA: o texto de raciocínio ("deixa eu olhar o handler…") não vem grudado; o rascunho vai pro canal de progresso (efêmero) e a resposta limpa no canal principal (norte de UX: a setinha colapsável do Claude Desktop). **Peça B** — o ACK semântico por duração vira GARANTIA da borda: tarefa trivial → responde direto (sem ack); tarefa pesada → recebe no início um "entendi, vou [ação] e já te retorno" consistente E semântico. O aviso enlatado de background é aposentado.
+
+**Por quê:** (C) a concatenação de todos os blocos `text` (fix de 2026-06-01) trazia a prosa pré-ferramenta grudada na resposta — o operador queria isso separado. (B) o ACK era instrução de prompt que o modelo tinha que *lembrar* de cumprir → inconsistente (o "não sei te instruir"); e o "passei pra background" era uma desculpa enlatada que tocava o dia todo (num assistente pessoal com Opus, turno > 30s é o NORMAL, não exceção). A raiz: "ACK" conflava progresso mecânico com ACK semântico. A correção separa QUANDO (borda, determinístico) de O QUÊ (modelo barato, semântico).
+
+**Foi feito:**
+- **Peça C** (`EDGE_CLEAN_RESPONSE_ENABLED`, default off): `bot/claude_runner.py` — `run(clean_response=)` particiona os blocos de texto do agente pela ÚLTIMA ferramenta de trabalho; resposta = só o texto PÓS-ferramenta; prosa pré-tool fica fora. Guard anti-engolir (sem texto pós-tool → join completo, nunca vazio — não reintroduz o bug de 2026-06-01) e caso sem-ferramenta idêntico ao legado (papo puro, o mais comum). Housekeeping (TodoWrite/ScheduleWakeup) não move o corte. `bot/progress.py` — `ProgressReporter(show_reasoning=)` mostra a prosa pré-tool ao vivo e efêmera (bufferizada: só vira status se uma ferramenta a seguir de fato, então a resposta de papo-puro nunca é mostrada — sem flicker/dedup).
+- **Peça B** (`EDGE_LIVENESS_ENABLED`, default off): `bot/liveness.py` (NOVO) — `write_ack(intent, late=)`: modelo barato (gpt-4o-mini, fora da cota do plano Max) escreve o LIV-ack nomeando a ação; fallback consistente se indisponível (nunca levanta). `bot/telegram_handler.py` — na previsão (classificador crava pesado) a BORDA dispara o LIV-ack e a nota de handoff manda a run de bg NÃO ackar de novo (anti-duplo) + watchdog aposentado; na promoção (~30s, tarefa leve que rendeu) o LIV-ack TARDIO substitui o enlatado (suprimido se o Hal já ackou). O enlatado `_send_background_notice` só roda com a flag off.
+- **Reconciliação `CLAUDE.md`** (seção "Avisa antes de agir"): SUAVIZADA (não removida) — nota de reconciliação explicando que, com o Liveness ligado, a borda garante o ack pesado e o modelo não deve duplicar; a regra segue valendo para a flag off e tarefas médias em foreground (senão quebraria o comportamento default). Backup em `.local/CLAUDE.md.backup-antes-liveness-ccaf90e`; doc antes/depois entregue ao operador via kobe-attach.
+- `bot/config.py` + `.env.example`: flags `EDGE_CLEAN_RESPONSE_ENABLED` e `EDGE_LIVENESS_ENABLED` (default off).
+- Tensão do fix de 2026-06-01 tratada explicitamente (guard anti-engolir + teste de regressão). LEGADO (Chat Manager) não tocado.
+
+**Testes (ambiente de desenvolvimento):** `tests/test_edge_clean_response.py` (5, REAL via fake-claude: clean drop pré-tool, off concatena tudo, papo-puro idêntico, housekeeping não afeta, anti-engolir) + `tests/test_edge_liveness.py` (5: fallback sem key start≠late, usa texto do modelo, tira aspas, vazio→fallback, erro→fallback nunca levanta). **Suíte completa: 126 passaram, 4 falharam** (as 4 pré-existentes do `test_resume`). Validação observável (ACK trivial silencioso, ACK pesado semântico, resposta sem rascunho, nada duplicado) é do operador no staging com as flags ligadas — runbook na entrega.
+
+**Commits:** o commit desta entrada, branch `coder/49b992f1`.
+
+**Reversão:** `EDGE_CLEAN_RESPONSE_ENABLED=false` e `EDGE_LIVENESS_ENABLED=false` + restart voltam ao comportamento de hoje (concatenação + ack model-driven/enlatado). A nota do CLAUDE.md é aditiva (revert do commit a remove). Aditivo e reversível.
+
+### Nova arquitetura de borda — Fase 2 (Peça A: Message Assembler) (2026-07-14)
+
+**Operador pediu:** Fase 2 da nova arquitetura de borda: **agregação de mensagens picadas**. Quando o operador manda o pedido em vários envios curtos ("oi Hal" / "sabe aquele problema…" / "então é o seguinte"), a borda deve esperar ele terminar de falar e responder ao pedido INTEIRO num turno só — não 3 respostas a fragmentos. Isso também correlaciona anexo+instrução na mesma janela e corta o nº de turnos pesados.
+
+**Por quê:** a borda colava 1 mensagem = 1 turno = 1 chamada do modelo. Sem agregação: pensamento picado virava N turnos; instrução + anexo em mensagens separadas nunca se encontravam; cada fragmento cruzava o teto de tempo e disparava mais background. Debounce por tempo é a resposta (o "debouncer" clássico) — o Telegram NÃO entrega "usuário digitando" pro bot, então é inferência por ritmo, não observação real (constraint dura, documentada).
+
+**Foi feito:** (tudo atrás de `EDGE_ASSEMBLER_ENABLED`, default off)
+- `bot/assembler.py` (NOVO): `MessageAssembler` — buffer de debounce por tópico ANTES do FIFO. `reserve()` carimba a ordem de chegada de forma SÍNCRONA (antes do preparo); `fill()` preenche o slot com o texto pronto e (re)arma o debounce; `release()` libera slot abortado (transcrição falhou) sem travar; `flush_now()` força flush (ex.: comando slash). Janela ADAPTATIVA (frase terminada em pontuação → janela curta) + teto de espera máximo. **Ordem preservada mesmo com fill fora de ordem** (voz lenta reservada 1º, preenchida por último, ainda concatena na posição certa) — mesmo invariante que o ticket FIFO garante, sem regredir.
+- `bot/telegram_handler.py`: `on_text` (não-slash) e `on_voice` passam a alimentar o Assembler quando ligado; slash flusha o buffer e processa imediato. Refatoração: transcrição extraída pra `_download_and_transcribe` (compartilhada pelo caminho Assembler e o legado por ticket — sem duplicar). `on_photo`/`on_document` com caption roteiam a caption pelo Assembler (agrega/ordena com texto vizinho; anexo drenado no flush). Singleton `_get_assembler` + `_make_flush_cb` (o flush roda o turno agregado dentro da seção crítica do FIFO: um flush = um ticket = um turno).
+- `bot/config.py`: flags `edge_assembler_enabled` + janelas tunáveis (`EDGE_ASSEMBLER_QUIET_MS`=2500, `QUIET_TERMINATED_MS`=700, `MAX_WAIT_MS`=9000).
+- Invariantes preservados: ordem de chegada por tópico (Assembler senta ANTES do FIFO; `test_rajada_fifo` segue verde), isolamento entre tópicos, transcrição de áudio fora da seção crítica.
+
+**Testes (ambiente de desenvolvimento):** `tests/test_edge_assembler.py` (9) — agregação na janela, bursts separados → flushes separados, **ordem preservada com fill fora de ordem**, release sem travar, release-total sem vazar, isolamento entre tópicos, teto de espera força flush, flush_now, pontuação final dispara janela curta. **Suíte completa: 116 passaram, 4 falharam** (as 4 pré-existentes do `test_resume`, não introduzidas aqui). Validação observável (mandar 3-4 envios curtos → 1 resposta) é do operador no staging com a flag ligada — runbook na entrega.
+
+**Commits:** o commit desta entrada, branch `coder/49b992f1`.
+
+**Reversão:** `EDGE_ASSEMBLER_ENABLED=false` + restart volta ao disparo imediato (1 msg = 1 turno) sem tocar código. Ou `git revert`. Aditivo e reversível.
+
+### Nova arquitetura de borda — Fase 1 (Peça D: anexos multimodais) (2026-07-14)
+
+**Operador pediu:** transformar a borda do Kobe (a camada Python que atende no Telegram) de um "cano que repassa" num "balcão que atende". Fase 1 das 4 peças do handoff-brief da missão `2026-07-09-desenhar-uma-nova-arquitetura-borda-4`: **anexos**. Aceitar qualquer arquivo/imagem (paridade single-tenant com o Claude Desktop), salvar numa pasta `uploads/` própria + catálogo central legível, e fazer a imagem/arquivo chegar ao modelo no mesmo turno da instrução. Fatiado por risco (D primeiro, menor risco); tudo atrás de flag default-off.
+
+**Por quê:** a borda antiga só aceitava `.txt/.md/.pdf/.docx` (peneira por extensão), forçava tudo pra `.md`, jogava na `knowledge/` curada do tópico, ignorava foto (sumia sem feedback) e descorrelacionava anexo da instrução (a legenda era descartada; o upload só virava contexto estático na PRÓXIMA msg). Resultado: "manda a imagem numa msg + 'faça X com ela' em outra" nunca se encontrava, e imagem nem chegava ao Claude (que é multimodal e lê imagem por path — faltava a borda entregar o caminho).
+
+**Foi feito:** (tudo atrás de `EDGE_UPLOADS_ENABLED`, default off)
+- `bot/uploads.py` (NOVO): Normalizer multimodal — `classify_kind` (imagem/documento/outro), `extract_text_from_bytes` (movido de `telegram_handler._extract_text` pra ser compartilhado sem import circular), `ingest_upload` (salva o ORIGINAL, extrai texto se doc, cataloga), `render_attachments_section` (injeta `[Anexos deste turno]` no prompt — imagem via Read, doc com texto inline). Catálogo central ÚNICO e agnóstico de tópico em `user-data/uploads-catalogo.md` (markdown legível pro operador ver/gerenciar/apagar e liberar espaço).
+- `bot/topic_manager.py`: `topic_uploads_dir` + `unique_upload_path` (pasta `uploads/` separada do `knowledge/`, EXTENSÃO ORIGINAL preservada, dedupe `-2/-3`).
+- `bot/telegram_handler.py`: handler `on_photo` (NOVO — foto comprimida, hoje ignorada); `on_document` reescrito atrás da flag (aceita QUALQUER tipo, salva em `uploads/`, captura `caption`); `_handle_media_upload` comum às duas origens; buffer de anexos pendentes por tópico (`_push_pending_upload`/`_drain_pending_upload`) que correlaciona anexo↔instrução dentro da seção crítica do FIFO (ordem preservada). Guards de RECURSO mantidos (teto de download 20MB, teto de texto extraído) — não é peneira de tipo. Intercept Apolo (`.vcf/.csv`) preservado.
+- `bot/claude_runner.py`: `build_prompt` ganha `attachments_section` (injetado colado à mensagem nova).
+- `bot/config.py`: flag `edge_uploads_enabled` (`EDGE_UPLOADS_ENABLED`, default off). `bot/main.py`: registra `on_photo` (`filters.PHOTO`).
+- Componentes LEGADO (Chat Manager) e [a confirmar] (compactor/snapshot/hindsight) **não tocados**.
+
+**Testes (ambiente de desenvolvimento):** `tests/test_edge_uploads.py` (8) + `tests/test_edge_uploads_flow.py` (5) — helpers de path (uploads/ separado, extensão preservada, dedupe), `classify_kind`, `ingest_upload` (original cru + extração + catálogo único com header uma vez), `render_attachments_section`, buffer push/drain (ordem + isolamento entre tópicos), `build_prompt` injeta anexos antes da msg nova. **Suíte completa: 107 passaram, 4 falharam** — as 4 falhas são do `test_resume.py`, **pré-existentes** (fakes `SimpleNamespace`/`FakeClaude` desatualizados, faltam `curated_core`/`working_memory_enabled`; confirmado idêntico no dev tree limpo em 1358f7e), não introduzidas por esta mudança. Validação observável (foto funciona, anexo+instrução no mesmo turno, catálogo) é do operador no staging com a flag ligada — runbook na entrega. Rodar: `.venv/bin/python -m pytest tests/ -q`.
+
+**Commits:** `89727e3` (wip Fase 1a) + o commit desta entrada (Fase 1b). Branch `coder/49b992f1` (worktree isolado; merge pro dev é do operador, no rito §13.1).
+
+**Reversão:** `EDGE_UPLOADS_ENABLED=false` + restart volta ao comportamento legado (on_document `.md`→knowledge/, foto ignorada) sem tocar código. Ou `git revert` dos commits da branch. Aditivo e reversível.
+
 ### Trava 2 — pedido de código ⇒ sessão Coder, sempre (regra dura no CLAUDE.md) (2026-07-09)
 
 **Operador pediu:** garantir que, sempre que ele pede pra codificar algo (escrever/refatorar/corrigir código) — em qualquer forma, e sobretudo quando usa a palavra "Coder" — o Hal **abra uma sessão Coder**, nunca code na mão no próprio turno, nunca reinterprete o pedido de código de outro jeito. Exceção única: o operador dizer EXPLICITAMENTE que NÃO quer sessão Coder. Travar o rito de disparo do lado do Hal (não mexer em runtime de nada). Decisão do operador: enforcement **só via regra no CLAUDE.md** (sem hook `PreToolUse` no Hal).
