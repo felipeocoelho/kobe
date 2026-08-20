@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from bot.memory.aging import estado_com_idade
 from bot.sala import cleanup as sala_cleanup
 from bot.sala import state as sala_state
 from bot.sala import tmux as sala_tmux
@@ -86,22 +87,54 @@ def find_sala_ativa(kobe_home: Path, chat_id: int,
 
 def render_sala_ativa(kobe_home: Path, chat_id: int,
                       thread_id: Optional[int]) -> Optional[str]:
-    """Linha de CIÊNCIA (read-only) pro prompt do Hal quando há sala ativa no
-    tópico — espelha o `[Missão ativa: …]` do headless. NÃO é roteamento: é
-    contexto pra o Hal reconhecer endereçamento explícito/implícito e decidir
-    (com confirmação, se incerto) se repassa pra sala (§10b). None se a flag está
-    off ou não há sala ativa aqui."""
+    """Linha de CIÊNCIA (read-only) pro prompt do Hal quando há sala no tópico —
+    espelha o `[Missão ativa: …]` do headless. NÃO é roteamento: é contexto pra
+    o Hal reconhecer endereçamento explícito/implícito e decidir (com
+    confirmação, se incerto) se repassa pra sala (§10b). None se a flag está off
+    ou não há sala aqui.
+
+    CORREÇÃO 2026-08-20 — a linha MENTIA. Ela dizia "Sala de missão **ativa**",
+    no presente, sem estado e sem data — e `idle` conta como status ativo em
+    `_ACTIVE_STATUSES` (por design: a sala só fecha por ato do operador). Uma
+    sala parada havia 12 dias, que já tinha entregado tudo, era apresentada ao
+    agente como "ativa"; ele leu o que estava escrito e disse ao operador que
+    ela "segue rodando, te reporto quando entregar". Agora o estado REAL e a
+    idade são lidos da fonte viva na hora de montar o prompt, e a linha diz com
+    todas as letras quando a sala NÃO está trabalhando.
+    """
     if not sala_enabled():
         return None
     st = find_sala_ativa(kobe_home, chat_id, thread_id)
     if st is None:
         return None
+    missao_id = st.get("missao_id")
     obj = (st.get("objetivo") or "")[:80]
+    status = str(st.get("status") or "?")
+    idade = estado_com_idade(status, st.get("last_activity"))
+
+    if status == "running":
+        cabeca = (
+            f'[Sala de missão RODANDO neste tópico: {missao_id} — "{obj}" '
+            f'({idade}). Ela está trabalhando AGORA.'
+        )
+    elif status == "idle":
+        cabeca = (
+            f'[Sala de missão OCIOSA (idle) neste tópico: {missao_id} — "{obj}" '
+            f'({idade}). Ela NÃO está trabalhando agora e NÃO vai te retornar '
+            f'sozinha — está parada esperando. NÃO diga que ela "segue rodando", '
+            f'nem prometa entrega dela, sem antes conferir a fonte viva.'
+        )
+    else:  # starting, ou estado novo que apareça no futuro
+        cabeca = (
+            f'[Sala de missão neste tópico: {missao_id} — "{obj}" ({idade}). '
+            f'Use este estado, não a memória da conversa.'
+        )
+
     return (
-        f'[Sala de missão ativa neste tópico: {st.get("missao_id")} — "{obj}". '
+        f'{cabeca} '
         f'Por padrão NÃO repasse pra ela — a conversa é contigo. Só repasse via '
         f'`.venv/bin/python -m bot.mission_control.sala_dispatch retomar '
-        f'--missao {st.get("missao_id")} --texto "..."` quando o operador for '
+        f'--missao {missao_id} --texto "..."` quando o operador for '
         f'EXPLÍCITO ("manda pra sala/missão"); se você só DESCONFIA que é pra '
         f'sala, PERGUNTE antes de repassar.]'
     )

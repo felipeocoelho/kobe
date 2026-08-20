@@ -30,10 +30,12 @@ import os
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
 from zoneinfo import ZoneInfo
+
+from bot.memory import aging
 
 
 # Fuso do operador. Forçado explicitamente porque a VPS roda em UTC e
@@ -48,6 +50,16 @@ OPERATOR_TZ = ZoneInfo("America/Sao_Paulo")
 # já sabe que mandou áudio). Serve pro Hal saber que pode haver ruído de
 # transcrição e que o tom é de fala, não de texto escrito.
 AUDIO_TRANSCRIBED_TAG = "🎤 [áudio transcrito]"
+
+
+def _history_timestamps_enabled() -> bool:
+    """Carimbo de data/idade no que o prompt apresenta como atual (bug do frame
+    congelado, 2026-08-20). Default ON — é o conserto de um bug. Desligar volta
+    ao histórico sem data. Ver bot/memory/aging.py."""
+    raw = (os.getenv("PROMPT_AGING_ENABLED") or "").strip().lower()
+    if not raw:
+        return True
+    return raw in ("1", "true", "on", "yes")
 
 # Limite do buffer de leitura do stdout do `claude` (StreamReader do asyncio).
 # O default do asyncio é 64KB; o stream-json do claude emite UMA linha por
@@ -480,6 +492,7 @@ def build_prompt(
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
     )
     now_br = datetime.now(OPERATOR_TZ)
+    now_utc = datetime.now(timezone.utc)
     parts: list[str] = []
     # Nota de handoff de background (Fase C): quando o turno foi roteado pra
     # rodar em segundo plano na ENTRADA (previsão do classificador), a run é
@@ -575,7 +588,21 @@ def build_prompt(
             summary = (s.get("summary") or "").strip()
             parts.append(f"— Session {i} ({started}): {summary}")
 
+    # ── Histórico, DATADO (correção de 2026-08-20) ────────────────────────
+    # Antes, cada linha virava `papel: conteúdo` e o `created_at` que vinha do
+    # banco era DESCARTADO. Uma mensagem de 12 dias ficava visualmente idêntica
+    # à de agora — foi assim que o agente narrou uma sala parada havia 12 dias
+    # como "segue rodando". O prompt não datava o que envelhece.
+    #
+    # Formato (decisão do operador): `[dd/mm HH:MM]` em TODA linha — verificável
+    # e sem ambiguidade — mais a idade relativa (`— há ~12 dias`) na primeira
+    # linha e sempre que houver salto grande de tempo em relação à anterior.
+    # Repetir a idade em toda linha seria ruído; omiti-la deixaria brecha.
+    #
+    # Linha sem timestamp legível sai SEM carimbo (nunca com data inventada).
     history_lines: list[str] = []
+    datar = _history_timestamps_enabled()
+    anterior_dt: Optional[datetime] = None
     for msg in history:
         role = msg.get("role", "?")
         content = msg.get("content", "")
@@ -584,10 +611,28 @@ def build_prompt(
         # (o flag `audio_transcribed` é carregado junto do histórico).
         if msg.get("audio_transcribed"):
             content = f"{AUDIO_TRANSCRIBED_TAG} {content}"
-        history_lines.append(f"{role}: {content}")
+        prefixo = ""
+        if datar:
+            dt = aging.parse_ts(msg.get("created_at") or "")
+            if dt is not None:
+                salto = (
+                    anterior_dt is None
+                    or (dt - anterior_dt).total_seconds() >= aging.SALTO_RELEVANTE_SEGUNDOS
+                )
+                marca = aging.carimbo(dt, agora=now_utc, com_idade=salto)
+                prefixo = f"{marca} " if marca else ""
+                anterior_dt = dt
+        history_lines.append(f"{prefixo}{role}: {content}")
     if history_lines:
         parts.append("")
-        parts.append("[Histórico recente da sessão ativa]")
+        cabecalho = (
+            "[Histórico recente da sessão ativa — horários em America/Sao_Paulo. "
+            "ATENÇÃO: estas linhas são PASSADO. Uma linha datada de dias atrás "
+            "descreve o que era verdade NAQUELE momento, não agora.]"
+            if datar
+            else "[Histórico recente da sessão ativa]"
+        )
+        parts.append(cabecalho)
         parts.extend(history_lines)
 
     # Mensagem citada (reply do Telegram): o operador respondeu CITANDO uma

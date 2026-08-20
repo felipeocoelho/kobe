@@ -9,6 +9,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from bot import reactions
+
 
 class ConfigError(Exception):
     """Configuração ausente ou inválida."""
@@ -127,6 +129,16 @@ class Config:
     # enlatado de background é aposentado. Off = comportamento de hoje (ack
     # model-driven + enlatado + watchdog). Ver bot/liveness.py.
     edge_liveness_enabled: bool
+    # ── Reações de recebimento (2026-08-20) ───────────────────────────────
+    # Sinal de "chegou" imediato e impossível de alucinar (não passa por modelo):
+    # 👀 quando a mensagem entra, ✍️ quando a transcrição do áudio fica pronta.
+    # Off = comportamento de hoje (nenhuma reação). Ver bot/reactions.py.
+    telegram_reactions_enabled: bool
+    telegram_reaction_received: str
+    telegram_reaction_transcribed: str
+    # Nota: as chaves do ack do Liveness (LIVENESS_ACK_GUARD_ENABLED,
+    # LIVENESS_ACK_PROVIDER, LIVENESS_ACK_MODEL) são lidas direto do ambiente
+    # em bot/liveness.py — mesmo padrão do Mission Control. Ver .env.example.
 
 
 def _require(name: str) -> str:
@@ -238,6 +250,19 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         # Peça B (Liveness). Default OFF: rollback trivial volta ao ack
         # model-driven + enlatado + watchdog de hoje.
         edge_liveness_enabled=_parse_bool(os.getenv("EDGE_LIVENESS_ENABLED")),
+        # Reações de recebimento. Default OFF: muda comportamento VISÍVEL no chat,
+        # então vale validação do operador antes de ligar. Rollback: flag off +
+        # restart. Emojis configuráveis porque a lista permitida é do Telegram e
+        # pode mudar sem aviso (🎧/👂, por exemplo, NÃO são aceitos).
+        telegram_reactions_enabled=_parse_bool(
+            os.getenv("TELEGRAM_REACTIONS_ENABLED")
+        ),
+        telegram_reaction_received=os.getenv(
+            "TELEGRAM_REACTION_RECEIVED", reactions.DEFAULT_RECEIVED
+        ),
+        telegram_reaction_transcribed=os.getenv(
+            "TELEGRAM_REACTION_TRANSCRIBED", reactions.DEFAULT_TRANSCRIBED
+        ),
     )
 
 

@@ -84,6 +84,8 @@ from bot import uploads
 from bot.uploads import UploadDescriptor
 from bot.assembler import MessageAssembler
 from bot import liveness
+from bot import reactions
+from bot import turn_guarantee
 
 
 logger = logging.getLogger("kobe.handler")
@@ -343,17 +345,75 @@ def _make_flush_cb(
 
     async def _cb(agg_text: str, audio: bool, message: Message) -> None:
         async with _serve(message.chat_id, message.message_thread_id):
-            await _handle_user_text(
-                message=message,
+            # GARANTIA DE TURNO: este é o ponto onde as 3 mortes silenciosas de
+            # produção aconteceram. O assembler roda o turno numa task própria e
+            # engolia a exceção, então nem a rede global (`on_error`) via — o
+            # operador ficava no escuro. A garantia grava a mensagem em disco,
+            # tenta de novo uma vez (quando é seguro) e, se não der, AVISA.
+            # Ver bot/turn_guarantee.py.
+            async def _run(progress: dict) -> None:
+                await _handle_user_text(
+                    message=message,
+                    text=agg_text,
+                    audio_transcribed=audio,
+                    config=config,
+                    db=db,
+                    claude=claude,
+                    plugins=plugins,
+                    turn_progress=progress,
+                )
+
+            async def _notify(texto: str) -> None:
+                await message.reply_text(
+                    texto,
+                    message_thread_id=message.message_thread_id,
+                    parse_mode="HTML",
+                )
+
+            await turn_guarantee.run_guarded(
+                run=_run,
+                kobe_home=config.kobe_home,
+                chat_id=message.chat_id,
+                thread_id=message.message_thread_id,
+                message_id=message.message_id,
                 text=agg_text,
-                audio_transcribed=audio,
-                config=config,
-                db=db,
-                claude=claude,
-                plugins=plugins,
+                audio=audio,
+                notify=_notify,
             )
 
     return _cb
+
+
+# ── Reações de recebimento (2026-08-20) ───────────────────────────────────
+#
+# Sinal de "chegou" IMEDIATO e impossível de alucinar: chamada direta à API do
+# Telegram, disparada na entrada do handler — antes do montador da borda, antes
+# do classificador, antes de qualquer coisa que possa morrer. Fire-and-forget:
+# não custa latência e nunca derruba o turno. Ver bot/reactions.py.
+
+
+def _react_received(config: Config, message: Message) -> None:
+    """👀 — a mensagem entrou no bot. Chamar na ENTRADA do handler."""
+    if not config.telegram_reactions_enabled:
+        return
+    reactions.react(
+        message.get_bot(),
+        message.chat_id,
+        message.message_id,
+        config.telegram_reaction_received,
+    )
+
+
+def _react_transcribed(config: Config, message: Message) -> None:
+    """✍️ — a transcrição do áudio ficou pronta (substitui o 👀)."""
+    if not config.telegram_reactions_enabled:
+        return
+    reactions.react(
+        message.get_bot(),
+        message.chat_id,
+        message.message_id,
+        config.telegram_reaction_transcribed,
+    )
 
 
 def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
@@ -377,6 +437,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (message.text or "").strip()
     if not text:
         return
+
+    # 👀 na entrada — antes do montador, do classificador e de qualquer await.
+    _react_received(config, message)
 
     user_id = update.effective_user.id if update.effective_user else None
     logger.info(
@@ -528,6 +591,10 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if media is None:
         return
 
+    # 👀 na entrada — o áudio ainda vai levar segundos pra baixar e transcrever;
+    # o operador vê que chegou na hora. Vira ✍️ quando a transcrição fica pronta.
+    _react_received(config, message)
+
     thread_id = message.message_thread_id
     user_id = update.effective_user.id if update.effective_user else None
     logger.info(
@@ -551,6 +618,8 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if text is None:
             await assembler.release(message.chat_id, thread_id, idx)
             return
+        # ✍️ substitui o 👀: a transcrição saiu, o pedido já é texto.
+        _react_transcribed(config, message)
         await assembler.fill(
             message.chat_id,
             thread_id,
@@ -569,6 +638,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = await _download_and_transcribe(message, media, transcriber, thread_id)
         if text is None:
             return
+        # ✍️ substitui o 👀 (mesmo sinal do caminho novo — a borda legada não
+        # pode ficar sem ele, senão o semáforo mente quando a flag está off).
+        _react_transcribed(config, message)
         await ticket.wait_turn()
         await _handle_user_text(
             message=message,
@@ -610,10 +682,40 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if config is not None and not _user_authorized(update, config.allowed_user_ids):
         return
 
+    # GARANTIA DE TURNO: até aqui o aviso existia, mas a mensagem se perdia —
+    # "reenvia, por favor" só funciona se o operador ainda tiver o texto. Agora
+    # ela é gravada em disco antes do aviso. NÃO re-executamos aqui: uma exceção
+    # que escapou até o PTB pode ter morrido em qualquer ponto do turno, e
+    # re-executar arriscaria resposta dupla. Ver bot/turn_guarantee.py.
+    #
+    # Blindagem: esta é a ÚLTIMA rede. Ela roda justamente quando algo já deu
+    # errado, então não pode ela mesma levantar — qualquer falha aqui degrada
+    # pro aviso simples de sempre, nunca pra silêncio.
+    aviso = "🔴 Travei processando isso aqui — reenvia, por favor."
+    parse_mode: Optional[str] = None
+    try:
+        texto_pendente = (message.text or message.caption or "").strip()
+        kobe_home = getattr(config, "kobe_home", None)
+        if kobe_home and texto_pendente and turn_guarantee.enabled():
+            turn_guarantee.queue_pending(
+                kobe_home,
+                chat_id=message.chat_id,
+                thread_id=message.message_thread_id,
+                message_id=message.message_id,
+                text=texto_pendente,
+                audio=False,
+                erro=f"{type(context.error).__name__}: {context.error}",
+            )
+            aviso = turn_guarantee.failure_notice(texto_pendente, tentou_de_novo=False)
+            parse_mode = "HTML"
+    except Exception:  # noqa: BLE001 — degrada pro aviso simples, nunca pro silêncio
+        logger.warning("on_error: falha guardando a mensagem pendente", exc_info=True)
+
     try:
         await message.reply_text(
-            "🔴 Travei processando isso aqui — reenvia, por favor.",
+            aviso,
             message_thread_id=message.message_thread_id,
+            parse_mode=parse_mode,
         )
     except Exception:  # noqa: BLE001 — aviso é best-effort; não relança
         logger.warning("falha enviando aviso de turno travado", exc_info=True)
@@ -743,8 +845,15 @@ async def _handle_user_text(
     db: Client,
     claude: ClaudeRunner,
     plugins: list[Plugin],
+    turn_progress: Optional[dict] = None,
 ) -> None:
-    """Caminho comum: persiste user msg, chama Claude, persiste e responde."""
+    """Caminho comum: persiste user msg, chama Claude, persiste e responde.
+
+    `turn_progress` é o dict de progresso da garantia de turno
+    (`bot/turn_guarantee.py`): recebe `committed=True` ao cruzar o ponto de
+    não-retorno, pra a retentativa automática saber se pode rodar. None quando
+    o chamador não usa a garantia (comandos, resume, flag off).
+    """
     thread_id = message.message_thread_id
     topic_id = ensure_topic(db, thread_id, chat_id=message.chat_id)
     session_id = ensure_active_session(db, topic_id)
@@ -903,6 +1012,16 @@ async def _handle_user_text(
         except Exception:  # noqa: BLE001 — aviso é nice-to-have, não derrubar fluxo
             logger.warning("falha enviando aviso de truncagem", exc_info=True)
 
+    # ── PONTO DE NÃO-RETORNO do turno (ver bot/turn_guarantee.py) ──────────
+    # Daqui pra frente a mensagem do operador ESTÁ (ou está sendo) gravada, e
+    # re-executar o turno duplicaria a mensagem e poderia gerar resposta dupla.
+    # Antes daqui, re-executar é inócuo — nada foi gravado nem respondido. A
+    # marca é o que torna a retentativa automática PRECISA em vez de otimista.
+    # (As 3 mortes silenciosas observadas em produção foram todas ANTES daqui,
+    # na leitura do histórico.)
+    if turn_progress is not None:
+        turn_progress["committed"] = True
+
     insert_message(
         db,
         session_id=session_id,
@@ -1000,7 +1119,11 @@ async def _handle_user_text(
     # dos trabalhos de background DESTE tópico e injeta o fato vivo + a regra dura —
     # pra o agente não narrar status de sala/job de memória. Read-only, best-effort.
     background_state = (
-        render_background_state(config.kobe_home, thread_id)
+        # chat_id é o que permite localizar as SALAS de missão deste tópico —
+        # elas eram o buraco do bloco (só sessões do Coder entravam).
+        render_background_state(
+            config.kobe_home, thread_id, chat_id=message.chat_id
+        )
         if config.background_state_gate_enabled
         else None
     )
@@ -2418,6 +2541,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     photos: tuple[PhotoSize, ...] = message.photo or ()
     if not photos:
         return
+
+    # 👀 na entrada — download + normalização do anexo levam segundos.
+    _react_received(config, message)
     # O Telegram manda várias resoluções; a última é a maior.
     largest = photos[-1]
     # Foto do Telegram não tem filename — sintetiza um a partir do file_unique_id.
@@ -2464,6 +2590,10 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     doc: Optional[Document] = message.document
     if doc is None:
         return
+
+    # 👀 na entrada — vale pros dois caminhos (borda nova e legada) e também
+    # pro intercept do Apolo logo abaixo: o anexo chegou, isso é fato.
+    _react_received(config, message)
 
     # Apolo intercept: .vcf / .csv viram importação de contatos (não vão pra KB).
     # Vale nas duas bordas (legada e nova) — contatos não são anexo de turno.

@@ -51,6 +51,42 @@ def test_avisa_operador_autorizado_no_mesmo_topico():
     assert rt.await_args.kwargs.get("message_thread_id") == 42
 
 
+def test_config_sem_kobe_home_degrada_pro_aviso_simples():
+    """Blindagem da ÚLTIMA rede (2026-08-20): a garantia de turno só entra se
+    der; qualquer falha aqui degrada pro aviso simples, NUNCA pro silêncio —
+    esta função roda justamente quando algo já deu errado."""
+    upd = _make_update(thread_id=42)
+    with patch.object(Message, "reply_text", new=AsyncMock()) as rt:
+        _run(on_error(upd, _make_ctx([999])))  # config stub sem kobe_home
+    assert rt.await_count == 1, "avisou mesmo sem conseguir guardar"
+    assert "Travei" in rt.await_args.args[0]
+
+
+def test_guarda_a_mensagem_antes_de_avisar(tmp_path=None):
+    """Com config completa, a mensagem vai pro disco ANTES do aviso — 'reenvia,
+    por favor' só funciona se o operador ainda tiver o texto; agora nem isso é
+    necessário. Ver bot/turn_guarantee.py."""
+    import tempfile
+    from pathlib import Path
+
+    from bot import turn_guarantee
+
+    home = Path(tempfile.mkdtemp(prefix="kobe-onerror-"))
+    upd = _make_update(thread_id=42)
+    ctx = _make_ctx([999])
+    ctx.application.bot_data["config"].kobe_home = home
+
+    with patch.object(Message, "reply_text", new=AsyncMock()) as rt:
+        _run(on_error(upd, ctx))
+
+    pendentes = turn_guarantee.list_pending(home)
+    assert len(pendentes) == 1, "a mensagem foi guardada"
+    assert pendentes[0]["text"] == "oi"
+    assert rt.await_count == 1
+    assert "não se perdeu" in rt.await_args.args[0]
+    assert rt.await_args.kwargs.get("parse_mode") == "HTML"
+
+
 def test_nao_avisa_usuario_nao_autorizado():
     upd = _make_update()
     with patch.object(Message, "reply_text", new=AsyncMock()) as rt:

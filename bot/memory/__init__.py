@@ -14,6 +14,12 @@ Camadas (a crescer nas próximas frentes):
 - (Frente 1.1) sinais de grounding baratos resolvidos no código (há N min, estado de bg).
 """
 
+from bot.memory.aging import (
+    carimbo,
+    estado_com_idade,
+    humanizar_idade,
+    parse_ts,
+)
 from bot.memory.background_state import render_background_state
 from bot.memory.curated_core import (
     CURATED_CORE_CHAR_LIMIT,
@@ -28,6 +34,10 @@ from bot.memory.working_set import (
 )
 
 __all__ = [
+    "carimbo",
+    "estado_com_idade",
+    "humanizar_idade",
+    "parse_ts",
     "CURATED_CORE_CHAR_LIMIT",
     "IMMEDIATE_HARD_CAP",
     "IMMEDIATE_MIN_COUNT",

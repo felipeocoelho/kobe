@@ -74,6 +74,7 @@ from bot.telegram_handler import (
 )
 from bot.topic_manager import list_unwelcomed_topics
 from bot.transcribe import Transcriber
+from bot import turn_guarantee
 
 
 logger = logging.getLogger("kobe.bot")
@@ -180,6 +181,33 @@ async def _on_startup(app: Application) -> None:
         cleanup_loop(config.kobe_home),
         name="kobe-cleanup-loop",
     )
+
+    # Garantia de turno: mensagens que chegaram e não puderam ser respondidas
+    # antes do último restart. NÃO são reprocessadas — uma mensagem de horas
+    # atrás não deve virar resposta do nada; o operador vê e decide. Roda ANTES
+    # do banco de propósito: é leitura de disco e tem que funcionar mesmo com o
+    # banco fora (que é justamente o cenário que enche essa fila).
+    try:
+        relatorio = turn_guarantee.render_startup_report(config.kobe_home)
+        for chat_id, thread_id, texto in relatorio:
+            try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=texto,
+                    message_thread_id=thread_id,
+                    parse_mode="HTML",
+                )
+            except Exception:  # noqa: BLE001 — um tópico não derruba os outros
+                logger.warning(
+                    "startup: falha reportando pendências do tópico %s", thread_id,
+                    exc_info=True,
+                )
+        if relatorio:
+            # Já avisado: limpa, senão o mesmo aviso repetiria a cada boot.
+            n = turn_guarantee.clear_pending(config.kobe_home)
+            logger.info("startup: %d pendência(s) reportada(s) e limpa(s)", n)
+    except Exception:  # noqa: BLE001 — nunca derruba o boot
+        logger.exception("startup: falha no relatório de turnos pendentes")
 
     db = app.bot_data["db"]
     expired = cleanup_expired_snapshots(db)
