@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,9 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from bot import reactions
+
+
+logger = logging.getLogger("kobe.config")
 
 
 class ConfigError(Exception):
@@ -257,10 +261,10 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         telegram_reactions_enabled=_parse_bool(
             os.getenv("TELEGRAM_REACTIONS_ENABLED")
         ),
-        telegram_reaction_received=os.getenv(
+        telegram_reaction_received=_reaction_from_env(
             "TELEGRAM_REACTION_RECEIVED", reactions.DEFAULT_RECEIVED
         ),
-        telegram_reaction_transcribed=os.getenv(
+        telegram_reaction_transcribed=_reaction_from_env(
             "TELEGRAM_REACTION_TRANSCRIBED", reactions.DEFAULT_TRANSCRIBED
         ),
     )
@@ -270,3 +274,35 @@ def _parse_bool(raw: Optional[str]) -> bool:
     if not raw:
         return False
     return raw.strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+
+def _reaction_from_env(key: str, default: str) -> str:
+    """Lê um emoji de reação do .env conferindo contra a lista do Bot API.
+
+    Três casos, e a diferença entre eles é intencional:
+    - variável ausente → o default do módulo (que já é uma forma válida);
+    - variável definida e VAZIA → "" = estágio desligado de propósito, sem aviso
+      (é o jeito documentado de desligar um dos estágios sem tocar em código);
+    - emoji que o Telegram não aceita → AVISO nomeando chave, valor e o que foi
+      usado no lugar, e cai no default.
+
+    Por que cair no default em vez de simplesmente não reagir: o que vale é o
+    SINAL ("chegou" / "transcrito"), não o desenho. Se o emoji estiver errado, é
+    melhor o sinal continuar aparecendo com o padrão — e o log explicando — do
+    que ele sumir calado, que é justamente a dor que a reação veio resolver.
+    """
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    if not raw.strip():
+        return ""
+    normalized = reactions.normalize_reaction(raw)
+    if normalized is None:
+        logger.warning(
+            "config: %s=%r não está na lista de reações aceitas pelo Bot API — "
+            "usando %r no lugar. Emojis válidos: telegram.constants.ReactionEmoji "
+            "(se o Telegram passou a aceitar esse, atualize a python-telegram-bot).",
+            key, raw, default,
+        )
+        return default
+    return normalized

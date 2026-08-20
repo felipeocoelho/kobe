@@ -4,6 +4,35 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Reação de "transcrição pronta" (✍) volta a funcionar — emoji normalizado e validado contra a lista do Bot API (2026-08-20)
+
+**Operador pediu:** consertar um bug **em produção**, publicado no repo público na v0.21.0 hoje: a reação 👀 de recebimento funciona, mas a troca para ✍️ é **recusada pelo Telegram**. Junto com o conserto, blindar a **classe** de erro — trocar o emoji no `.env` no futuro nunca mais pode quebrar calado em produção.
+
+**Por quê (causa provada, não hipótese):** o log de produção de hoje mostra, nos áudios das 11:57 e 11:59, `falha reagindo ✍️ … (Can't parse reactiontype: field "custom_emoji_id" must be a valid number)`. O emoji default em `bot/reactions.py` era `"✍️"` = `U+270D` **+** `U+FE0F` (VARIATION SELECTOR-16, o marcador invisível que pede renderização colorida). A lista de reações do Bot API registra esse emoji como `"✍"` = `U+270D` **puro**. Sem achar na lista, o Telegram tenta ler o valor como *custom emoji* (recurso de canal pago) e recusa. O operador já tinha provado empiricamente: `setMessageReaction` com `"✍"` retornou `ok:true` na **mesma mensagem** que havia falhado.
+
+O agravante não é o caractere errado — é que a recusa era **muda**. Reação é decoração e a falha é engolida de propósito (`set_reaction` nunca levanta, senão uma reação recusada derrubaria a mensagem do operador). Ou seja: o recurso criado justamente para tornar visível o "chegou e morreu calado" estava, ele próprio, falhando caladamente.
+
+**O achado que mudou o desenho do fix:** a regra intuitiva — *"tire sempre o VS16 antes de enviar"* — **estaria errada e trocaria um bug por outro**. Conferindo a lista real (73 emojis), **três exigem o VS16**: ❤️‍🔥, 🤷‍♂️ e 🤷‍♀️. A regra correta é comparar **ignorando** o marcador e enviar **a forma exata que a lista registra**, o que conserta os dois sentidos (sobrou marcador / faltou marcador).
+
+**Foi feito:**
+- `bot/reactions.py`: default corrigido para `"✍"`. Nova `normalize_reaction()` com uma tabela canônica (`chave = forma sem VS16`, `valor = forma exata do Bot API`) — uma consulta resolve os dois sentidos. `react()` passa a normalizar e conferir **antes** de falar com a API: emoji fora da lista **não vira chamada** (já sabemos que seria recusada) e grava aviso nomeando o valor.
+- **Fonte de verdade da lista**: `telegram.constants.ReactionEmoji`, da própria `python-telegram-bot` (já instalada), em vez de uma lista digitada à mão — quando o Telegram muda a lista, ela chega junto com a atualização da lib, sem cópia velha apodrecendo no nosso código. Custo consciente: `bot/reactions.py`, que era livre de PTB, passa a importá-la.
+- `bot/config.py`: leitura do `.env` deixa de ser crua. Ausente → default; **vazia → `""`**, que segue sendo "estágio desligado de propósito", sem aviso; **inválida → WARNING nomeando chave, valor recusado e o emoji usado no lugar**, caindo no default. Cair no default (em vez de não reagir) porque o que vale é o **sinal**, não o desenho: melhor o sinal aparecer com o padrão e o log explicando do que sumir calado.
+- Corrigidos os textos que **afirmavam algo que o log desmente** — o docstring de `bot/reactions.py` dizia que "✍️ está na lista permitida e funciona". `.env.example` também trazia a forma com marcador (é o modelo que as pessoas copiam).
+- **Produção não precisa de edição de `.env`**: verifiquei que `/home/felipe/kobe/.env` só define `TELEGRAM_REACTIONS_ENABLED=true` e nenhum emoji — ou seja, usava exatamente o default do código. O fix no código resolve.
+
+**Testes (ambiente de desenvolvimento):** `tests/test_reactions.py` foi de 7 para 18 testes. Travas novas: os dois defaults estão na lista do Bot API (a trava mais direta — é o que faltava); `"✍️"` → `"✍"` (o bug literal), inclusive com espaços em volta; ❤️‍🔥 / 🤷‍♂️ / 🤷‍♀️ **preservam** o VS16 (impede que o conserto ingênuo quebre estes três); `"❤‍🔥"` → `"❤️‍🔥"` (sentido inverso); 🎧/👂/lixo são rejeitados e **não** viram chamada à API; `.env` inválido cai no default **com** aviso; `.env` vazio continua desligando o estágio **sem** aviso; e a tabela canônica não tem colisão (se o Telegram acrescentar um emoji que colida sem o VS16, quebra no teste em vez de normalizar para o emoji errado silenciosamente).
+
+**Prova de que as travas não são decorativas:** rodei uma checagem de mutação (script descartável em `.local/`) revertendo o código para os três jeitos errados — default com marcador, strip cego de VS16, e sem validação nenhuma. **As três mutações foram pegas** (por 1, 2 e 7 testes respectivamente).
+
+**Suíte completa: 215 passaram, 4 falharam.** As 4 são as **mesmas** pré-existentes de `tests/test_resume.py` (`KeyError: 'curated_core'`), medidas na árvore limpa **antes** de tocar em qualquer coisa (baseline: 204 passaram, as mesmas 4 falharam). **Nenhuma falha nova**; +11 testes. Fora de escopo por instrução do operador, não foram tocadas.
+
+**Não testado aqui (limite honesto):** o caminho real contra a API do Telegram não é exercitável na árvore de dev — os testes usam um bot fake. O que garante o comportamento real é a evidência empírica que o operador já produziu (`"✍"` → `ok:true` na mesma mensagem que falhava) somada à lista vinda da própria biblioteca. A validação final é o operador mandar um áudio depois do deploy e ver o 👀 virar ✍.
+
+**Commits:** o commit desta entrada. Branch `coder/6225cf60`. **Sem deploy** — para no código testado, conforme o pedido; o ciclo (dev VPS → repo dev → prod VPS por `git pull` → repo público) fica para quando o operador autorizar.
+
+**Reversão:** commit único → `git revert` desfaz tudo. Independente disso, `TELEGRAM_REACTIONS_ENABLED=false` + restart desliga o recurso inteiro em produção sem depender de código.
+
 ### Datar o que envelhece — o prompt para de apresentar frame congelado como presente — Item D das 4 correções (2026-08-20)
 
 **Operador pediu:** o agente afirmou que uma sala de missão "segue rodando, te reporto quando entregar" — a sala estava `idle` havia 12 dias e já tinha entregado os documentos. Correção pedida: **timestamp visível nas linhas do histórico injetado** e **estado real + data da última atividade** em qualquer coisa que o prompt apresente como "ativo/rodando", lendo da **fonte viva** na hora de montar o prompt. Se estiver idle/encerrado, o prompt deve dizer isso com essas palavras.
