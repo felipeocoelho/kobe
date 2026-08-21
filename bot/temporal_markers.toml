@@ -1,0 +1,153 @@
+# Marcadores do gate de referência temporal (bot/temporal_gate.py)
+#
+# ── Por que este arquivo existe ─────────────────────────────────────────────
+# A lista NÃO pode ser inventada de cabeça nem enterrada no meio da lógica: ela
+# é o parâmetro que define o recall do gate, e apertar a malha tem que ser uma
+# edição de configuração, não um patch de código. Tudo aqui é compilado UMA vez
+# no import do módulo — editar exige restart do bot, nunca custo por chamada.
+#
+# ── De onde veio (corpus, não intuição) ─────────────────────────────────────
+# Derivada de 1.644 respostas reais do assistant (tabela `messages`, mai→ago/2026).
+# A sondagem ampla mostrou que os candidatos "óbvios" são MOBÍLIA da linguagem
+# do agente, não afirmação temporal, e por isso ficaram DE FORA:
+#
+#   agora ......... 57,1% das respostas   ("o fluxo agora é")
+#   antes de ...... 39,0%                 (ordem de operação)
+#   hoje .......... 32,5%                 ("hoje cada conversa é amnésica" = atualmente)
+#   quando você ... 18,0%                 (futuro/condicional: "quando você rodar")
+#   acabei de ..... 9,9%                  (refere-se ao próprio turno, que está no contexto)
+#
+# Uma lista com esses acenderia em 36,4% dos turnos. Com só o retrospectivo duro
+# abaixo, acende em 9,9% — e é essa a lista que ficou.
+#
+# ── Honestidade sobre cobertura ─────────────────────────────────────────────
+# Isto é uma REDE, não um muro. Regex sobre linguagem natural aberta tem recall
+# finito: perífrase ("lá pelo começo do ciclo"), construção nova, e afirmação
+# temporal implícita sem marcador ("o deploy que quebrou isso") passam batido.
+# O que o gate garante é que os marcadores DESTA lista não saem sem passar pela
+# checagem de lastro. Nada além disso.
+
+[gate]
+# Sintaxe de regex Python, casadas com re.IGNORECASE. Grupos, se usados, devem
+# ser não-capturantes `(?:...)` — o gate usa `finditer` e reporta `group(0)`.
+marcadores = [
+  # ── dia nomeado no passado ────────────────────────────────────────────────
+  '\bontem\b',
+  '\banteontem\b',
+
+  # ── "semana/mês/ano/sexta-feira passad[ao]" ───────────────────────────────
+  '\b(?:semana|m[êe]s|ano|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)(?:[- ]feira)?[- ]passad[ao]\b',
+
+  # ── "3 dias atrás", "2h atrás" ────────────────────────────────────────────
+  '\b\d+\s*(?:h|min|minutos?|horas?|dias?|semanas?|meses|m[êe]s|anos?)\s+atr[áa]s\b',
+
+  # ── "há 3 dias", "há algumas semanas", "há meses" ─────────────────────────
+  # Exige UNIDADE de tempo: "há pouco" solto e "há que" (verbo haver) não casam.
+  '\bh[áa]\s+(?:uns?|umas?|cerca\s+de|quase|pouc[oa]s?|alguns?|algumas?|\d+)?\s*(?:minutos?|horas?|dias?|semanas?|meses|m[êe]s|anos?)\b',
+
+  # ── "faz 3 dias", "faz um tempo", "faz umas duas semanas" ─────────────────
+  # O quantificador pode vir em DOIS degraus ("umas" + "duas"), por isso o
+  # segundo grupo opcional — sem ele, "faz umas duas semanas" escapava.
+  '\bfaz\s+(?:(?:uns?|umas?|alguns?|algumas?|cerca\s+de|quase)\s+)?(?:(?:\d+|dois|duas|tr[êe]s|quatro|cinco|seis|sete|oito|nove|dez|poucos?|poucas?)\s+)?(?:minutos?|horas?|dias?|semanas?|meses|m[êe]s|anos?|tempo)\b',
+
+  # ── "desde <âncora de data>" ──────────────────────────────────────────────
+  # `desde` SOLTO é conectivo, não data ("desde o começo", "desde que"): 6,1% do
+  # corpus, quase tudo falso positivo. Só entra ancorado num DIA NOMEADO ou num
+  # NÚMERO ("desde ontem", "desde segunda", "desde 24 de junho", "desde 11/05").
+  # Unidade genérica ficou de fora de propósito: "desde o dia um" e "desde o mês
+  # em que…" são idiomáticos, não datam nada.
+  '\bdesde\s+(?:a\s+|o\s+|as\s+|os\s+)?(?:ontem|anteontem|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|\d)',
+
+  # ── "da última vez", "na última vez" ──────────────────────────────────────
+  '\b[dn]a\s+[úu]ltima\s+vez\b',
+
+  # ── esparsos, mas inequivocamente retrospectivos ──────────────────────────
+  '\brecentemente\b',
+  '\bna\s+[ée]poca\b',
+]
+
+# Frases de ack/gentileza — NUNCA acendem, mesmo casando um marcador acima.
+# São promessa de voltar, não afirmação sobre o passado.
+acks = [
+  '\bj[áa]\s+(?:te\s+)?(?:volto|retorno|respondo|te\s+falo)\b',
+  '\bvolto\s+(?:em\s+seguida|j[áa]|logo)\b',
+  '\b(?:depois|mais\s+tarde)\s+(?:eu\s+)?(?:vejo|olho|te\s+falo|te\s+mando)\b',
+  # "prioridade pra ontem" = urgência, não data. Falso positivo real, colhido
+  # no corpus na rodada de medição.
+  '\bp(?:ra|ara)\s+(?:ontem|anteontem)\b',
+]
+
+[ancoras]
+# ── O filtro de âncora (nível 1.5) ─────────────────────────────────────────
+#
+# Achado da rodada de medição, e o melhor sinal determinístico que apareceu:
+# **40% dos acendimentos já trazem o ancoradouro absoluto na PRÓPRIA frase.**
+#
+#     "última atividade às 14:09 UTC (uns 5 min atrás)"
+#     "no ar desde 14/07 às 23:03, com NRestarts=0"
+#     "o último movimento foi em 7 de julho (15 dias atrás)"
+#     "datado de ontem (2026-06-25)"
+#
+# Nesses casos a referência relativa é uma GLOSA de um dado que está ali do lado,
+# verificável — não é o "desde ontem" seco que mente parecendo preciso.
+#
+# Cruzando com a classificação à mão de 50 trechos reais:
+#
+#     âncora na frase      → "não mexer" é a decisão certa em 24/27 = 89%
+#     sem âncora nenhuma   → cai para                        4/23 = 17%
+#
+# É por isso que o filtro existe: ele separa o caso bom do ruim melhor do que
+# qualquer modelo testado (os modelos ficaram em 36-38%, abaixo da estratégia de
+# nunca mexer, que acerta 56%). E custa microssegundos, sobre uma frase de ~100
+# caracteres, só nos turnos que já acenderam.
+#
+# O escopo é a FRASE, não a resposta: uma resposta longa pode ter uma frase
+# ancorada e outra solta, e só a solta deve acender.
+padroes = [
+  # 23:03 · 14:09 · 08h40
+  '\b\d{1,2}[:h]\d{2}\b',
+  # 30/mai · 14/07 · 11/05/2026
+  '\b\d{1,2}/(?:\d{1,2}|jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\w*(?:/\d{2,4})?\b',
+  # 7 de julho · 24 de junho
+  '\b\d{1,2}\s+de\s+(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\w*\b',
+  # 2026-06-25
+  '\b20\d\d-\d\d-\d\d\b',
+  # Identificador que faz o papel da data: PID, sha de commit, versão semântica.
+  # É o critério mais frouxo dos cinco — entra porque "o artefato de ontem
+  # (44233c4e)" já identifica QUAL artefato sem depender do relógio.
+  '\b(?:PID|pid)\s*\d+\b',
+  '\b[0-9a-f]{7,40}\b',
+  '\bv\d+\.\d+\.\d+\b',
+]
+
+[fontes]
+# Nível 2, opção (a) — determinística, custo ~zero.
+#
+# A pergunta que importa não é "isto é uma afirmação temporal?" (o nível 1 já
+# responde) e sim "isto tem LASTRO?". Um turno que rodou `git log`/`systemctl`/
+# `stat`, leu o arquivo citado ou consultou a agenda tem base plausível pra
+# afirmar quando algo aconteceu; um turno que não tocou fonte nenhuma e mesmo
+# assim diz "desde ontem" é confabulação quase certa.
+#
+# Medido no corpus: ~2/3 das afirmações temporais verdadeiras ESTAVAM ancoradas
+# num comando desses rodado no mesmo turno.
+#
+# (A opção (b) — segunda passada num modelo barato — foi medida e REPROVADA:
+# p50 667ms / p95 1646ms por frase, e 23 de 25 vereditos "sim". Confirma em vez
+# de filtrar. Ver o cabeçalho de bot/temporal_gate.py.)
+
+# Ferramentas que, por si só, significam "olhou uma fonte" (casamento exato).
+tools = ["Read", "Glob", "Grep", "NotebookRead"]
+
+# Prefixos de tool de MCP que consultam agenda/tarefas/reuniões datadas.
+# Casamento por substring, caixa-insensível, sobre o nome da tool.
+tools_contendo = ["calendar", "todoist", "clickup", "fireflies", "gmail"]
+
+# Comandos de shell que consultam tempo/estado datado. Substring sobre o
+# `command` do Bash, caixa-insensível.
+bash_contendo = [
+  "git log", "git show", "git reflog", "git blame",
+  "stat ", "ls -l", "find ",
+  "date", "uptime", "journalctl", "systemctl", "last ", "who",
+  "ps ", "docker ps", "kobe-recall-since",
+]

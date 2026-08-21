@@ -100,7 +100,7 @@ def test_turn_is_over() -> None:
 def test_build_launcher_command_bypass_no_settings() -> None:
     spec = room.SalaSpec(
         sala_name="mission-abc",
-        cwd=Path("/home/felipe/projetos/kobe"),
+        cwd=Path("/opt/kobe"),
         session_id="11111111-2222",
         sysprompt_path=Path("/tmp/sp.txt"),
         launch_prompt="leia o brief",

@@ -407,7 +407,7 @@ Carrega variáveis de ambiente e valida.
 - `SUPABASE_KEY`
 - `GROQ_API_KEY`
 - `ANTHROPIC_API_KEY` (ou OAuth, dependendo do setup do Claude Code)
-- `KOBE_HOME` (path da instalação, ex: `/home/felipe/projetos/kobe`)
+- `KOBE_HOME` (path da instalação, ex: `/home/seu_usuario/projetos/kobe`)
 - `KOBE_CLAUDE_CWD` (diretório onde `claude -p` roda; default: `KOBE_HOME`)
 
 Implementar com `python-dotenv`. Validar todas no startup; abortar com mensagem clara se faltar alguma.

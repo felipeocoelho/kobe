@@ -4,6 +4,16 @@
 > te leva do "stack pronto" ao "Evolution em produção" sem precisar do Claude
 > do lado. Cada passo tem um esperado claro e um plano B.
 
+> **Convenção de caminhos deste runbook.** Os comandos usam duas variáveis, pra
+> valerem em qualquer instalação: **`$KOBE_DEV`** = raiz da árvore de
+> desenvolvimento; **`$KOBE_PROD`** = raiz da instalação de produção. Exporte as
+> duas antes de começar (ou substitua na hora de colar):
+>
+> ```bash
+> export KOBE_DEV=~/projetos/kobe
+> export KOBE_PROD=~/kobe
+> ```
+
 ## TL;DR
 
 Toda a infra, código e config estão prontos. Só falta:
@@ -58,10 +68,10 @@ Se algum container caiu:
 
 ```bash
 # subir Evolution
-cd /home/felipe/projetos/kobe/infra/evolution && sg docker -c "docker compose up -d"
+cd $KOBE_DEV/infra/evolution && sg docker -c "docker compose up -d"
 
 # subir WPPConnect (só se for fazer rollback)
-cd /home/felipe/projetos/kobe/infra/wppconnect && sg docker -c "docker compose up -d --build"
+cd $KOBE_DEV/infra/wppconnect && sg docker -c "docker compose up -d --build"
 ```
 
 ---
@@ -72,7 +82,7 @@ A instância concentra a conexão WhatsApp + config de proxy + webhook. Já est�
 desenhado pra usar o **mesmo proxy IPRoyal** que validamos no WPPConnect.
 
 ```bash
-cd /home/felipe/projetos/kobe
+cd $KOBE_DEV
 
 # Carrega secrets locais sem ecoar
 APIKEY=$(grep ^AUTHENTICATION_API_KEY infra/evolution/.env | cut -d= -f2)
@@ -146,7 +156,7 @@ else
   # Caminho B — só veio `code` (string raw do QR). Imprime no terminal via Python.
   RAW=$(echo "$QR_RESPONSE" | jq -r '.code // empty')
   if [ -n "$RAW" ]; then
-    /home/felipe/kobe/.venv/bin/python3 -c "
+    $KOBE_PROD/.venv/bin/python3 -c "
 import sys
 try:
     import qrcode
@@ -193,7 +203,7 @@ equivalente seria `state → close` espontâneo, ou eventos `CONNECTION_UPDATE`
 reportando perda. Vou monitorar via log do container e re-polling de status.
 
 ```bash
-LOG=/home/felipe/projetos/kobe/.local/logs/evolution-pareamento-$(date '+%Y%m%d_%H%M%S').log
+LOG=$KOBE_DEV/.local/logs/evolution-pareamento-$(date '+%Y%m%d_%H%M%S').log
 mkdir -p "$(dirname "$LOG")"
 echo "Monitor iniciado em $(date '+%H:%M:%S')" > "$LOG"
 sg docker -c "docker logs -f --since 30s evolution-api 2>&1" \
@@ -222,7 +232,7 @@ Se cair, anota o tempo e o evento — me chama com isso.
 Quando o smoke passar, edite **dois** arquivos `.env` (dev e prod):
 
 ```bash
-# Em /home/felipe/projetos/kobe/.env  E  /home/felipe/kobe/.env:
+# Em $KOBE_DEV/.env  E  $KOBE_PROD/.env:
 # - comentar:    APOLO_BACKEND=wppconnect
 # - descomentar: APOLO_BACKEND=evolution
 ```
@@ -230,7 +240,7 @@ Quando o smoke passar, edite **dois** arquivos `.env` (dev e prod):
 Comando direto (faz dev e prod):
 
 ```bash
-for ENV in /home/felipe/projetos/kobe/.env /home/felipe/kobe/.env; do
+for ENV in $KOBE_DEV/.env $KOBE_PROD/.env; do
   sed -i 's|^APOLO_BACKEND=wppconnect|# APOLO_BACKEND=wppconnect|' "$ENV"
   sed -i 's|^# APOLO_BACKEND=evolution|APOLO_BACKEND=evolution|' "$ENV"
   echo "=== $ENV ==="
@@ -290,7 +300,7 @@ Só faça depois de M8 passar e você ter usado a Evolution por algumas horas
 sem incidente:
 
 ```bash
-cd /home/felipe/projetos/kobe/infra/wppconnect
+cd $KOBE_DEV/infra/wppconnect
 sg docker -c "docker compose down"
 # volumes wppconnect-tokens, wppconnect-userdata MANTIDOS — rollback ainda possível
 ```
@@ -301,11 +311,11 @@ sg docker -c "docker compose down"
 
 ```bash
 # 1. Subir WPPConnect (se foi paro)
-cd /home/felipe/projetos/kobe/infra/wppconnect
+cd $KOBE_DEV/infra/wppconnect
 sg docker -c "docker compose up -d --build"
 
 # 2. .env: voltar APOLO_BACKEND pra wppconnect
-for ENV in /home/felipe/projetos/kobe/.env /home/felipe/kobe/.env; do
+for ENV in $KOBE_DEV/.env $KOBE_PROD/.env; do
   sed -i 's|^APOLO_BACKEND=evolution|# APOLO_BACKEND=evolution|' "$ENV"
   sed -i 's|^# APOLO_BACKEND=wppconnect|APOLO_BACKEND=wppconnect|' "$ENV"
 done

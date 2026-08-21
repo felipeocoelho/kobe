@@ -28,6 +28,8 @@ import time
 from pathlib import PurePosixPath
 from typing import Optional
 
+from bot import temporal_gate
+
 
 logger = logging.getLogger("kobe.progress")
 
@@ -180,6 +182,14 @@ class ProgressReporter:
         # isso na retaguarda do despacho: se o Hal JÁ avisou o operador, não
         # mandamos o aviso enlatado de background por cima (evita aviso duplo).
         self.acked: bool = False
+        # True assim que o turno consulta alguma FONTE de tempo/estado datado
+        # (`git log`, `stat`, `systemctl`, leitura de arquivo, agenda…). É o
+        # nível 2 do gate temporal (`bot/temporal_gate.py`): uma afirmação do
+        # tipo "desde ontem" tem lastro plausível se o turno de fato olhou uma
+        # fonte; se não olhou nenhuma, é confabulação quase certa. Aproveita
+        # este laço, que já percorre bloco a bloco — custo de uma comparação
+        # de substring, nenhuma chamada nova.
+        self.touched_temporal_source: bool = False
 
     async def start(self) -> None:
         """Inicia o timer pra status default ("trabalhando…")."""
@@ -230,10 +240,17 @@ class ProgressReporter:
             # Ack-detection: um Bash chamando `kobe-notify` é o agente avisando
             # o operador na própria voz. Substring cobre qualquer forma de
             # invocação (`bot/bin/kobe-notify`, path absoluto, `python …`).
+            cmd = ""
             if name == "Bash":
                 cmd = (block.get("input") or {}).get("command") or ""
                 if "kobe-notify" in cmd:
                     self.acked = True
+            # Fonte temporal (nível 2 do gate). Vale inclusive vinda de
+            # subagente: quem leu a fonte foi o turno, não importa a camada.
+            if not self.touched_temporal_source and temporal_gate.is_temporal_source(
+                name, cmd
+            ):
+                self.touched_temporal_source = True
             # Subagentes: ações internas já cobertas por "delegando
             # subtarefa" no evento pai; não detalhamos aqui.
             if is_subagent:

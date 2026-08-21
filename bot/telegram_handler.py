@@ -55,6 +55,7 @@ from bot.memory import (
 )
 from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
+from bot import temporal_gate
 from bot.turn_classifier import ROUTE_BACKGROUND, classify_turn
 from bot.topic_manager import (
     TOPIC_CONTEXT_CHAR_LIMIT,
@@ -1316,6 +1317,7 @@ async def _handle_user_text(
                         claude_task=claude_task,
                         started_at=claude_started_at,
                         tool_count_fn=lambda: reporter.tool_call_count,
+                        temporal_probe_fn=lambda: reporter.touched_temporal_source,
                     ),
                     name=f"heavy-promoted-{session_id}",
                 )
@@ -1332,6 +1334,7 @@ async def _handle_user_text(
             history_len=len(history),
             tool_count_fn=lambda: reporter.tool_call_count,
             label="fg",
+            temporal_probe_fn=lambda: reporter.touched_temporal_source,
         )
         # Encerra a status do reporter, mas MANTÉM o "digitando…" vivo DURANTE a
         # entrega. A entrega (conversão markdown→HTML + envio, multi-chunk se a
@@ -1384,6 +1387,11 @@ class _ToolCounter:
         # Hal. Mesma detecção do ProgressReporter.acked (substring cobre
         # `bot/bin/kobe-notify`, path absoluto, `python …`).
         self.acked = False
+        # Espelha `ProgressReporter.touched_temporal_source`: o turno consultou
+        # alguma fonte de tempo/estado datado? É o nível 2 do gate temporal
+        # (`bot/temporal_gate.py`). Precisa existir aqui também porque o caminho
+        # de background não tem ProgressReporter — e o gate roda nos dois.
+        self.touched_temporal_source = False
 
     def on_event(self, event: dict) -> None:
         if event.get("type") != "assistant":
@@ -1393,10 +1401,16 @@ class _ToolCounter:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             self.count += 1
-            if block.get("name") == "Bash":
+            name = block.get("name") or ""
+            cmd = ""
+            if name == "Bash":
                 cmd = (block.get("input") or {}).get("command") or ""
                 if "kobe-notify" in cmd:
                     self.acked = True
+            if not self.touched_temporal_source and temporal_gate.is_temporal_source(
+                name, cmd
+            ):
+                self.touched_temporal_source = True
 
 
 async def _resolve_claude(
@@ -1407,11 +1421,17 @@ async def _resolve_claude(
     history_len: int,
     tool_count_fn,
     label: str,
+    temporal_probe_fn=None,
 ) -> str:
     """Aguarda o `claude.run` (já em voo), mapeia erro → resposta amigável,
     loga a métrica `claude_run`. NUNCA levanta — sempre devolve um texto
     pronto pra enviar (com fallback de resposta vazia). Compartilhado pelos
     caminhos inline (foreground) e background.
+
+    `temporal_probe_fn` (opcional): callable que devolve True se o turno tocou
+    alguma fonte de tempo/estado datado. Alimenta o nível 2 do gate temporal.
+    Opcional de propósito — sem ele o gate roda como se o turno não tivesse
+    lastro, e nenhuma chamada existente quebra.
     """
     claude_status = "ok"
     error_class = ""
@@ -1497,6 +1517,29 @@ async def _resolve_claude(
             "Procura no log: `journalctl --user -u kobe | grep claude_empty | tail -1` "
             "pra ver onde o dump caiu. Tenta reformular a mensagem?"
         )
+
+    # Gate de referência temporal (bot/temporal_gate.py) — MODO OBSERVAÇÃO.
+    # Este é o único ponto entre "o agente terminou de escrever" e "o operador
+    # recebe", e cobre os DOIS caminhos (inline e background) porque os dois
+    # passam por aqui. Nesta fase o gate só LOGA o que teria pego: não altera
+    # `reply_text`, não anexa ressalva, não devolve nada ao agente.
+    #
+    # Com a flag off (default), o custo é uma leitura de env var — o caminho de
+    # entrega fica idêntico ao de antes deste bloco existir.
+    #
+    # O try/except largo é deliberado: um bug no gate NUNCA pode comer uma
+    # resposta do operador. Ele loga e a resposta segue intacta.
+    if temporal_gate.enabled():
+        try:
+            temporal_gate.observe(
+                reply_text,
+                touched_temporal_source=bool(
+                    temporal_probe_fn() if temporal_probe_fn else False
+                ),
+            )
+        except Exception:  # noqa: BLE001 — gate nunca derruba a entrega
+            logger.exception("temporal_gate falhou — resposta segue intacta")
+
     return reply_text
 
 
@@ -1617,6 +1660,7 @@ async def _run_heavy_in_background(
     claude_task: "Optional[asyncio.Task]" = None,
     started_at: Optional[float] = None,
     tool_count_fn=None,
+    temporal_probe_fn=None,
     ack_watchdog_seconds: Optional[float] = None,
 ) -> None:
     """Roda (previsão) ou consome (promoção) o turno pesado fora do lock e
@@ -1637,6 +1681,9 @@ async def _run_heavy_in_background(
             claude.run(prompt, on_event=detector.on_event, **run_kwargs)
         )
         tool_count_fn = lambda: detector.count  # noqa: E731
+        # Mesmo detector alimenta o nível 2 do gate temporal na previsão — o
+        # caminho de bg não tem ProgressReporter pra ler.
+        temporal_probe_fn = lambda: detector.touched_temporal_source  # noqa: E731
 
     # "digitando…" vivo durante TODO o trabalho em background + a entrega.
     # Sem isso, o tail do bg fica sem nenhum sinal de vida — e no promote com
@@ -1677,6 +1724,7 @@ async def _run_heavy_in_background(
                 history_len=history_len,
                 tool_count_fn=tool_count_fn or (lambda: 0),
                 label="bg",
+                temporal_probe_fn=temporal_probe_fn,
             )
         except Exception:  # noqa: BLE001 — _resolve já não levanta, mas defensivo
             logger.exception("heavy bg: _resolve_claude levantou inesperadamente")

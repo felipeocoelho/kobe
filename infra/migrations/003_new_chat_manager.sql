@@ -3,7 +3,7 @@
 -- Redesenho do Chat Manager: detector síncrono sai do caminho crítico e
 -- vira daemon classificador-bibliotecário (Keyko). A conversation deixa de
 -- ser container-porteira e vira FAIXA derivada de mensagens. Vide doc:
---   /home/felipe/kobe/user-data/knowledge/kobe/brainstorms/new-chat-manager-arquitetura.md
+--   $KOBE_PROD/user-data/knowledge/kobe/brainstorms/new-chat-manager-arquitetura.md
 --
 -- TODA aditiva (novas colunas/tabelas/índices) — NÃO destrutiva. Banco é
 -- compartilhado dev/prod; com CHAT_MANAGER_ENABLED=false essas estruturas

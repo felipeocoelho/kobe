@@ -33,11 +33,11 @@ nomeado `hindsight-postgres-data`), então roda direto daqui — não depende do
 (que está bloqueado pela árvore dev suja). Caminho exato:
 
 ```bash
-cd /home/felipe/kobe/user-data/coder-worktrees/842fc607/infra/hindsight
+cd $KOBE_PROD/infra/hindsight
 cp .env.example .env
 # edite .env e preencha:
 #   HINDSIGHT_DB_PASSWORD=$(openssl rand -hex 16)
-#   OPENAI_API_KEY=<a MESMA do /home/felipe/kobe/.env do bot>
+#   OPENAI_API_KEY=<a MESMA do $KOBE_PROD/.env do bot>
 ```
 
 **Opção 1 — um comando (sobe + espera + smoke):**
@@ -63,7 +63,7 @@ a Frente 2.3 (cliente do bot). Mede também:
 - **se o reflect roda em background** (retain com `async:true` não bloqueia).
 
 > Quando o Highlander for pro merge-back, `infra/hindsight/` passa a viver no prod main
-> (`/home/felipe/kobe/infra/hindsight/`) e o caminho acima vira `$KOBE_HOME/infra/hindsight`.
+> (`$KOBE_PROD/infra/hindsight/`) e o caminho acima vira `$KOBE_HOME/infra/hindsight`.
 
 ## SQL / migrations — quem roda é o operador (regra dura)
 

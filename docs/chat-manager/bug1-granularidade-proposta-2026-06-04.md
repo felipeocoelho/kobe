@@ -152,7 +152,7 @@ basta. **Nenhuma mudança de código, nenhum rsync.**
 
 **Aplicar (prod VPS):**
 ```bash
-# /home/felipe/kobe/.env  — adicionar:
+# $KOBE_PROD/.env  — adicionar:
 CM_BORDER_SIM=0.55
 CM_SUSTAIN=3
 # (sustain=3 é o default; explicitar deixa registrado)

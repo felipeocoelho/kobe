@@ -4,6 +4,106 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Suíte inteira verde — fixtures do resume derivados da fonte, e a trava que faltava (2026-08-21)
+
+**Operador pediu:** consertar as 4 falhas de `tests/test_resume.py` que arrastavam há semanas — revogando a instrução anterior de "não encostar nelas". Com três condições: **confirmar o diagnóstico na fonte** antes de mexer (se fosse bug real de produção, parar e reportar); **derivar o fixture do formato real** em vez de repetir literal à mão; e uma **trava dura — proibido alterar `bot/resume.py` ou qualquer código de produção para fazer teste passar** (teste que só passa mexendo em produção é achado, não conserto).
+
+**Por quê:** a suíte tinha virado sinal morto. Quando 4 testes estão sempre vermelhos, ninguém repara no quinto — e foi exatamente o que aconteceu na véspera, quando `test_prompt_aging.py` quebrou sozinho e só apareceu por acaso.
+
+**O diagnóstico levantado estava incompleto, e a diferença importa.** A hipótese era "os 4 morrem com `KeyError: 'curated_core'`". Confirmando na fonte, são **duas causas distintas**:
+
+- **Causa A** (`test_load_resume_context_cm_on_uses_immediate_and_pointers`, `..._cm_off_uses_session_history`): não é `KeyError`, é **`AttributeError: 'SimpleNamespace' object has no attribute 'working_memory_enabled'`**. A `Config` falsa tinha **4 campos** escritos à mão; a `Config` real é uma dataclass com **41**, e o produtor passou a ler três flags que a falsificação não tinha.
+- **Causa B** (`test_resume_invokes_agent_and_sends_synthesis`, `..._falls_back_to_ping_when_agent_fails`): aí sim o pacote de contexto fabricado à mão tem **6 chaves** enquanto `_load_resume_context` devolve **8** (faltavam `curated_core` e `grounding_signals`). O `KeyError` é engolido pelo `except` largo de `resume_one_snapshot`, que cai no ping — por isso o teste falhava com `assert 0 == 1`, um sintoma que esconde a causa.
+
+**Produção está sã — verificado, não presumido.** `resume_one_snapshot` monta o `ctx` num **único ponto** (`bot/resume.py:305`, via `_load_resume_context`), que sempre devolve as 8 chaves; não existe caminho em que um dict montado à mão chegue à produção. Logo, `ctx["curated_core"]` não pode dar `KeyError` em produção, e a condição de "parar e reportar" não disparou. **Nenhuma linha de produção foi tocada** — o diff desta entrada é `tests/test_resume.py` e nada mais.
+
+**Foi feito** (só `tests/test_resume.py`):
+
+- **`_config()` derivada da dataclass real.** Todo campo de `Config` entra automaticamente, com default escolhido pelo tipo; o teste sobrescreve só o que exercita. Campo novo em produção não quebra mais estes testes — e um campo *removido* também não passa despercebido, porque o teste que o sobrescrever vai apontar para um nome inexistente.
+- **`_ctx()` derivada do produtor real.** Em vez de repetir o dict à mão, chama `_load_resume_context` com as folhas neutralizadas e usa a forma que ele devolver. Chave nova chega sozinha. Tem ainda uma guarda: sobrescrever chave que o produtor não devolve falha com mensagem explícita, em vez de criar uma chave fantasma.
+- **A trava que faltava** (`test_produtor_e_consumidor_do_contexto_nao_se_desencontram`). O que deixou isto apodrecer dois meses foi **não haver nada amarrando produtor e consumidor**. Agora há: o teste lê o fonte de `bot/resume.py` com `ast`, junta todo `ctx["..."]` que o consumidor lê, e confirma que o produtor entrega todas. Mira no lado que importa — **chave lida e não produzida é `KeyError` em produção, não só teste vermelho**. Verificada por mutação: removendo uma chave do produtor, ela acusa.
+- **Um achado colateral, corrigido:** `test_load_resume_context_cm_off_uses_session_history` testava com o nome errado. O ramo legado é governado pela flag de **memória** (`working_memory_enabled`), não pela de **conversas** — as duas foram desacopladas na Frente 0 e o nome do teste ficou para trás. As duas flags agora vêm explícitas, com o porquê comentado.
+- **Uma bomba armada desarmada:** `test_resume_skips_when_activity_after_snapshot` tinha o mesmo `ctx` capenga de 6 chaves e **passava por sorte** — retorna na guarda de atividade antes de chegar na linha que quebra. Quebraria no dia em que a guarda mudasse. Agora usa o fixture derivado.
+
+**Testes (ambiente de desenvolvimento):** **319 passaram, 0 falharam — suíte inteira verde.** Era 314 passando e 4 falhando. Os 4 antigos passaram e entrou 1 teste novo (a trava de acoplamento). O verificador de portabilidade segue verde.
+
+**Não implementado, por instrução — proposta em `.local/proposta-alarme-suite-vermelha.md`:** alarme de suíte vermelha (item 5-B). Hoje ninguém é avisado quando a suíte quebra, e é por isso que estes 4 testes ficaram vermelhos desde 24/06 sem ninguém ver. Recomendação: alerta diário no Keyko que roda a suíte e **só fala se estiver vermelha**, avisando na virada verde→vermelho para não virar ruído — custo zero em dinheiro, ~7s de CPU/dia, e chega no Telegram. Aguardando decisão do operador.
+
+**`CLAUDE.md`:** não foi tocado nesta rodada (nenhuma mudança precisou dele), portanto não houve o que fazer backup. O backup da rodada anterior segue em `.local/backups/CLAUDE.md.20260820-212405.bak`.
+
+**Deploy:** **não feito**, por instrução. Entrega na branch `coder/b7bec0ad`.
+
+**Reversão:** `git revert` do commit. Só testes mudaram — sem risco de runtime, sem migração, sem estado.
+
+### Regra temporal no CLAUDE.md + filtro de âncora + faxina de portabilidade (2026-08-20)
+
+**Operador pediu:** quatro frentes numa leva. (1) A regra nova de referência temporal no `CLAUDE.md` mais o filtro de âncora no gate — *"concordo 130%, você já tem o meu ok"* —, com o corretor automático **morto** (foi reprovado por medição na rodada anterior e ele vetou o desenho). (2) `infra/sync-prod.sh`: *"precisa sumir da face do planeta. Não quero vestígios disso."* (3) Os 4 caminhos absolutos cravados em `bot/apolo_handlers.py`: *"tem que ser detonado"*. (4) A faxina do resto das ocorrências e um verificador de portabilidade que impeça a sujeira de voltar.
+
+**Por quê:** as quatro coisas são a mesma classe de problema — **dado de uma máquina específica vazando para dentro do que é público ou permanente**. O caminho `/home/<operador>` num default de código quebra quem clona o repo; o script de rsync é o método de deploy que já congelou uma produção; e a referência temporal sem lastro é o "caminho da máquina" da linguagem: parece precisa e não é.
+
+**Foi feito:**
+
+- **Filtro de âncora no gate temporal** (`bot/temporal_gate.py`, `bot/temporal_markers.toml`). Se a frase já traz o dado absoluto ao lado da referência relativa — *"no ar desde 14/07 **às 23:03**"*, *"última atividade **às 14:09 UTC** (uns 5 min atrás)"*, *"datado de ontem (**2026-06-25**)"* —, a relativa é glosa de algo verificável e **não acende**. O escopo é a **frase**, não a resposta: uma resposta pode ter uma frase ancorada e outra solta, e só a solta interessa. Padrões (hora, data com barra, data por extenso, ISO, PID/hash/versão) ficam no TOML, editáveis.
+  **Efeito medido no mesmo corpus de 1.644 respostas: acendimento caiu de 9,9% → 6,0% dos turnos**; custo do nível 1 no caminho comum: **160 µs por resposta** (era 140 µs — a diferença é a alternância extra na lista de exclusões; o filtro em si só roda nos turnos que já acenderam).
+  Junto, uma exclusão de falso positivo real colhido no corpus: *"prioridade **pra ontem**"* é expressão de urgência, não data.
+  **Mudança de comportamento deliberada:** *"desde 24 de junho"* deixou de acender. A data está escrita, é conferível e não envelhece — não é o caso que o gate procura; o caso é *"desde ontem"* seco. Fixado num teste dedicado para ficar explícito que foi decisão, não regressão.
+- **Regra nova no `CLAUDE.md`** (seção *Fundamentação*): *"Referência temporal só sai com âncora — ou não sai."* Escrita como **procedimento de decisão em três perguntas**, não como proibição: (1) a frase precisa mesmo dela? quase sempre não — **corte**, que é a saída mais barata e a única que não tem como mentir; (2) se precisa, ancore num **fato**, não no relógio; (3) se o fato é data/hora, ela tem que ter vindo de uma **fonte olhada naquele turno**, e sai **junto** da relativa. Inclui o exemplo real apontado pelo operador (*"desligado desde ontem, de propósito"*). O bullet antigo (*"Nada relativo ao TEMPO sem conferir o tempo"*) **permanece**: ele cobre "vou afirmar um estado"; o novo cobre "vou escrever um advérbio de tempo", que é outro gesto.
+  **Por que reescrever em vez de só endurecer o tom:** a regra antiga manda **conferir**, que é caro, e não oferece a saída barata que os dados mostram ser a correta na maioria dos casos — não escrever a referência. Ela era ignorada por custo, não por ênfase.
+- **`infra/sync-prod.sh` removido.** Varredura prévia no repo inteiro: **nada o invocava além dele mesmo**. As demais menções a rsync são a regra e a história (CHANGELOG, runbooks) e ficam — a lição permanece, o script sai.
+- **Proibição de rsync escrita como regra** no `CLAUDE.md` (seção nova *"Deploy é git — rsync não é método de deploy de nada"*), que **não a tinha**. Nomeia a causa: o incidente de 12-13/06/2026, em que cópia crua congelou o git da produção numa tag velha e um `rsync --delete` cego apagou arquivo sem caminho de volta.
+- **`bot/apolo_handlers.py`: 4 cópias de `os.environ.get("KOBE_HOME", <caminho de uma máquina>)` viraram um helper único.** Resolve nesta ordem: `$KOBE_HOME` **se apontar para uma raiz de verdade** → derivação da localização do próprio módulo → **`RuntimeError` com o motivo escrito**. Nunca mais um caminho de máquina como default. Ganho lateral: env setada mas errada agora **avisa e deriva** em vez de obedecer calado — que era como o bug se disfarçava.
+- **Faxina:** 25 ocorrências de caminho do operador substituídas por placeholder, por contexto (`$KOBE_HOME`, `$KOBE_PROD`, `$KOBE_DEV`, `/home/seu_usuario`, `/opt/kobe` em fixture de teste), em `CHANGELOG.md`, `SPEC.md`, `docs/migracao-evolution.md`, `docs/spr/`, `docs/chat-manager/`, `infra/hindsight/README.md`, duas migrations e três testes. **No `CHANGELOG` trocou-se só o caminho, sem reescrever o que foi dito.** O runbook de migração ganhou uma linha definindo `$KOBE_DEV`/`$KOBE_PROD`, para continuar executável.
+- **Verificador de portabilidade** (`tests/portability_guard.sh` + `tests/test_portability.py`), espelhando o do plugin Coder. Roda **junto da suíte** (faxina sem trava volta), usa `git grep` sobre o tree rastreado, e **espelha as exclusões de `EXCLUDE_PATHS` do `infra/publish.sh`** para não dar alarme falso em `docs/runbooks/`, que não vai ao público. Placeholders genéricos (`/home/seu_usuario`, `/home/x`) são explicitamente permitidos — se o guard os acusasse, empurraria a correção certa de volta para a errada.
+
+**Fora dos quatro blocos, e sinalizado:** `tests/test_prompt_aging.py` passou a falhar **durante** esta sessão sem que eu tocasse nele. Diagnóstico: `NOW` estava **cravado** em `datetime(2026, 8, 20, 12, 0, 0)` enquanto o código sob teste calcula a idade contra o **relógio vivo**. As duas referências se afastam com as horas: `days=12` virou 12,5 dias reais e o `round()` levou para 13. Passou de manhã, quebrou à noite. Não é instabilidade — é bomba-relógio, e falharia para todo mundo a partir de agora. Corrigido em uma linha (`NOW = datetime.now(timezone.utc)`), preservando a intenção do teste. **Foi uma ampliação de escopo que eu fiz** para poder entregar a suíte verde que foi pedida; se o operador preferir reverter e tratar à parte, é `git revert` só desse trecho.
+
+**Testes (ambiente de desenvolvimento):** **314 passaram, 4 falharam.** As 4 são as **mesmas** pré-existentes de `tests/test_resume.py` (`KeyError: 'curated_core'`), fora de escopo por instrução. **Nenhuma falha nova.** +31 testes nesta rodada: gate 68→87 (pares âncora-ancorada/gêmea-solta, escopo de frase, auto-âncora, idiom de urgência), 8 do resolvedor de raiz do Kobe, 4 do verificador de portabilidade.
+Duas travas que não são decorativas: o verificador foi **testado por mutação** (planta um caminho de operador num repo descartável e confirma que ele acusa — um guard que não sabe falhar deixa o placar verde para sempre); e os casos de âncora são **pares** (frase ancorada silencia / gêmea sem âncora acende), porque sem o par um bug que silenciasse tudo passaria batido.
+
+**Backup do `CLAUDE.md`:** `.local/backups/CLAUDE.md.20260820-212405.bak`, tirado **antes** da primeira letra, md5 conferido contra o original (`bc5a7d81…`). Regra inegociável do operador.
+
+**Deploy:** **não feito**, por instrução. Entrega na branch `coder/b7bec0ad` com a suíte verde. O ciclo dev → repo dev → prod → público é chamada do operador.
+
+**Reversão:** tudo aditivo/localizado, sem migração e sem estado. O gate segue com `TEMPORAL_GATE_ENABLED=false` por padrão (flag off + restart desliga sem tocar em código). `git revert` do commit desfaz regra, filtro, faxina e verificador; `infra/sync-prod.sh` volta pelo mesmo revert, se um dia for preciso.
+
+### Gate de referência temporal na saída — modo observação, atrás de flag (2026-08-20)
+
+**Operador pediu:** um gate que impeça o agente de afirmar **quando** algo aconteceu sem ter conferido ("desde ontem", "quando subimos isso", "semana passada"), sob **duas restrições duras**: (1) tem que ser **código, não instrução de prompt** — instrução já existe no contrato e vazou mesmo assim; (2) **não pode impactar a latência** — ele quer garantia, não promessa. E foi explícito: *"não aceito 'vamos codar e ver no que dá'. Se os números não fecharem, não é codado"*.
+
+**Por quê:** a regra do contrato (*"Nada relativo ao TEMPO sem conferir o tempo"*) não tem **gatilho** — escrever um advérbio não parece uma ação, então não dispara verificação nenhuma. E não existia **nenhum passo** entre o agente terminar de escrever e o operador receber: o texto saía do `claude -p`, passava por `_resolve_claude` (que só trata erro/timeout), levava formatação de markdown e ia pro Telegram. Linha direta. Todo o grounding do Kobe vivia do lado da **entrada** (`bot/memory/grounding.py`); a saída não tinha nenhum.
+
+**A medição veio antes do código, e mudou o desenho.** Corpus: **1.644 respostas reais do assistant** (tabela `messages`, mai→ago/2026; mediana de 1.546 caracteres).
+
+- **A lista "óbvia" de marcadores está errada, e o corpus prova.** Uma sondagem ampla mostrou que os candidatos naturais são **mobília da linguagem do agente**, não afirmação temporal: `agora` aparece em **57,1%** das respostas, `antes de` em **39,0%**, `hoje` em **32,5%** (no Kobe "hoje" quase sempre significa *atualmente* — *"hoje cada conversa é meio amnésica"*), `quando você` em **18,0%** (futuro/condicional). Uma lista com esses acenderia em **36,4% dos turnos** — desenho errado. Apertando para só o retrospectivo duro: **9,9%**.
+- **Falso positivo, classificado à mão** em 25 frases marcadas amostradas uniformemente: **3 de 25 (12%)** eram falso positivo puro (menção meta à própria palavra, hipótese condicional, conhecimento geral do mundo). Mas o achado que redesenhou tudo: **~2/3 das afirmações temporais verdadeiras ESTAVAM ancoradas** — o turno tinha rodado `systemctl`, `ps`, `git log`, `stat` ou consultado a agenda naquele mesmo turno. **A pergunta que importa não é "isto é afirmação temporal?" — é "isto tem lastro?"**.
+- **A opção de segunda passada num modelo barato foi MEDIDA E REPROVADA.** Sobre só as frases marcadas (nunca a resposta inteira), `gpt-4o-mini`: **p50 667 ms · p95 1.646 ms · max 4.412 ms** por frase — e **23 de 25 vereditos voltaram "sim"**. Ela **confirma em vez de filtrar**: pagaria-se de 0,7 a 1,6 segundo por turno aceso para receber de volta o que o nível 1 já dizia de graça. Descartada por medição, não por preferência. A opção de devolver ao próprio agente cai pelo mesmo motivo, mais cara.
+- **Custo do nível 1, medido:** o desenho "casa primeiro, mascara depois" custa **140 µs** por resposta no caminho comum (~90% dos turnos), contra 217 µs do "mascara sempre". Latência esperada por turno: **~0,15 ms** — cerca de 0,003% de um turno típico.
+
+**Foi feito:**
+- **`bot/temporal_gate.py`** (novo): dois níveis. **Nível 1** varre a resposta final atrás de marcador retrospectivo (regex compilada **uma vez no import**); se nada casa, devolve `None` e o turno segue — zero latência adicional, e é a maioria esmagadora dos turnos. **Nível 2 (a)**, só quando o nível 1 acende: cruza com o rastro de ferramentas do turno — afirmação com fonte consultada tem lastro; sem fonte nenhuma é confabulação quase certa. Custo: leitura de um `bool`. As opções (b) e (c) **não** foram implementadas, e o motivo com os números está no cabeçalho do módulo, para ninguém "melhorar" isso depois sem refazer a medição.
+- **`bot/temporal_markers.toml`** (novo): a lista mora em **arquivo de configuração legível e editável**, não enterrada na lógica — apertar a malha é edição de config, não patch. Traz registrado *por que cada candidato ficou de fora*, com o percentual do corpus. Máscaras: bloco de código, código inline, linha de citação, trecho curto entre aspas e frase de ack — o gate age **só na resposta nova**, nunca em citação do operador nem dentro de código.
+- **`bot/progress.py` e `bot/telegram_handler.py`**: sinal `touched_temporal_source` nos dois contadores de `tool_use` do turno, setado no **mesmo laço** onde a detecção de ack (`kobe-notify`) já lê o comando do Bash hoje. Nenhuma chamada nova, nenhum evento novo — uma comparação de substring por bloco. Precisa existir nos dois porque o caminho de background não tem `ProgressReporter`.
+- **`bot/telegram_handler.py::_resolve_claude`**: o gancho vai imediatamente antes do `return reply_text`. É o **único ponto** por onde passam os dois caminhos de resposta (inline e background), então um lugar cobre tudo. `temporal_probe_fn` entra como kwarg **opcional** (default `None`) — nenhuma chamada existente quebra.
+- **Modo observação: o gate SÓ LOGA.** `temporal_gate marked=N grounded=<bool> action=observe markers=[…] snippet="…"`, em WARNING quando não há lastro (o caso que ele existe pra pegar) e INFO quando há. **Não altera a resposta, não anexa ressalva, não devolve nada ao agente.** Deixar o gate **agir** é aprovação separada do operador, depois de ver os números reais de produção — foi assim que o plano foi aprovado.
+- **`.env.example`**: `TEMPORAL_GATE_ENABLED=false` (default off). Rollback = flag off + restart, sem tocar em código.
+- **Robustez:** TOML ilegível **não derruba o bot** — loga ERROR alto e desliga o gate (pior caso vira o comportamento de hoje, não indisponibilidade). E o gancho tem `try/except` largo e comentado: **um bug no gate nunca pode comer uma resposta do operador**.
+
+**Testes (ambiente de desenvolvimento):** `tests/test_temporal_gate.py`, **68 testes, todos verdes**. Os casos que **não** podem acender não foram inventados: são os **falso-positivos reais colhidos no corpus** (menção meta, hipótese, conhecimento do mundo) mais as construções que a sondagem provou serem linguagem corrente do agente. Cobre: acende em afirmação retrospectiva; não acende em mobília/ack/bloco de código/código inline/citação; acende **fora** do bloco mesmo com bloco presente (a máscara descarta o marcador, não a resposta); `grounded` reflete o rastro de ferramentas; mapeamento de fonte temporal (15 casos, incl. Bash que **não** é fonte); os dois contadores marcam o sinal e a detecção de ack segue intacta; a flag liga/desliga nos formatos aceitos.
+
+Três travas merecem destaque: **(1)** com a flag off, `observe` e `scan` são **sabotados para explodir** — se o caminho tocasse o gate, o teste falharia em vez de passar em silêncio; **(2)** com a flag on, o teste compara a saída caractere a caractere com a entrada, provando que o modo observação **não altera a resposta**; **(3)** um gate que levanta exceção **não derruba a entrega**. Há ainda um guarda-corpo de custo (teto folgado de 5 ms, alarme de incêndio e não benchmark) que pega regressão de desenho — alguém trocar o "casa-primeiro" por "mascara-sempre", ou compilar regex por chamada.
+
+**Suíte completa: 283 passaram, 4 falharam.** As 4 são as **mesmas** pré-existentes de `tests/test_resume.py` (`KeyError: 'curated_core'`), medidas na árvore limpa **antes** de tocar em qualquer coisa (baseline: 215 passaram, as mesmas 4 falharam). **Nenhuma falha nova**; +68 testes. Fora de escopo por instrução do operador, não foram tocadas.
+
+**Limites conhecidos, ditos sem maquiagem:**
+- **Isto é uma rede, não um muro.** Regex sobre linguagem natural aberta tem recall finito. Perífrase ("lá pelo começo do ciclo"), construção nova e afirmação temporal implícita sem marcador ("o deploy que quebrou isso") **passam batido**. A lista em arquivo editável existe justamente pra apertar a malha quando um vazamento concreto aparecer.
+- **Hipótese condicional ainda acende** ("se foi só algum erro de entrega da última vez"). Distinguir exige análise sintática, não regex; um padrão pra "se" abriria um buraco largo demais no recall. Está **fixado num teste nomeado como limite conhecido**, não escondido. Custo real em modo observação: uma linha de log a mais.
+- **Os ~3% de turnos que afirmariam tempo sem fonte é ESTIMATIVA**, derivada da amostra de 25 — não medição direta. É exatamente esse número que o modo observação passa a medir de verdade em produção.
+- **Não exercitado contra o Telegram real** (nenhuma mudança toca o envio; o gate é read-only sobre a resposta nesta fase).
+
+**Commits:** ver o log da branch `coder/b7bec0ad`.
+
+**Reversão:** dois níveis. Imediato e sem deploy: `TEMPORAL_GATE_ENABLED=false` + restart (default já é off). Definitivo: `git revert` dos commits da branch — as mudanças são aditivas e localizadas, sem migração, sem estado persistido, sem schema.
+
 ### Reação de "transcrição pronta" (✍) volta a funcionar — emoji normalizado e validado contra a lista do Bot API (2026-08-20)
 
 **Operador pediu:** consertar um bug **em produção**, publicado no repo público na v0.21.0 hoje: a reação 👀 de recebimento funciona, mas a troca para ✍️ é **recusada pelo Telegram**. Junto com o conserto, blindar a **classe** de erro — trocar o emoji no `.env` no futuro nunca mais pode quebrar calado em produção.
@@ -19,7 +119,7 @@ O agravante não é o caractere errado — é que a recusa era **muda**. Reaçã
 - **Fonte de verdade da lista**: `telegram.constants.ReactionEmoji`, da própria `python-telegram-bot` (já instalada), em vez de uma lista digitada à mão — quando o Telegram muda a lista, ela chega junto com a atualização da lib, sem cópia velha apodrecendo no nosso código. Custo consciente: `bot/reactions.py`, que era livre de PTB, passa a importá-la.
 - `bot/config.py`: leitura do `.env` deixa de ser crua. Ausente → default; **vazia → `""`**, que segue sendo "estágio desligado de propósito", sem aviso; **inválida → WARNING nomeando chave, valor recusado e o emoji usado no lugar**, caindo no default. Cair no default (em vez de não reagir) porque o que vale é o **sinal**, não o desenho: melhor o sinal aparecer com o padrão e o log explicando do que sumir calado.
 - Corrigidos os textos que **afirmavam algo que o log desmente** — o docstring de `bot/reactions.py` dizia que "✍️ está na lista permitida e funciona". `.env.example` também trazia a forma com marcador (é o modelo que as pessoas copiam).
-- **Produção não precisa de edição de `.env`**: verifiquei que `/home/felipe/kobe/.env` só define `TELEGRAM_REACTIONS_ENABLED=true` e nenhum emoji — ou seja, usava exatamente o default do código. O fix no código resolve.
+- **Produção não precisa de edição de `.env`**: verifiquei que `$KOBE_PROD/.env` só define `TELEGRAM_REACTIONS_ENABLED=true` e nenhum emoji — ou seja, usava exatamente o default do código. O fix no código resolve.
 
 **Testes (ambiente de desenvolvimento):** `tests/test_reactions.py` foi de 7 para 18 testes. Travas novas: os dois defaults estão na lista do Bot API (a trava mais direta — é o que faltava); `"✍️"` → `"✍"` (o bug literal), inclusive com espaços em volta; ❤️‍🔥 / 🤷‍♂️ / 🤷‍♀️ **preservam** o VS16 (impede que o conserto ingênuo quebre estes três); `"❤‍🔥"` → `"❤️‍🔥"` (sentido inverso); 🎧/👂/lixo são rejeitados e **não** viram chamada à API; `.env` inválido cai no default **com** aviso; `.env` vazio continua desligando o estágio **sem** aviso; e a tabela canônica não tem colisão (se o Telegram acrescentar um emoji que colida sem o VS16, quebra no teste em vez de normalizar para o emoji errado silenciosamente).
 
@@ -437,7 +537,7 @@ usam. Uma fonte só de verdade.
 - **Plugin Coder intacto** neste commit (de-risk do dispatch vivo de prod). A migração do
   Coder pra `bot/sala/` é o commit 2, declarado como follow-up no plano (§7/§9).
 
-**Testes (dev VPS, venv `/home/felipe/projetos/kobe/.venv`):**
+**Testes (dev VPS, venv `$KOBE_HOME/.venv`):**
 - `tests/test_sala_core.py` — 10 testes da lógica pura + state atômico: roundtrip/patch,
   escrita atômica sem `.tmp` órfão, `pane_busy`/`extract_pane_last`, `turn_is_over`,
   montagem do launcher (com e sem `--settings`), `should_kill`, `is_active`,
@@ -476,7 +576,7 @@ Telegram quando um turno do Kobe crashava (episódio com `LimitOverrunError` ~12
   `async with`, espelhando a proteção que o background já tinha. Remove os cancels
   manuais duplicados.
 
-**Testes (dev VPS, venv `/home/felipe/projetos/kobe/.venv`):**
+**Testes (dev VPS, venv `$KOBE_HOME/.venv`):**
 - `tests/test_claude_runner_buffer.py` — fake-claude cuspindo linha JSON > 64KB; passa
   com o fix e (provado por monkeypatch a 64KB) falha sem ele. Teardown do subprocess no
   overrun validado (sem warning de "Event loop closed").

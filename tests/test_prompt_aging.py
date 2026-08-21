@@ -30,7 +30,15 @@ from bot.claude_runner import build_prompt
 from bot.memory import aging, background_state
 
 
-NOW = datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+# Referência do "agora" dos fixtures. Tem que ser o relógio VIVO, porque o
+# código sob teste (`bot/memory/aging.py`) calcula a idade contra o relógio
+# vivo — se a referência daqui for uma data fixa, as duas se afastam com o
+# passar das horas e o teste começa a falhar sozinho.
+#
+# Era `datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)`: funcionou no dia
+# em que foi escrito e passou a falhar na mesma noite, quando `days=12` virou
+# 12,5 dias reais e `round()` levou pra 13. Bomba-relógio, não flakiness.
+NOW = datetime.now(timezone.utc)
 
 
 def _iso(**delta) -> str:

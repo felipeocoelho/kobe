@@ -34,16 +34,53 @@ logger = logging.getLogger("kobe.apolo_handlers")
 # ============================================================================
 
 
+def _kobe_home() -> Path:
+    """Raiz do Kobe — FONTE ÚNICA (antes eram 4 cópias da mesma expressão).
+
+    Ordem de resolução:
+      1. `$KOBE_HOME`, que é o que o bot injeta em execução normal;
+      2. **derivação da localização deste módulo** (`<raiz>/bot/apolo_handlers.py`
+         → sobe dois níveis), pra qualquer instalação funcionar sem depender de
+         env — inclusive `pytest` rodando da árvore, ou um usuário que clonou o
+         repo noutro caminho.
+
+    Nunca há caminho de máquina como default. Havia: os quatro pontos usavam
+    `os.environ.get("KOBE_HOME", <caminho absoluto da máquina de um operador>)`.
+    Em qualquer outra máquina sem a env, isso resolvia pra um diretório
+    inexistente e o erro aparecia longe da causa ("script do Apolo não
+    encontrado"), apontando pro lugar errado.
+
+    Se nem a env nem a derivação apontarem pra algo que se pareça com uma raiz
+    do Kobe, **levanta** com o motivo escrito. Falhar alto no ponto certo é
+    melhor que devolver um caminho fantasma e quebrar três chamadas adiante.
+    """
+    bruto = (os.environ.get("KOBE_HOME") or "").strip()
+    if bruto:
+        candidato = Path(bruto).expanduser().resolve()
+        if (candidato / "bot").is_dir():
+            return candidato
+        logger.warning(
+            "KOBE_HOME=%s não parece uma raiz do Kobe (falta bot/) — "
+            "derivando da localização do módulo", candidato,
+        )
+    derivado = Path(__file__).resolve().parent.parent
+    if (derivado / "bot").is_dir():
+        return derivado
+    raise RuntimeError(
+        "não consegui resolver a raiz do Kobe: KOBE_HOME="
+        f"{bruto or '(vazia)'} e a derivação por localização do módulo deu "
+        f"{derivado}, que não tem bot/. Defina KOBE_HOME no .env."
+    )
+
+
 def _apolo_script(name: str) -> Path:
     """Resolve path absoluto pra um script do plugin Apolo."""
-    kobe_home = Path(os.environ.get("KOBE_HOME", "/home/felipe/projetos/kobe"))
-    return kobe_home / "plugins" / "public" / "apolo" / "scripts" / name
+    return _kobe_home() / "plugins" / "public" / "apolo" / "scripts" / name
 
 
 def _venv_python() -> Path:
     """Python do venv do Kobe."""
-    kobe_home = Path(os.environ.get("KOBE_HOME", "/home/felipe/projetos/kobe"))
-    return kobe_home / ".venv" / "bin" / "python"
+    return _kobe_home() / ".venv" / "bin" / "python"
 
 
 async def _run_apolo_script(name: str, *args: str, timeout: int = 60) -> tuple[int, str, str]:
@@ -189,7 +226,7 @@ async def on_command_contatos_promover(update: Update, context: ContextTypes.DEF
         return
 
     filename = context.args[0]
-    kobe_home = Path(os.environ.get("KOBE_HOME", "/home/felipe/projetos/kobe"))
+    kobe_home = _kobe_home()
     arquivo = kobe_home / "user-data" / "imports" / filename
     if not arquivo.is_file():
         await update.effective_message.reply_text(
@@ -247,7 +284,7 @@ async def on_document_for_apolo(update: Update, context: ContextTypes.DEFAULT_TY
 
     fname_original = doc.file_name or ""
     fname = fname_original.lower()
-    kobe_home = Path(os.environ.get("KOBE_HOME", "/home/felipe/projetos/kobe"))
+    kobe_home = _kobe_home()
     imports_dir = kobe_home / "user-data" / "imports"
 
     # Rota 2: re-upload de peneira .md (curada pelo operador)

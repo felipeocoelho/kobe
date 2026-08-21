@@ -62,7 +62,7 @@ def test_sala_name() -> None:
 
 def test_strategist_prompt() -> None:
     p = sala_prompt.build_strategist_system_prompt(
-        kobe_home=Path("/home/felipe/kobe"), objetivo="analisa a pesquisa dos alunos",
+        kobe_home=Path("/opt/kobe"), objetivo="analisa a pesquisa dos alunos",
         missao_id="2026-06-26-pesquisa", workspace_rel="workspace")
     assert "ESTRATEGISTA" in p
     assert "analisa a pesquisa dos alunos" in p

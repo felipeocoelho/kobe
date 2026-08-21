@@ -4,7 +4,7 @@
 > foco no **tempo do envio do operador até ele ver a resposta**. Segurança
 > entrou só como passada leve (ver final). Números reais extraídos de
 > `journalctl --user -u kobe` (164 turnos logados) + estado de runtime da prod
-> VPS (`/home/felipe/kobe`).
+> VPS (`$KOBE_PROD`).
 
 ---
 
@@ -156,7 +156,7 @@ Ordenados por impacto provável na **latência percebida** (maior primeiro).
   processo Node novo a cada mensagem (boot do CLI + auto-load do CLAUDE.md de 26KB
   + SOUL/USER/PREFERENCES ~8KB). Custo fixo ~1–3s, estrutural ao modelo de
   invocação. *Nota boa:* os conectores MCP do projeto estão **vazios** (`proj
-  /home/felipe/kobe → []`), então **não** há custo de cold-start de MCP — um
+  $KOBE_PROD → []`), então **não** há custo de cold-start de MCP — um
   suspeito que descartei com evidência.
 
 - [ ] **Sem medição de TTFT nem do overhead pré-Claude** — a instrumentação atual

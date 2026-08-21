@@ -5,7 +5,7 @@
 --
 -- Antes de rodar, opcionalmente faça backup adicional via:
 --   Database → Backups → Create backup
--- (já temos backup lógico em /home/felipe/projetos/kobe/backups/)
+-- (já temos backup lógico em $KOBE_HOME/backups/)
 -- =============================================================================
 
 -- 1. Topics: UNIQUE composta (chat_id, thread_id)
