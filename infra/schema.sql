@@ -206,9 +206,9 @@ UPDATE topics
 -- Vide ~/.claude/plans/claude-quero-conversar-com-iterative-sonnet.md pro design.
 --
 -- Tabelas:
--- 1. contacts          — catálogo unificado (pessoa OU grupo WhatsApp).
---                       Reaproveitável por outros canais (email, ClickUp etc.).
--- 2. whatsapp_messages — histórico bruto de OUT/IN do plugin apolo.
+-- 1. contacts — catálogo unificado (pessoa OU grupo WhatsApp).
+--               Reaproveitável por outros canais (email, ClickUp etc.).
+--               É catálogo de DESTINATÁRIO, não histórico de conversa.
 --
 -- Extensão pg_trgm é usada pra busca fuzzy por nome ("Pedro" → "Pedrão").
 -- ============================================================================
@@ -244,26 +244,18 @@ CREATE INDEX IF NOT EXISTS contacts_aliases_gin
 CREATE INDEX IF NOT EXISTS contacts_tipo_oculto
   ON contacts(tipo, oculto);
 
--- Tabela: whatsapp_messages (histórico bruto do canal WhatsApp via Evolution)
--- direcao='out' = Apolo enviou; direcao='in' = webhook recebeu.
--- jid_chat sempre identifica o chat (pessoa OU grupo); jid_remetente difere em grupos.
-CREATE TABLE IF NOT EXISTS whatsapp_messages (
-  id              TEXT PRIMARY KEY,              -- message_id da Evolution (dedup natural)
-  jid_chat        TEXT NOT NULL,
-  jid_remetente   TEXT NOT NULL,
-  direcao         TEXT NOT NULL CHECK (direcao IN ('in', 'out')),
-  tipo            TEXT NOT NULL,                 -- text, image, audio, document, video, sticker, ...
-  conteudo        TEXT,                          -- texto livre (caption pra mídia)
-  midia_path      TEXT,                          -- path local relativo a user-data/whatsapp/midia/
-  timestamp       TIMESTAMPTZ NOT NULL,
-  lida            BOOLEAN NOT NULL DEFAULT FALSE,
-  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX IF NOT EXISTS wa_msgs_chat_ts
-  ON whatsapp_messages(jid_chat, timestamp DESC);
-CREATE INDEX IF NOT EXISTS wa_msgs_nao_lidas
-  ON whatsapp_messages(timestamp DESC) WHERE lida = FALSE;
+-- NÃO existe tabela de mensagem de WhatsApp aqui — e é de propósito (2026-08-24).
+-- O Kobe não guarda conteúdo de WhatsApp: a fonte única é o banco da própria
+-- Evolution API, que já registra o que entra e o que sai. A tabela
+-- `whatsapp_messages` que morava neste bloco foi removida na v0.3.0 do plugin
+-- apolo; ela era herança do backend WPPConnect, que não tinha banco nenhum.
+--
+-- Consequência desejada: uma instalação do Kobe **sem** Evolution não cria
+-- tabela de WhatsApp nenhuma. O plugin apolo é opcional de verdade.
+--
+-- Pra remover a tabela de uma instalação que já a tem, vide
+-- `infra/migrations/004_remove_whatsapp_messages.sql` — e leia o pré-requisito
+-- de backup antes.
 
 -- ============================================================================
 -- New Chat Manager — Fase 2 (2026-06-01)

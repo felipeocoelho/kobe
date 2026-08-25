@@ -4,6 +4,51 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### O Kobe para de guardar conteúdo de WhatsApp — a tabela sai do core (2026-08-24)
+
+**Operador pediu:** acabar com a cópia de conteúdo de WhatsApp dentro do Kobe, recebido e enviado. Palavra dele: *"tudo que é WhatsApp, conteúdo do lado de dentro do WhatsApp, tem que estar na base da Evolution e não no Kobe. Se for necessário guardar algo que a gente envie por aqui, se puder ficar na base da Evolution, melhor. Até porque o Kobe pode ser utilizado por um segundo usuário que poderia existir sem Evolution API."*
+
+**Por quê:** a gravação nasceu com o backend WPPConnect, que não tinha banco nenhum — se o Kobe não anotasse, o dado sumia. Em 30/05/2026 o backend virou Evolution, que tem banco próprio, e ninguém desligou a anotação. Virou cópia redundante rodando por ~3 meses. E, pior que a redundância: `whatsapp_messages` estava declarada no schema do **core**, então uma instalação do Kobe que nunca vai falar com WhatsApp criava tabela de WhatsApp assim mesmo.
+
+**Os números, medidos na fonte antes de mexer** (não herdados de memória):
+
+- `whatsapp_messages`: **15.642 linhas** (15.362 `in`, 280 `out`), 1.266 com mídia. Varri a tabela inteira paginando de mil em mil — `.limit(20000)` no PostgREST devolve 1.000 e mente por omissão.
+- Mídia em disco: **2,0 GB**, 1.259 arquivos.
+- Evolution: **15.540 mensagens**, das quais **286 `fromMe=true`**. Conferido caso a caso que o que o Kobe envia **já fica registrado lá** com o texto completo.
+- Concentração do acervo: os dois grupos "Networking" — que **nem estão no catálogo do operador** — somam **11.546 linhas (73,8%)** e 814 dos 1.266 arquivos de mídia.
+
+**Foi feito (no core):**
+
+- **`/whatsapp_inbox` removido** — handler, registro em `bot/main.py` e a entrada no menu do Telegram (que vinha do manifest do plugin). Decisão do operador: *nunca usou*. Ele pergunta ao agente, que consulta a Evolution na hora. Junto morreu um filtro que era decorativo: o `nao-lidas` filtrava por `lida=false`, e **nada no código jamais marcou mensagem como lida** — as 15.362 estavam `false` desde maio.
+- **`whatsapp_messages` saiu de `infra/schema.sql`**, junto com os dois índices. No lugar ficou um comentário explicando que a ausência é deliberada — senão alguém "conserta" a falta daqui a seis meses. **`contacts` fica**: é catálogo de destinatário, não histórico, e é o que resolve "manda pro Pedro".
+- **`infra/migrations/004_remove_whatsapp_messages.sql`** — a remoção da estrutura, com os dois pré-requisitos escritos na cara (backup conferido + código novo já no ar, senão o webhook antigo recria linha depois).
+- **`infra/decommission_whatsapp_acervo.py`** — dump da tabela, conferência, mídia movida e linhas apagadas. Detalhe abaixo.
+- **`docs/runbooks/decomissionar-acervo-whatsapp.md`** — a ordem de execução pro Hal, com a armadilha do `APOLO_MIDIA_DIR` travada por escrito.
+- Docs: `docs/testes-apolo.md` e `docs/migracao-evolution.md` corrigidos nos pontos que mandavam validar contra a tabela.
+
+**O script de decomissionamento — o objeto perigoso desta entrega.** Ele apaga 15 mil linhas e move 2 GB contra um banco que é **o mesmo de dev e de produção**. O desenho segue a condição que o operador colocou (*"não existe a menor possibilidade de fazer qualquer coisa que não seja reversível"*):
+
+- **ensaio é o default** — sem `--executar` ele não escreve nada, só relata;
+- **o backup é gate, não etapa**: ele dumpa, **relê o arquivo gravado** e compara a contagem com o banco. Não bateu, aborta sem apagar nada;
+- a mídia é **movida**, não copiada — `mv` no mesmo disco, instantâneo, e desfazível com um `mv` de volta;
+- **não entra em laço infinito se o `DELETE` não tiver efeito** (permissão/RLS negando em silêncio): ver o mesmo lote de ids duas vezes aborta, em vez de rodar pra sempre contra a produção imprimindo progresso falso. Achado na revisão do próprio diff, com teste;
+- ele **recusa sobrescrever** um backup que já existe;
+- na conferência final, avisa se a contagem voltou a crescer — sintoma de webhook antigo ainda no ar.
+
+**Eu não executei o script, de propósito.** Quem roda é o Hal, com o operador ciente. Runbook em `docs/runbooks/decomissionar-acervo-whatsapp.md`.
+
+**Testes (ambiente de desenvolvimento):**
+
+- **Suíte completa: 333 passaram, 0 falharam** (eram 319; entraram 14 novos). Verificador de portabilidade verde.
+- **Os 14 testes novos miram no gate, não no caminho feliz** (`tests/test_decommission_whatsapp.py`): que `conferir_dump` acusa dump truncado e estoura em arquivo corrompido — se ele mentir, libera-se uma deleção sem rede; e que `apagar_linhas` esvazia tudo, **termina** em tabela vazia e pagina em lotes (um loop que não avança rodaria pra sempre contra a produção).
+- **Backup exercido de verdade contra o banco real**: dump das 15.650 linhas → 984 KB comprimidos, conferência passou (15.650 no arquivo = 15.650 no banco), amostra do conteúdo verificada. Escrita só num diretório descartável; nada foi apagado.
+- **Ensaio conferido nas duas árvores**: apontado pra produção, o script enxerga os 1.261 arquivos / 2,0 GB reais. Foi assim que apareceu um detalhe que o runbook precisava fixar — `APOLO_MIDIA_DIR` do `.env` manda no caminho da mídia, então **rodar com o `.env` errado faria backup de pasta vazia**.
+- Do lado do plugin (repo separado, v0.3.0): webhook respondeu 200 a payloads **reais** da Evolution sem gravar linha nenhuma; envio real chegou, apareceu na Evolution com o texto completo e **não** entrou na tabela.
+
+**O que o operador perde, dito na cara:** mídia recebida deixa de existir no servidor — fica só no aparelho. Testei antes de ele decidir: buscar mídia antiga sob demanda pela Evolution **falhou nas 3 amostras** (link do CDN do WhatsApp expira; `S3_ENABLED=false` e a tabela `Media` dela está vazia). Risco aceito por ele — *"pede pra pessoa mandar de novo"*.
+
+**Reversão:** `git revert` dos commits desta entrada devolve o código (estado limpo anterior: `a7187a7`). O **dado** só volta pelo backup que o script produz, enquanto a pasta existir — depois de apagada, não há volta. Por isso o backup é gate.
+
 ### Suíte inteira verde — fixtures do resume derivados da fonte, e a trava que faltava (2026-08-21)
 
 **Operador pediu:** consertar as 4 falhas de `tests/test_resume.py` que arrastavam há semanas — revogando a instrução anterior de "não encostar nelas". Com três condições: **confirmar o diagnóstico na fonte** antes de mexer (se fosse bug real de produção, parar e reportar); **derivar o fixture do formato real** em vez de repetir literal à mão; e uma **trava dura — proibido alterar `bot/resume.py` ou qualquer código de produção para fazer teste passar** (teste que só passa mexendo em produção é achado, não conserto).

@@ -333,21 +333,20 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("conversas_global", on_command_conversas_global))
     app.add_handler(CommandHandler("conversa", on_command_conversa))
     app.add_handler(CommandHandler("renomear", on_command_renomear))
-    # Apolo (plugin WhatsApp) — handlers de gestão de contatos + grupos + inbox.
+    # Apolo (plugin WhatsApp) — handlers de gestão de contatos + grupos.
     # Envio em si é via subagente (Agent(subagent_type="apolo", ...)) — não tem
-    # /apolo_enviar como comando direto.
+    # /apolo_enviar como comando direto. Não há comando de leitura: o Kobe não
+    # guarda conteúdo de WhatsApp (a fonte é a Evolution, consultada na hora).
     from bot.apolo_handlers import (  # noqa: E402
         on_command_contatos_buscar,
         on_command_contatos_listar,
         on_command_contatos_promover,
         on_command_whatsapp_grupos,
-        on_command_whatsapp_inbox,
     )
     app.add_handler(CommandHandler("contatos_buscar", on_command_contatos_buscar))
     app.add_handler(CommandHandler("contatos_listar", on_command_contatos_listar))
     app.add_handler(CommandHandler("contatos_promover", on_command_contatos_promover))
     app.add_handler(CommandHandler("whatsapp_grupos", on_command_whatsapp_grupos))
-    app.add_handler(CommandHandler("whatsapp_inbox", on_command_whatsapp_inbox))
     # /retomar_<id_curto> é gerado dinamicamente nas listagens; intercepta
     # via MessageHandler com regex (CommandHandler não suporta sufixo).
     # IMPORTANTE: tem que vir ANTES do MessageHandler(filters.TEXT, on_text)

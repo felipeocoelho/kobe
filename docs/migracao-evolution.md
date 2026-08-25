@@ -284,13 +284,11 @@ Smoke funcional do Apolo no Telegram:
 4. Resposta inversa: do celular (qualquer chat externo) → mande algo
    pro chip da Kobe.
 
-5. No banco Supabase, confira que entrou:
-   ```sql
-   select id, direcao, jid_chat, conteudo, metadata->>'backend', timestamp
-   from whatsapp_messages
-   order by timestamp desc limit 5;
-   ```
-   Deve aparecer linhas com `metadata.backend = "evolution"`.
+5. ~~No banco Supabase, confira que entrou~~ — **superado em 24/08/2026.**
+   Este passo valia quando o Kobe copiava mensagem recebida pra uma tabela
+   local. Ele parou: a fonte única virou o banco da própria Evolution, e a
+   tabela local foi removida do Kobe. Pra conferir que a mensagem entrou,
+   consulte a Evolution: `POST {EVOLUTION_API_URL}/chat/findMessages/{instance}`.
 
 ---
 

@@ -1,8 +1,15 @@
 # Manual de testes — Plugin Apolo (WhatsApp)
 
-> Estilo "runbook + execução guiada" (vide `feedback_runbooks`): cada cenário
-> é uma sequência clara de passos pro operador rodar e validar o resultado
-> visualmente. Não é teste automatizado.
+> Estilo "runbook + execução guiada": cada cenário é uma sequência clara de
+> passos pro operador rodar e validar o resultado visualmente. Não é teste
+> automatizado.
+
+> ⚠️ **Este manual é da era WPPConnect (v0.1.0) e está desatualizado em bloco.**
+> O backend virou Evolution API em 30/05/2026 e o WPPConnect foi removido do
+> plugin na v0.3.0 — então tudo que fala de porta 21465, containers
+> `infra/wppconnect/` e proxy IPRoyal **não vale mais**. As seções que tratavam
+> de armazenamento de mensagem foram corrigidas em 24/08/2026 (o Kobe não guarda
+> mais conteúdo de WhatsApp); o resto continua pendente de reescrita.
 
 **Pré-requisitos** (todos validados antes de começar):
 
@@ -28,10 +35,11 @@
 ```bash
 # No SQL Editor do Supabase, rodar:
 SELECT table_name FROM information_schema.tables
-WHERE table_schema='public' AND table_name IN ('contacts','whatsapp_messages');
+WHERE table_schema='public' AND table_name = 'contacts';
 ```
 
-Esperado: 2 linhas (contacts, whatsapp_messages).
+Esperado: 1 linha (`contacts`). **Não** deve existir tabela de mensagem — o Kobe
+não guarda conteúdo de WhatsApp desde a v0.3.0 do plugin; a fonte é a Evolution.
 
 ### A.2 — WPPConnect responde
 
@@ -173,11 +181,15 @@ Esperado:
 - Mensagem chega no WhatsApp.
 - Hal responde "✅ enviado pro <nome>".
 
-Validar no Supabase:
+Validar na Evolution (o Kobe não registra o envio — quem registra é ela):
 
-```sql
-SELECT * FROM whatsapp_messages WHERE direcao='out' ORDER BY timestamp DESC LIMIT 5;
+```bash
+curl -s -X POST "$EVOLUTION_API_URL/chat/findMessages/$EVOLUTION_INSTANCE" \
+  -H "apikey: $EVOLUTION_API_KEY" -H "Content-Type: application/json" \
+  -d '{"where":{"key":{"fromMe":true}},"page":1,"offset":5}' | jq '.messages.total'
 ```
+
+Esperado: a mensagem recém-enviada aparece entre as `fromMe: true`.
 
 ### D.1 — Envio com anexo
 
@@ -249,23 +261,30 @@ adiciona ao catálogo 3, 7, 12
 
 ## F — Recebimento (IN)
 
-### F.1 — Mensagem chega de contato conhecido
+> Desde a v0.3.0 do plugin, **o Kobe não guarda mensagem recebida**. O webhook
+> continua no ar, mas só observa e descarta — ele existe pra uma futura
+> notificação seletiva. A fonte de leitura é a Evolution.
+
+### F.1 — Mensagem chega e o Kobe NÃO guarda
 
 Pedir pra alguém (ou pro próprio número, se pareou conta secundária)
 mandar msg pro chip 2.
 
 Validar:
-- ✅ `/whatsapp_inbox` mostra a mensagem.
-- ✅ `whatsapp_messages` no Supabase tem linha com `direcao=in`.
-- ✅ Mídia (se houver) está em `user-data/whatsapp/midia/<id>.<ext>`.
+- ✅ `journalctl --user -u apolo-webhook -n 20` mostra a linha
+  `mensagem observada (não guardada)`.
+- ✅ **Nenhuma** tabela de mensagem foi criada/escrita no Supabase.
+- ✅ **Nenhum** arquivo novo em `user-data/whatsapp/midia/` (mídia não é baixada).
+- ✅ A mensagem está na Evolution:
+  `POST {EVOLUTION_API_URL}/chat/findMessages/{instance}` com `{"where":{},"page":1,"offset":5}`.
 
 ### F.2 — Mensagem de grupo desconhecido
 
 Pedir alguém mandar msg num grupo que VOCÊ NÃO usou ainda.
 
 Validar:
-- ✅ Mensagem aparece em `/whatsapp_inbox`.
 - ✅ Grupo NÃO entra no catálogo automaticamente (princípio lazy).
+- ✅ Nada foi gravado do lado do Kobe.
 
 ---
 
@@ -312,8 +331,8 @@ Se quiser zerar TUDO pra teste limpo:
 ```bash
 # Apaga sessão pareada (vai precisar de QR de novo)
 cd infra/wppconnect && docker compose down -v
-# Apaga contatos do Supabase
-psql ... -c "TRUNCATE contacts, whatsapp_messages;"
+# Apaga contatos do Supabase (só o catálogo — não há mais tabela de mensagem)
+psql ... -c "TRUNCATE contacts;"
 # Apaga arquivos de import
 rm -rf $KOBE_HOME/user-data/imports/*
 rm -rf $KOBE_HOME/user-data/whatsapp/midia/*
