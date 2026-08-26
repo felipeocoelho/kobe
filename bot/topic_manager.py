@@ -1,4 +1,4 @@
-"""Ciclo de vida de topics, sessions e messages no Supabase.
+"""Ciclo de vida de topics, sessions e messages no Postgres.
 
 Camada fina sobre o cliente: encontra-ou-cria o topic correspondente ao
 `message_thread_id` do Telegram, garante uma session ativa, e grava
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from supabase import Client
+from bot.db import KobeDB
 
 
 logger = logging.getLogger("kobe.topics")
@@ -70,7 +70,7 @@ def slugify(name: str) -> str:
 
 
 def get_topic_slug(
-    db: Client, chat_id: int, thread_id: Optional[int]
+    db: KobeDB, chat_id: int, thread_id: Optional[int]
 ) -> Optional[str]:
     """Slug do tópico (kebab-case de `topics.current_name`) ou None se
     ainda não está no banco / o nome não foi capturado.
@@ -84,17 +84,15 @@ def get_topic_slug(
     """
     if thread_id is None or thread_id == GENERAL_THREAD_ID:
         return "private" if chat_id > 0 else "general"
-    res = (
-        db.table("topics")
-        .select("current_name")
-        .eq("telegram_chat_id", chat_id)
-        .eq("telegram_thread_id", thread_id)
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT current_name FROM topics "
+        " WHERE telegram_chat_id = %s AND telegram_thread_id = %s"
+        " LIMIT 1",
+        (chat_id, thread_id),
     )
-    if not res.data:
+    if not row:
         return None
-    raw_name = (res.data[0].get("current_name") or "").strip()
+    raw_name = (row.get("current_name") or "").strip()
     if not raw_name:
         logger.info(
             "topic_context: tópico thread_id=%s sem current_name; "
@@ -108,7 +106,7 @@ def get_topic_slug(
 
 
 def set_topic_name(
-    db: Client,
+    db: KobeDB,
     *,
     chat_id: int,
     thread_id: int,
@@ -124,43 +122,45 @@ def set_topic_name(
     ou já estava com esse nome). O caller usa isso pra detectar rename
     real e disparar `rename_topic_dir` no filesystem.
     """
-    existing = (
-        db.table("topics")
-        .select("id, current_name")
-        .eq("telegram_chat_id", chat_id)
-        .eq("telegram_thread_id", thread_id)
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT id, current_name FROM topics "
+        " WHERE telegram_chat_id = %s AND telegram_thread_id = %s"
+        " LIMIT 1",
+        (chat_id, thread_id),
     )
-    if not existing.data:
+    if not row:
         # Tópico ainda não foi visto: cria a linha com o nome já preenchido.
         # `ensure_topic` faria upsert sem o nome — preferimos inserir aqui
         # com tudo de uma vez (evita uma rodada extra).
-        db.table("topics").upsert(
-            {
-                "telegram_chat_id": chat_id,
-                "telegram_thread_id": thread_id,
-                "current_name": name,
-                "last_activity_at": _now_iso(),
-            },
-            on_conflict="telegram_thread_id",
-        ).execute()
+        # ON CONFLICT tem que nomear a UNIQUE que EXISTE: a composta
+        # (telegram_chat_id, telegram_thread_id). A versao anterior deste
+        # codigo apontava para `telegram_thread_id` sozinha — uma UNIQUE que
+        # `infra/schema.sql` REMOVE explicitamente. Vide o CHANGELOG.
+        db.execute(
+            "INSERT INTO topics"
+            " (telegram_chat_id, telegram_thread_id, current_name, last_activity_at)"
+            " VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT (telegram_chat_id, telegram_thread_id) DO UPDATE"
+            "    SET current_name     = EXCLUDED.current_name,"
+            "        last_activity_at = EXCLUDED.last_activity_at",
+            (chat_id, thread_id, name, _now_iso()),
+        )
         return None
 
-    row = existing.data[0]
     previous = (row.get("current_name") or "") or None
     if previous == name:
         return None
 
-    db.table("topics").update({"current_name": name}).eq("id", row["id"]).execute()
-    db.table("topic_name_history").insert(
-        {"topic_id": row["id"], "name": name}
-    ).execute()
+    db.execute("UPDATE topics SET current_name = %s WHERE id = %s", (name, row["id"]))
+    db.execute(
+        "INSERT INTO topic_name_history (topic_id, name) VALUES (%s, %s)",
+        (row["id"], name),
+    )
     return previous
 
 
 def set_topic_status(
-    db: Client, *, chat_id: int, thread_id: int, status: str
+    db: KobeDB, *, chat_id: int, thread_id: int, status: str
 ) -> Optional[str]:
     """Atualiza `topics.status` em resposta a forum_topic_closed/reopened.
 
@@ -168,16 +168,15 @@ def set_topic_status(
     'deleted'. Retorna o `topics.id` modificado ou None se a linha não
     existir (evento sem topic prévio — improvável, mas defensivo).
     """
-    res = (
-        db.table("topics")
-        .update({"status": status})
-        .eq("telegram_chat_id", chat_id)
-        .eq("telegram_thread_id", thread_id)
-        .execute()
+    rows = db.execute(
+        "UPDATE topics SET status = %s"
+        " WHERE telegram_chat_id = %s AND telegram_thread_id = %s"
+        " RETURNING id",
+        (status, chat_id, thread_id),
     )
-    if not res.data:
+    if not rows:
         return None
-    return res.data[0]["id"]
+    return rows[0]["id"]
 
 
 def rename_topic_dir(
@@ -319,7 +318,7 @@ def load_topic_context(
     return truncated + _TRUNCATED_MARKER
 
 
-def list_unwelcomed_topics(db: Client) -> list[dict]:
+def list_unwelcomed_topics(db: KobeDB) -> list[dict]:
     """Tópicos que ainda não receberam a msg de boas-vindas da v0.11.
 
     Critério: `welcomed_at IS NULL` AND `telegram_chat_id IS NOT NULL`
@@ -331,24 +330,24 @@ def list_unwelcomed_topics(db: Client) -> list[dict]:
     (thread_id=0) tem nome implícito mas current_name vazio, e queremos
     enviá-lo lá também. O caller decide o slug via `get_topic_slug`.
     """
-    res = (
-        db.table("topics")
-        .select("id, telegram_chat_id, telegram_thread_id, current_name")
-        .is_("welcomed_at", "null")
-        .not_.is_("telegram_chat_id", "null")
-        .eq("status", "active")
-        .execute()
+    return db.query(
+        "SELECT id, telegram_chat_id, telegram_thread_id, current_name"
+        "  FROM topics"
+        " WHERE welcomed_at IS NULL"
+        "   AND telegram_chat_id IS NOT NULL"
+        "   AND status = 'active'"
     )
-    return res.data or []
 
 
-def mark_welcomed(db: Client, topic_id: str) -> None:
+def mark_welcomed(db: KobeDB, topic_id: str) -> None:
     """Marca o tópico como onboardado (msg de boas-vindas enviada).
 
     Idempotente — se já está marcado, é no-op silencioso (update de
     coluna pelo mesmo valor é OK no Postgres).
     """
-    db.table("topics").update({"welcomed_at": _now_iso()}).eq("id", topic_id).execute()
+    db.execute(
+        "UPDATE topics SET welcomed_at = %s WHERE id = %s", (_now_iso(), topic_id)
+    )
 
 
 def topic_knowledge_dir(kobe_home: Path, slug: str) -> Path:
@@ -431,7 +430,7 @@ def _now_iso() -> str:
 
 
 def ensure_topic(
-    db: Client,
+    db: KobeDB,
     thread_id: Optional[int],
     *,
     chat_id: int,
@@ -450,37 +449,39 @@ def ensure_topic(
     """
     key = _normalize_thread_id(thread_id)
 
-    existing = (
-        db.table("topics")
-        .select("id, current_name")
-        .eq("telegram_chat_id", chat_id)
-        .eq("telegram_thread_id", key)
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT id, current_name FROM topics "
+        " WHERE telegram_chat_id = %s AND telegram_thread_id = %s"
+        " LIMIT 1",
+        (chat_id, key),
     )
-    if existing.data:
-        row = existing.data[0]
-        db.table("topics").update({"last_activity_at": _now_iso()}).eq(
-            "id", row["id"]
-        ).execute()
+    if row:
+        db.execute(
+            "UPDATE topics SET last_activity_at = %s WHERE id = %s",
+            (_now_iso(), row["id"]),
+        )
         return row["id"]
 
-    payload: dict = {
-        "telegram_thread_id": key,
-        "telegram_chat_id": chat_id,
-        "last_activity_at": _now_iso(),
-    }
+    # Topic novo. `current_name` so e preenchido aqui para os sem thread real;
+    # forum topic recebe o nome depois, por `set_topic_name`.
+    nome = None
     if key == GENERAL_THREAD_ID:
-        payload["current_name"] = "Private" if chat_id > 0 else "General"
-    res = db.table("topics").insert(payload).execute()
-    if not res.data:
+        nome = "Private" if chat_id > 0 else "General"
+    criado = db.execute(
+        "INSERT INTO topics"
+        " (telegram_thread_id, telegram_chat_id, last_activity_at, current_name)"
+        " VALUES (%s, %s, %s, %s)"
+        " RETURNING id",
+        (key, chat_id, _now_iso(), nome),
+    )
+    if not criado:
         raise RuntimeError(
             f"insert de topic não retornou linha (chat_id={chat_id}, thread_id={key})"
         )
-    return res.data[0]["id"]
+    return criado[0]["id"]
 
 
-def ensure_active_session(db: Client, topic_id: str) -> str:
+def ensure_active_session(db: KobeDB, topic_id: str) -> str:
     """Get-or-create da session ativa do topic. Retorna `sessions.id`.
 
     Nota: há uma janela de corrida teórica (duas mensagens chegando no
@@ -490,29 +491,26 @@ def ensure_active_session(db: Client, topic_id: str) -> str:
     o handler é serial por mensagem e o caso só dispara no primeiro evento
     de um topic novíssimo.
     """
-    existing = (
-        db.table("sessions")
-        .select("id")
-        .eq("topic_id", topic_id)
-        .eq("status", "active")
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT id FROM sessions"
+        " WHERE topic_id = %s AND status = 'active'"
+        " LIMIT 1",
+        (topic_id,),
     )
-    if existing.data:
-        return existing.data[0]["id"]
+    if row:
+        return row["id"]
 
-    created = (
-        db.table("sessions")
-        .insert({"topic_id": topic_id, "status": "active"})
-        .execute()
+    criado = db.execute(
+        "INSERT INTO sessions (topic_id, status) VALUES (%s, 'active') RETURNING id",
+        (topic_id,),
     )
-    if not created.data:
+    if not criado:
         raise RuntimeError(f"insert de session não retornou linha (topic_id={topic_id})")
-    return created.data[0]["id"]
+    return criado[0]["id"]
 
 
 def get_recent_messages(
-    db: Client, session_id: str, limit: int = 20
+    db: KobeDB, session_id: str, limit: int = 20
 ) -> list[dict]:
     """Últimas N mensagens da session em ordem cronológica (mais antiga primeiro).
 
@@ -520,19 +518,19 @@ def get_recent_messages(
     ordem decrescente pra pegar as mais recentes (caso a sessão seja longa)
     e revertemos pra apresentar como conversa natural.
     """
-    res = (
-        db.table("messages")
-        .select("role, content, created_at, audio_transcribed")
-        .eq("session_id", session_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
+    rows = db.query(
+        "SELECT role, content, created_at, audio_transcribed"
+        "  FROM messages"
+        " WHERE session_id = %s"
+        " ORDER BY created_at DESC"
+        " LIMIT %s",
+        (session_id, limit),
     )
-    return list(reversed(res.data or []))
+    return list(reversed(rows))
 
 
 def get_messages_since(
-    db: Client, topic_id: str, since_iso: str, *, limit: int = 50
+    db: KobeDB, topic_id: str, since_iso: str, *, limit: int = 50
 ) -> list[dict]:
     """Mensagens do topic com `created_at > since_iso`, ordem cronológica.
 
@@ -545,20 +543,18 @@ def get_messages_since(
     Retorna [] quando nada novo chegou — o caller (helper kobe-recall-since)
     traduz isso em "nenhuma mensagem nova" pro agente.
     """
-    res = (
-        db.table("messages")
-        .select("role, content, created_at, audio_transcribed")
-        .eq("topic_id", topic_id)
-        .gt("created_at", since_iso)
-        .order("created_at", desc=False)
-        .limit(limit)
-        .execute()
+    return db.query(
+        "SELECT role, content, created_at, audio_transcribed"
+        "  FROM messages"
+        " WHERE topic_id = %s AND created_at > %s"
+        " ORDER BY created_at ASC"
+        " LIMIT %s",
+        (topic_id, since_iso, limit),
     )
-    return list(res.data or [])
 
 
 def archive_active_session(
-    db: Client,
+    db: KobeDB,
     topic_id: str,
     *,
     summary: Optional[str] = None,
@@ -577,50 +573,44 @@ def archive_active_session(
     """
     if status not in ("archived", "compacted"):
         raise ValueError(f"status inválido: {status!r}")
-    res = (
-        db.table("sessions")
-        .update(
-            {
-                "status": status,
-                "ended_at": _now_iso(),
-                **({"summary": summary} if summary is not None else {}),
-            }
-        )
-        .eq("topic_id", topic_id)
-        .eq("status", "active")
-        .execute()
+    # `summary` so entra no SET quando foi passado: `None` explicito apagaria
+    # um resumo ja gravado, e o contrato aqui e "nao mexe se nao veio".
+    sets = ["status = %s", "ended_at = %s"]
+    params: list = [status, _now_iso()]
+    if summary is not None:
+        sets.append("summary = %s")
+        params.append(summary)
+    params.append(topic_id)
+
+    rows = db.execute(
+        f"UPDATE sessions SET {', '.join(sets)}"
+        " WHERE topic_id = %s AND status = 'active'"
+        " RETURNING id",
+        params,
     )
-    if not res.data:
+    if not rows:
         return None
-    return res.data[0]["id"]
+    return rows[0]["id"]
 
 
-def count_messages(db: Client, session_id: str) -> int:
-    res = (
-        db.table("messages")
-        .select("id", count="exact")
-        .eq("session_id", session_id)
-        .limit(1)
-        .execute()
-    )
-    return res.count or 0
+def count_messages(db: KobeDB, session_id: str) -> int:
+    return db.scalar(
+        "SELECT count(*) FROM messages WHERE session_id = %s", (session_id,)
+    ) or 0
 
 
-def get_active_session(db: Client, topic_id: str) -> Optional[dict]:
+def get_active_session(db: KobeDB, topic_id: str) -> Optional[dict]:
     """Retorna a session ativa do topic (ou None) — sem criar."""
-    res = (
-        db.table("sessions")
-        .select("id, started_at")
-        .eq("topic_id", topic_id)
-        .eq("status", "active")
-        .limit(1)
-        .execute()
+    return db.one(
+        "SELECT id, started_at FROM sessions"
+        " WHERE topic_id = %s AND status = 'active'"
+        " LIMIT 1",
+        (topic_id,),
     )
-    return res.data[0] if res.data else None
 
 
 def insert_message(
-    db: Client,
+    db: KobeDB,
     *,
     session_id: str,
     topic_id: str,
@@ -630,27 +620,20 @@ def insert_message(
     audio_transcribed: bool = False,
 ) -> str:
     """Grava uma mensagem (user/assistant/system). Retorna `messages.id`."""
-    res = (
-        db.table("messages")
-        .insert(
-            {
-                "session_id": session_id,
-                "topic_id": topic_id,
-                "telegram_message_id": telegram_message_id,
-                "role": role,
-                "content": content,
-                "audio_transcribed": audio_transcribed,
-            }
-        )
-        .execute()
+    criado = db.execute(
+        "INSERT INTO messages"
+        " (session_id, topic_id, telegram_message_id, role, content, audio_transcribed)"
+        " VALUES (%s, %s, %s, %s, %s, %s)"
+        " RETURNING id",
+        (session_id, topic_id, telegram_message_id, role, content, audio_transcribed),
     )
-    if not res.data:
+    if not criado:
         raise RuntimeError("insert de message não retornou linha")
-    return res.data[0]["id"]
+    return criado[0]["id"]
 
 
 def get_last_assistant_message_of_session(
-    db: Client, session_id: str
+    db: KobeDB, session_id: str
 ) -> Optional[str]:
     """Última mensagem com role='assistant' da session, ou None.
 
@@ -665,7 +648,7 @@ def get_last_assistant_message_of_session(
 
 
 def pop_awaiting_slash_response(
-    db: Client, session_id: str
+    db: KobeDB, session_id: str
 ) -> Optional[dict]:
     """Lê `sessions.awaiting_slash_response`, limpa, e devolve o conteúdo.
 
@@ -678,22 +661,20 @@ def pop_awaiting_slash_response(
     sem transação: o handler do bot serializa msgs por topic via lock,
     então não há corrida com outra msg do mesmo operador.
     """
-    res = (
-        db.table("sessions")
-        .select("awaiting_slash_response")
-        .eq("id", session_id)
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT awaiting_slash_response FROM sessions WHERE id = %s LIMIT 1",
+        (session_id,),
     )
-    if not res.data:
+    if not row:
         return None
-    state = res.data[0].get("awaiting_slash_response")
+    state = row.get("awaiting_slash_response")
     if state is None:
         return None
     # Limpa sempre — quem fez pergunta consome o estado nessa msg.
-    db.table("sessions").update({"awaiting_slash_response": None}).eq(
-        "id", session_id
-    ).execute()
+    db.execute(
+        "UPDATE sessions SET awaiting_slash_response = NULL WHERE id = %s",
+        (session_id,),
+    )
     asked_at_raw = state.get("asked_at")
     ttl_seconds = state.get("expires_in_seconds", 600)
     if not asked_at_raw or not isinstance(ttl_seconds, (int, float)):
@@ -711,7 +692,7 @@ def pop_awaiting_slash_response(
 
 
 def get_last_assistant_message_meta_of_session(
-    db: Client, session_id: str
+    db: KobeDB, session_id: str
 ) -> Optional[dict]:
     """Última msg `assistant` da session com `{content, created_at}`.
 
@@ -719,18 +700,15 @@ def get_last_assistant_message_meta_of_session(
     de relevância (msg recente = mais provável de ser resposta à última
     pergunta do agente). Mesma nota de consumidor do helper acima.
     """
-    res = (
-        db.table("messages")
-        .select("content, created_at")
-        .eq("session_id", session_id)
-        .eq("role", "assistant")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
+    row = db.one(
+        "SELECT content, created_at FROM messages"
+        " WHERE session_id = %s AND role = 'assistant'"
+        " ORDER BY created_at DESC"
+        " LIMIT 1",
+        (session_id,),
     )
-    if not res.data:
+    if not row:
         return None
-    row = res.data[0]
     return {
         "content": row.get("content"),
         "created_at": row.get("created_at"),

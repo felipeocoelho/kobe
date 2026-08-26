@@ -34,7 +34,7 @@ _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
 if (
     _VENV_PY.exists()
     and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("httpx") is None
+    and importlib.util.find_spec("psycopg") is None
 ):
     os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
@@ -43,14 +43,13 @@ from bot.topic_manager import get_topic_slug  # noqa: E402
 
 
 def _db():
-    from supabase import create_client
+    from bot.db import KobeDB
 
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
-    if not url or not key:
-        print("kobe-reflect: SUPABASE_URL/SUPABASE_KEY ausentes.", file=sys.stderr)
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print("kobe-reflect: DATABASE_URL ausente.", file=sys.stderr)
         sys.exit(2)
-    return create_client(url, key)
+    return KobeDB(url)
 
 
 def _resolve_slug() -> str | None:
@@ -68,11 +67,18 @@ def _resolve_slug() -> str | None:
             thread_id = int(thread_raw)
         except ValueError:
             thread_id = None
+    db = None
     try:
-        return get_topic_slug(_db(), chat_id, thread_id)
+        db = _db()
+        return get_topic_slug(db, chat_id, thread_id)
     except Exception as exc:  # noqa: BLE001
         print(f"kobe-reflect: não resolvi o tópico ({exc}).", file=sys.stderr)
         return None
+    finally:
+        # Processo de vida curta: fecha o pool em vez de deixar a conexão
+        # pendurada no servidor até o interpretador morrer.
+        if db is not None:
+            db.close()
 
 
 def main() -> int:

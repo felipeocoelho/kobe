@@ -29,7 +29,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-import httpx
+import psycopg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -96,7 +96,7 @@ def test_repro_morre_antes_do_ponto_seguro_e_retentativa_salva() -> None:
         tentativas.append(1)
         if len(tentativas) == 1:
             # Morre ANTES de marcar committed — igual ao incidente real.
-            raise httpx.RemoteProtocolError("Server disconnected")
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
         progress["committed"] = True
 
     with _env(), mock.patch.object(tg, "RETRY_DELAY_SECONDS", 0):
@@ -111,7 +111,7 @@ def test_retentativa_tambem_falha_avisa_e_guarda() -> None:
     home = _home()
 
     async def _run(progress):
-        raise httpx.ReadError("banco fora de verdade")
+        raise psycopg.OperationalError("banco fora de verdade")
 
     with _env(), mock.patch.object(tg, "RETRY_DELAY_SECONDS", 0):
         avisos = _run_guarded(home, _run, text="manda o relatório de ontem")
@@ -138,7 +138,7 @@ def test_nao_retenta_depois_do_ponto_seguro() -> None:
     async def _run(progress):
         tentativas.append(1)
         progress["committed"] = True  # cruzou o ponto de não-retorno
-        raise httpx.ReadError("morreu depois de gravar")
+        raise psycopg.OperationalError("morreu depois de gravar")
 
     with _env(), mock.patch.object(tg, "RETRY_DELAY_SECONDS", 0):
         avisos = _run_guarded(home, _run)
@@ -241,12 +241,12 @@ def test_flag_off_e_comportamento_legado() -> None:
     home = _home()
 
     async def _run(progress):
-        raise httpx.ReadError("x")
+        raise psycopg.OperationalError("x")
 
     with _env(TURN_GUARANTEE_ENABLED="false"):
         try:
             _run_guarded(home, _run)
-        except httpx.ReadError:
+        except psycopg.OperationalError:
             pass
         else:
             raise AssertionError("com a flag off a exceção deve subir")
@@ -298,10 +298,10 @@ def test_pendencia_e_json_legivel_e_atomico() -> None:
     """Outro processo (ou eu, depurando) tem que conseguir ler isso."""
     home = _home()
     p = tg.queue_pending(home, chat_id=-100, thread_id=475, message_id=9,
-                         text="olha isso", audio=True, erro="httpx.ReadError: x")
+                         text="olha isso", audio=True, erro="psycopg.OperationalError: x")
     data = json.loads(Path(p).read_text(encoding="utf-8"))
     assert data["text"] == "olha isso" and data["audio_transcribed"] is True
-    assert data["erro"].startswith("httpx.ReadError")
+    assert data["erro"].startswith("psycopg.OperationalError")
     assert list(tg.pending_dir(home).glob("*.tmp")) == [], "sem .tmp órfão"
 
 
@@ -342,7 +342,7 @@ def test_flush_do_assembler_nao_engole_mais() -> None:
         msg = _fake_message()
         with mock.patch.object(
             th, "_handle_user_text",
-            new=mock.AsyncMock(side_effect=httpx.RemoteProtocolError("Server disconnected")),
+            new=mock.AsyncMock(side_effect=psycopg.OperationalError("server closed the connection unexpectedly")),
         ):
             # Não levanta: a garantia trata. Antes, isto sumia no log.
             await cb("me manda o resumo", False, msg)
@@ -367,7 +367,7 @@ def test_flush_do_assembler_retentativa_transparente() -> None:
     async def _flaky(**kwargs):
         chamadas.append(kwargs)
         if len(chamadas) == 1:
-            raise httpx.RemoteProtocolError("Server disconnected")
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     async def _cenario():
         cb = th._make_flush_cb(_handler_config(home), mock.MagicMock(),

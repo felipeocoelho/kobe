@@ -1,6 +1,6 @@
 """Handlers do Telegram (camada de transporte).
 
-Recebe updates, autoriza usuário, persiste no Supabase, dispara `claude -p`
+Recebe updates, autoriza usuário, persiste no banco, dispara `claude -p`
 com histórico da sessão e devolve a resposta no mesmo tópico. Áudio passa
 por Groq Whisper antes — daí em diante o pipeline é igual ao texto.
 """
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from supabase import Client
+from bot.db import KobeDB
 from telegram import Audio, Document, Message, PhotoSize, Update, Voice
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
@@ -150,7 +150,7 @@ UPLOAD_ALLOWED_SUFFIXES = {".txt", ".md", ".pdf", ".docx"}
 # desde 2026-06-09, garantia de ORDEM DE CHEGADA. Com `concurrent_updates(True)`
 # em main.py o PTB despacha updates em paralelo; mensagens de tópicos diferentes
 # correm soltas, mas dentro de um mesmo tópico só roda uma seção crítica por vez
-# (evita race em user-data/, inserção fora de ordem no Supabase, disparos duplos
+# (evita race em user-data/, inserção fora de ordem no banco, disparos duplos
 # de compactação) E na ordem em que as mensagens CHEGARAM.
 #
 # Por que um asyncio.Lock não bastava (bug da rajada, card 8b04cf6a):
@@ -333,7 +333,7 @@ def _get_assembler(config: Config) -> MessageAssembler:
 
 
 def _make_flush_cb(
-    config: Config, db: Client, claude: ClaudeRunner, plugins: list[Plugin]
+    config: Config, db: KobeDB, claude: ClaudeRunner, plugins: list[Plugin]
 ):
     """Fabrica o callback que o Assembler chama quando o buffer flusha: roda o
     turno AGREGADO dentro da seção crítica do FIFO (um flush = um ticket = um
@@ -428,7 +428,7 @@ def _topic_label(thread_id: Optional[int]) -> str:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
@@ -580,7 +580,7 @@ async def _download_and_transcribe(
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Recebe voice/audio, transcreve via Groq e processa como texto."""
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     transcriber: Transcriber = context.application.bot_data["transcriber"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
@@ -787,7 +787,7 @@ async def _handle_user_text(
     text: str,
     audio_transcribed: bool,
     config: Config,
-    db: Client,
+    db: KobeDB,
     claude: ClaudeRunner,
     plugins: list[Plugin],
     turn_progress: Optional[dict] = None,
@@ -861,10 +861,10 @@ async def _handle_user_text(
     # Snapshot do histórico ANTES de inserir a nova mensagem — assim ela
     # não aparece duplicada no prompt (uma vez como histórico, outra como
     # "mensagem nova"). É também o ponto natural pra cortar a janela.
-    # SPR P1 #5: histórico (Supabase) e contexto do tópico (slug no
-    # Supabase + leitura de arquivos) são independentes e só-leitura —
+    # SPR P1 #5: histórico (banco) e contexto do tópico (slug no
+    # banco + leitura de arquivos) são independentes e só-leitura —
     # rodam em paralelo, em threads, pra não serializar nem travar o loop.
-    # supabase-py usa httpx.Client (thread-safe pra requests concorrentes).
+    # A ponte (bot/db.py) usa um pool do psycopg_pool, thread-safe.
     async def _load_history() -> list[dict]:
         # Camada IMEDIATA (working_memory on): últimos ~10 min OU N msgs DESTE
         # tópico, verbatim — reconstruída do disco a cada turno, então a
@@ -1526,7 +1526,7 @@ async def _run_heavy_in_background(
     prompt: str,
     claude: ClaudeRunner,
     run_kwargs: dict,
-    db: Client,
+    db: KobeDB,
     session_id: str,
     topic_id: str,
     history_len: int,
@@ -1756,7 +1756,7 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     Skip silencioso pra sessões com < MIN_MESSAGES_FOR_HANDOFF.
     """
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     message = update.effective_message
     if message is None or not _update_authorized(update, config):
@@ -1815,7 +1815,7 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Resume o estado da memória ativa do tópico (sem chamar LLM)."""
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     if message is None or not _update_authorized(update, config):
         return
@@ -1859,7 +1859,7 @@ async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def on_command_salvar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Consolida a sessão ativa em saved_artifacts. Título = args do comando."""
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     if message is None or not _update_authorized(update, config):
         return
@@ -1915,7 +1915,7 @@ async def on_command_salvar(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def _destilar_e_gravar_handoff(
     *,
     bot,
-    db: Client,
+    db: KobeDB,
     claude: ClaudeRunner,
     chat_id: int,
     thread_id: Optional[int],
@@ -2030,7 +2030,7 @@ async def on_command_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE)
     direto, sem precisar do helper CLI).
     """
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     message = update.effective_message
     if message is None or not _update_authorized(update, config):
@@ -2109,7 +2109,7 @@ async def on_command_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Busca em saved_artifacts (ILIKE — busca semântica fica pro pós-MVP)."""
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     if message is None or not _update_authorized(update, config):
         return
@@ -2148,7 +2148,7 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def send_welcome(
-    bot, db: Client, *, chat_id: int, thread_id: Optional[int], topic_id: str
+    bot, db: KobeDB, *, chat_id: int, thread_id: Optional[int], topic_id: str
 ) -> bool:
     """Envia a msg de boas-vindas no tópico e marca `welcomed_at`.
 
@@ -2192,7 +2192,7 @@ async def on_forum_topic_created(
     tópico (v0.10) não consegue derivar o slug. A msg de boas-vindas é
     enviada uma única vez (controlada por `welcomed_at`).
     """
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
     # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
@@ -2220,7 +2220,7 @@ async def on_forum_topic_created(
             thread_id,
             name,
         )
-    except Exception:  # noqa: BLE001 — Supabase indisponível não derruba o bot
+    except Exception:  # noqa: BLE001 — banco indisponível não derruba o bot
         logger.exception("falha gravando nome de tópico criado")
         return
 
@@ -2260,7 +2260,7 @@ async def _handle_media_upload(
     *,
     message: Message,
     config: Config,
-    db: Client,
+    db: KobeDB,
     claude: ClaudeRunner,
     plugins: list[Plugin],
     filename: str,
@@ -2411,7 +2411,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     if not config.edge_uploads_enabled:
         return  # legado: foto ignorada
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
@@ -2460,7 +2460,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     5. Responde no chat com path relativo e tamanho.
     """
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
@@ -2643,7 +2643,7 @@ async def on_forum_topic_edited(
     operador é notificado.
     """
     config: Config = context.application.bot_data["config"]
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
     # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
@@ -2727,7 +2727,7 @@ async def on_forum_topic_closed(
     Telegram não emite evento de "delete real" — close é o sinal mais
     próximo. Operador reabrir (`forum_topic_reopened`) volta pra 'active'.
     """
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
     # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
@@ -2759,7 +2759,7 @@ async def on_forum_topic_reopened(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Marca tópico como `active` quando o operador reabre no Telegram."""
-    db: Client = context.application.bot_data["db"]
+    db: KobeDB = context.application.bot_data["db"]
     message = update.effective_message
     # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
     # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde

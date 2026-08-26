@@ -1,6 +1,7 @@
 python-telegram-bot>=21.0
 python-dotenv>=1.0
-supabase>=2.0
+psycopg[binary]>=3.2
+psycopg_pool>=3.2
 groq>=0.4
 assemblyai>=0.30
 httpx>=0.27

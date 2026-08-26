@@ -30,7 +30,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from supabase import Client
+from bot.db import KobeDB
 
 
 logger = logging.getLogger("kobe.snapshot")
@@ -49,7 +49,7 @@ SNAPSHOT_TTL_MINUTES = 10
 SNAPSHOT_TAG = "auto-resume"
 
 
-def save_pending_snapshots(db: Client) -> int:
+def save_pending_snapshots(db: KobeDB) -> int:
     """Salva snapshots de todas as sessões ativas recentes elegíveis.
 
     Retorna a contagem gravada. Não levanta — falhas individuais por
@@ -60,19 +60,18 @@ def save_pending_snapshots(db: Client) -> int:
     threshold = (now - timedelta(minutes=RECENT_ACTIVITY_WINDOW_MINUTES)).isoformat()
 
     try:
-        topics_res = (
-            db.table("topics")
-            .select("id, telegram_thread_id, telegram_chat_id")
-            .eq("status", "active")
-            .gte("last_activity_at", threshold)
-            .execute()
+        topics = db.query(
+            "SELECT id, telegram_thread_id, telegram_chat_id"
+            "  FROM topics"
+            " WHERE status = 'active' AND last_activity_at >= %s",
+            (threshold,),
         )
     except Exception:  # noqa: BLE001 — qualquer falha de rede/DB
         logger.exception("falha listando topics pra snapshot")
         return 0
 
     saved = 0
-    for topic in topics_res.data or []:
+    for topic in topics:
         # Sem chat_id, mensagem proativa no boot é impossível — pular.
         if topic.get("telegram_chat_id") is None:
             continue
@@ -84,31 +83,32 @@ def save_pending_snapshots(db: Client) -> int:
     return saved
 
 
-def _save_one_topic_snapshot(db: Client, topic: dict) -> bool:
+def _save_one_topic_snapshot(db: KobeDB, topic: dict) -> bool:
     """Grava o snapshot de uma sessão ativa do tópico. Retorna True se gravou."""
     topic_id = topic["id"]
 
-    sess_res = (
-        db.table("sessions")
-        .select("id")
-        .eq("topic_id", topic_id)
-        .eq("status", "active")
-        .limit(1)
-        .execute()
+    sessao = db.one(
+        "SELECT id FROM sessions"
+        " WHERE topic_id = %s AND status = 'active'"
+        " LIMIT 1",
+        (topic_id,),
     )
-    if not sess_res.data:
+    if not sessao:
         return False
-    session_id = sess_res.data[0]["id"]
+    session_id = sessao["id"]
 
-    msgs_res = (
-        db.table("messages")
-        .select("role, content, created_at")
-        .eq("session_id", session_id)
-        .order("created_at", desc=True)
-        .limit(SNAPSHOT_RECENT_COUNT)
-        .execute()
+    msgs = list(
+        reversed(
+            db.query(
+                "SELECT role, content, created_at"
+                "  FROM messages"
+                " WHERE session_id = %s"
+                " ORDER BY created_at DESC"
+                " LIMIT %s",
+                (session_id, SNAPSHOT_RECENT_COUNT),
+            )
+        )
     )
-    msgs = list(reversed(msgs_res.data or []))
     if not msgs:
         return False
 
@@ -122,14 +122,16 @@ def _save_one_topic_snapshot(db: Client, topic: dict) -> bool:
         "saved_at": saved_at,
     }
 
-    db.table("saved_artifacts").insert(
-        {
-            "topic_id": topic_id,
-            "title": f"auto-resume {saved_at}",
-            "content": json.dumps(payload, ensure_ascii=False, default=str),
-            "tags": [SNAPSHOT_TAG],
-        }
-    ).execute()
+    db.execute(
+        "INSERT INTO saved_artifacts (topic_id, title, content, tags)"
+        " VALUES (%s, %s, %s, %s)",
+        (
+            topic_id,
+            f"auto-resume {saved_at}",
+            json.dumps(payload, ensure_ascii=False, default=str),
+            [SNAPSHOT_TAG],
+        ),
+    )
     logger.info(
         "snapshot gravado topic_id=%s session_id=%s msgs=%d",
         topic_id,
@@ -139,7 +141,7 @@ def _save_one_topic_snapshot(db: Client, topic: dict) -> bool:
     return True
 
 
-def load_pending_snapshots(db: Client) -> list[dict]:
+def load_pending_snapshots(db: KobeDB) -> list[dict]:
     """Lista snapshots ainda válidos (criados dentro do TTL).
 
     Se houver mais de um pro mesmo tópico (não deveria acontecer mas é
@@ -151,13 +153,12 @@ def load_pending_snapshots(db: Client) -> list[dict]:
     ).isoformat()
 
     try:
-        res = (
-            db.table("saved_artifacts")
-            .select("id, content, created_at, topic_id")
-            .contains("tags", [SNAPSHOT_TAG])
-            .gte("created_at", threshold)
-            .order("created_at", desc=True)
-            .execute()
+        linhas = db.query(
+            "SELECT id, content, created_at, topic_id"
+            "  FROM saved_artifacts"
+            " WHERE tags @> %s AND created_at >= %s"
+            " ORDER BY created_at DESC",
+            ([SNAPSHOT_TAG], threshold),
         )
     except Exception:  # noqa: BLE001
         logger.exception("falha carregando snapshots pendentes")
@@ -165,7 +166,7 @@ def load_pending_snapshots(db: Client) -> list[dict]:
 
     seen_topics: set[str] = set()
     snapshots: list[dict] = []
-    for row in res.data or []:
+    for row in linhas:
         topic_id = row.get("topic_id")
         if topic_id in seen_topics:
             continue
@@ -180,31 +181,33 @@ def load_pending_snapshots(db: Client) -> list[dict]:
     return snapshots
 
 
-def drop_snapshot(db: Client, artifact_id: str) -> None:
+def drop_snapshot(db: KobeDB, artifact_id: str) -> None:
     """Remove um snapshot após ele ter sido consumido pela mensagem proativa."""
     try:
-        db.table("saved_artifacts").delete().eq("id", artifact_id).execute()
+        db.execute("DELETE FROM saved_artifacts WHERE id = %s", (artifact_id,))
     except Exception:  # noqa: BLE001 — não crítico; TTL coleta no próximo boot
         logger.exception("falha apagando snapshot %s", artifact_id)
 
 
-def cleanup_expired_snapshots(db: Client) -> int:
+def cleanup_expired_snapshots(db: KobeDB) -> int:
     """Limpa snapshots vencidos. Idempotente — bom rodar no boot."""
     threshold = (
         datetime.now(timezone.utc) - timedelta(minutes=SNAPSHOT_TTL_MINUTES)
     ).isoformat()
     try:
-        res = (
-            db.table("saved_artifacts")
-            .delete()
-            .contains("tags", [SNAPSHOT_TAG])
-            .lt("created_at", threshold)
-            .execute()
+        # `RETURNING id` não é decorativo: o retorno desta função é a
+        # CONTAGEM de snapshots limpos, e sem ele o comando não devolve
+        # linha nenhuma e a contagem seria sempre zero.
+        apagados = db.execute(
+            "DELETE FROM saved_artifacts"
+            " WHERE tags @> %s AND created_at < %s"
+            " RETURNING id",
+            ([SNAPSHOT_TAG], threshold),
         )
     except Exception:  # noqa: BLE001
         logger.exception("falha limpando snapshots expirados")
         return 0
-    return len(res.data or [])
+    return len(apagados)
 
 
 def render_resume_message(payload: dict) -> str:

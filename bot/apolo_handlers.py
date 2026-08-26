@@ -186,19 +186,32 @@ async def on_command_contatos_listar(update: Update, context: ContextTypes.DEFAU
         elif a in ("oculto", "ocultos", "hidden"):
             include_hidden = True
 
-    # Consulta direta no Supabase via SDK do bot
-    supabase = context.bot_data.get("db")
-    if not supabase:
-        await update.effective_message.reply_text("❌ Supabase não disponível.")
+    # Consulta direta pela ponte do bot (bot/db.py).
+    db = context.bot_data.get("db")
+    if not db:
+        await update.effective_message.reply_text("❌ Banco não disponível.")
         return
 
-    q = supabase.table("contacts").select("id, tipo, nome_canonico, telefone_e164, whatsapp_jid, contexto, oculto").order("nome_canonico").limit(50)
+    # NOTA DE AMBIENTE: o `ORDER BY nome_canonico` abaixo é o caso vivo que
+    # torna a collation do banco visível pro operador — `C.UTF-8` ordena por
+    # byte cru e joga acento e maiúscula pra lugar diferente de `en_US.UTF-8`.
+    # `infra/compat_gate.py` é quem vigia isso.
+    sql = [
+        "SELECT id, tipo, nome_canonico, telefone_e164, whatsapp_jid, contexto, oculto",
+        "  FROM contacts",
+        " WHERE TRUE",
+    ]
+    params: list = []
     if tipo:
-        q = q.eq("tipo", tipo)
+        sql.append("   AND tipo = %s")
+        params.append(tipo)
     if not include_hidden:
-        q = q.eq("oculto", False)
+        sql.append("   AND oculto = FALSE")
+    sql.append(" ORDER BY nome_canonico")
+    sql.append(" LIMIT 50")
+
     try:
-        rows = q.execute().data
+        rows = db.query("\n".join(sql), params)
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Erro consultando: {e}")
         return

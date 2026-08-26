@@ -57,7 +57,7 @@ def _short_id() -> str:
 def _slug_from_env() -> str:
     """Slug derivado do KOBE_THREAD_ID; sem thread_id => 'general'.
 
-    Não temos acesso ao Supabase aqui pra resolver o nome humano do tópico,
+    Não temos acesso ao banco aqui pra resolver o nome humano do tópico,
     então usamos o thread_id numérico como sufixo determinístico. A pasta
     fica indexada por tópico mesmo sem o slug humano.
     """

@@ -1,53 +1,86 @@
-"""Cliente do banco do Kobe — e o ÚNICO arquivo que sabe qual banco é.
+"""Ponte pro Postgres — e o ÚNICO arquivo do Kobe que sabe qual banco é.
 
-A `SUPABASE_KEY` esperada é a chave secreta server-side (`sb_secret_xxx` no
-nome novo, ou o legado `service_role` JWT). A publishable/anon key respeita
-RLS e não tem permissão pra escrever nas tabelas do Kobe.
-
-──────────────────────────────────────────────────────────────────────────
-RESILIÊNCIA DE CONEXÃO (2026-08-20) — camada 1 do "turno não morre calado"
-──────────────────────────────────────────────────────────────────────────
-
-A dor, com prova: 3 vezes em 30 dias de produção (14/08 18:51, 14/08 18:52,
-19/08 17:08) uma mensagem do operador sumiu em silêncio. O log é sempre o
-mesmo caminho — o operador volta depois de um tempo parado, manda algo, o
-turno vai buscar o histórico e leva `httpx.RemoteProtocolError: Server
-disconnected`. Clássico de conexão ociosa: o pool guarda o socket, o outro
-lado derruba, e a PRIMEIRA requisição depois da ociosidade morre.
-
-Três mecanismos, do mais barato pro mais caro:
-
-1. **Reciclagem por ociosidade (prevenção, custo zero).** Se a última conversa
-   bem-sucedida com o banco foi há mais de `DB_IDLE_RECYCLE_SECONDS`, o cliente
-   é trocado ANTES de tentar. Construir o cliente não faz I/O de rede nenhum —
-   é só descartar um pool que provavelmente já está morto do outro lado. Isto
-   sozinho ataca a causa raiz das 3 falhas observadas.
-2. **Repetição com espera crescente (o remédio).** Erro de TRANSPORTE (conexão
-   caiu, tempo esgotado, servidor desconectou) → recicla e tenta de novo, até
-   `_MAX_RETRIES` vezes. Erro de NEGÓCIO (dado inválido, permissão, constraint)
-   **não** é repetido: repetir não adiantaria e só mascararia bug.
-3. **Remontagem da consulta.** Ao trocar de cliente, a consulta já montada
-   aponta pro pool velho. O proxy daqui GRAVA a cadeia de chamadas
-   (`.table(...).select(...).eq(...)`) e a REMONTA no cliente novo. É isso que
-   permite que os ~70 pontos do código que falam com o banco não saibam de nada.
-
-Trade-off declarado (e aprovado pelo operador): repetir uma LEITURA é 100%
-seguro. Repetir uma ESCRITA tem um risco teórico — se o servidor gravou mas a
-resposta se perdeu, a repetição grava de novo (uma linha duplicada). Na prática
-é remotíssimo (a conexão estava morta ANTES do pedido sair — é por isso que o
-erro acontece) e a reciclagem por ociosidade praticamente elimina o cenário.
-Uma linha duplicada no histórico é muito menos grave que uma mensagem perdida.
-`DB_RETRY_WRITES=false` desliga só essa parte.
+A conexão vem de `DATABASE_URL`, uma linha do `.env`. Trocar host, porta, banco
+ou usuário é mudança de configuração e reinício — **nunca** de código. É isso
+que faz "onde o banco mora" ser uma decisão de operação, e não de engenharia.
 
 ──────────────────────────────────────────────────────────────────────────
-MIGRAÇÃO PRO POSTGRES LOCAL
+POR QUE DIRETO, SEM ADAPTADOR
 ──────────────────────────────────────────────────────────────────────────
 
-Este arquivo é o **ponto único de isolamento do driver**. Nenhum outro arquivo
-do Kobe sabe que o banco é Supabase — o código só usa `.table()`, verificado.
-No dia da migração, este arquivo é reescrito pro Postgres local e **nada mais
-muda**. A camada que garante que o turno não morre calado
-(`bot/turn_guarantee.py`) é deliberadamente agnóstica e não encosta aqui.
+Decisão do operador, 2026-07-25: *"não faz sentido colocar um código na frente
+do outro código se eu posso ir direto pra ele."* Não há DAL, não há backend
+plugável, não há emulação do construtor de consultas do PostgREST. Os pontos do
+Kobe que falam com o banco mandam **SQL**.
+
+A troca também apagou o pedaço mais delicado deste arquivo. Na versão anterior
+havia um proxy de ~60 linhas que **gravava a cadeia de chamadas**
+(a cadeia `table` -> `select` -> `eq`) só para poder remontá-la num cliente novo
+depois de uma reconexão — porque a consulta já montada apontava para o pool
+morto. Com SQL, "a cadeia" é um par `(sql, params)`. Ir direto deixou a ponte
+menor que o invólucro que ela substituiu.
+
+──────────────────────────────────────────────────────────────────────────
+O CONTRATO DE TIPOS — e por que ele não é detalhe
+──────────────────────────────────────────────────────────────────────────
+
+O PostgREST devolvia JSON: `uuid` chegava como string e `timestamptz` como
+texto ISO. O psycopg devolve os tipos nativos do Python — `UUID` e `datetime`.
+Isso quebraria o Kobe em silêncio e em lugares distantes daqui:
+
+- `bot/memory/working_set.py` compara `created_at` **como string** contra um
+  corte também string. `datetime >= str` levanta `TypeError`, e a janela
+  imediata de memória morre inteira.
+- `bot/memory/aging.py`, `bot/claude_runner.py`, `bot/resume.py` e
+  `bot/telegram_handler.py` tratam esses carimbos como texto ISO.
+- Ids de `uuid` são carregados adiante como chave de dicionário e interpolados
+  em texto.
+
+Então a ponte **normaliza dois tipos, e só dois**: `UUID` vira `str`,
+`datetime` vira `.isoformat()`. É contrato de fronteira, não conversão
+decorativa — e está preso por teste.
+
+`text[]` (o `saved_artifacts.tags`) já chega como lista nativa; `jsonb` já
+chega como dicionário. Nada a fazer nos dois.
+
+**O fuso é fixado na conexão, de propósito.** `timestamptz` guarda um instante
+absoluto, mas o TEXTO que o driver devolve sai no fuso da sessão. O `initdb` do
+Ubuntu deixa o cluster no fuso local da máquina, e todo banco criado nele nasce
+herdando esse fuso — o mesmo instante sairia como `...T00:46:25-03:00` em vez
+de `...T03:46:25+00:00`. Fixar `TimeZone=UTC` aqui torna a ponte imune ao que
+estiver configurado no cluster ou no banco. `infra/compat_gate.py` vigia o
+outro lado.
+
+──────────────────────────────────────────────────────────────────────────
+RESILIÊNCIA
+──────────────────────────────────────────────────────────────────────────
+
+A dor original: 3 vezes em 30 dias de produção uma mensagem do operador sumiu
+em silêncio. Sempre o mesmo caminho — o operador volta depois de um tempo
+parado, o pool guarda um socket que o outro lado já derrubou, e a PRIMEIRA
+requisição depois da ociosidade morre.
+
+**Nota honesta: com socket unix local, essa dor praticamente desaparece** — não
+há intermediário para derrubar conexão ociosa. A camada fica por rigor, e
+porque a decisão de onde o banco mora pode colocá-lo em outra máquina amanhã.
+
+O *contrato* de configuração é o mesmo de antes, com a mesma semântica que o
+operador aprovou:
+
+- `DB_RESILIENCE_ENABLED` (padrão on) — desligado, uma tentativa e ponto.
+- `DB_RETRY_WRITES` (padrão on) — repetir LEITURA é seguro sempre; repetir
+  ESCRITA tem risco teórico (se o servidor gravou e a resposta se perdeu, a
+  repetição grava de novo). Na prática é remotíssimo, porque a conexão estava
+  morta ANTES do pedido sair. Uma linha duplicada é muito menos grave que uma
+  mensagem perdida — mas quem quiser o outro lado do trade-off desliga aqui.
+- `DB_IDLE_RECYCLE_SECONDS` (padrão 120) — vira o `max_idle` do pool: conexão
+  parada mais que isso é descartada em vez de reaproveitada.
+
+O que mudou foi só o *mecanismo*: onde havia remontagem de cadeia à mão, agora
+há um pool testado (`psycopg_pool`) e um par `(sql, params)` que se reexecuta
+sozinho. Erro de TRANSPORTE (`OperationalError` — conexão caiu, tempo esgotado)
+é repetido; erro de NEGÓCIO (dado inválido, permissão, constraint) **não** é —
+repetir não adiantaria e só mascararia bug.
 """
 
 from __future__ import annotations
@@ -56,30 +89,55 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable
+from datetime import datetime
+from typing import Any, Optional, Sequence
+from uuid import UUID
 
-import httpx
-from supabase import Client, create_client
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from bot.config import Config
 
 
 logger = logging.getLogger("kobe.db")
 
-# Erros que significam "a conexão morreu", não "o pedido estava errado". Toda a
-# família de transporte do httpx: RemoteProtocolError (Server disconnected — o
-# caso observado), ReadError, ConnectError, timeouts, PoolTimeout.
-TRANSPORT_ERRORS = (httpx.TransportError,)
+# Erros que significam "a conexão morreu", não "o pedido estava errado".
+# `OperationalError` é a família de transporte do psycopg; `PoolTimeout` é o
+# pool não ter conseguido entregar conexão a tempo.
+TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (psycopg.OperationalError,)
+
+try:  # psycopg_pool >= 3.1
+    from psycopg_pool import PoolTimeout
+
+    TRANSPORT_ERRORS = TRANSPORT_ERRORS + (PoolTimeout,)
+except ImportError:  # pragma: no cover — versão antiga do pool
+    pass
 
 # Tentativas EXTRAS após a primeira. 2 basta: se duas reconexões seguidas
 # falham, o banco está fora de verdade e insistir só atrasa o aviso ao operador
-# (que é o trabalho da camada 2, bot/turn_guarantee.py).
+# (que é o trabalho de bot/turn_guarantee.py).
 _MAX_RETRIES = 2
 _BACKOFF_SECONDS = (0.2, 0.8)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "on", "yes")
+
+
+def _resilience_enabled() -> bool:
+    return _env_bool("DB_RESILIENCE_ENABLED", True)
+
+
+def _retry_writes() -> bool:
+    return _env_bool("DB_RETRY_WRITES", True)
+
+
 def _idle_recycle_seconds() -> float:
-    """Ociosidade a partir da qual o cliente é trocado preventivamente.
+    """Ociosidade a partir da qual a conexão é descartada em vez de reusada.
 
     2 minutos é conservador: bem abaixo do tempo em que um intermediário
     costuma derrubar socket ocioso, e alto o bastante pra não reciclar durante
@@ -91,192 +149,143 @@ def _idle_recycle_seconds() -> float:
         return 120.0
 
 
-def _resilience_enabled() -> bool:
-    return _env_bool("DB_RESILIENCE_ENABLED", True)
+def _pool_max_size() -> int:
+    """Teto de conexões simultâneas.
+
+    O Kobe fala com o banco de dentro de `asyncio.to_thread`, então dois turnos
+    podem bater aqui ao mesmo tempo. 8 é folgado para o tráfego de um operador
+    e educado com o `max_connections` do servidor.
+    """
+    try:
+        return max(1, int(os.getenv("DB_POOL_MAX_SIZE", "8")))
+    except ValueError:
+        return 8
 
 
-def _retry_writes() -> bool:
-    return _env_bool("DB_RETRY_WRITES", True)
+# ── Normalização da fronteira ─────────────────────────────────────────────
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = (os.getenv(name) or "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "on", "yes")
+def _normalize(value: Any) -> Any:
+    """`UUID` vira texto e `datetime` vira ISO 8601 — e mais nada.
+
+    A lista é curta de propósito. Cada conversão a mais é uma forma de o
+    contrato desta fronteira divergir do que o resto do Kobe espera, sem que
+    nada acuse.
+    """
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
-# ── Proxy que grava a cadeia de chamadas e a remonta no cliente novo ──────
+def _normalize_row(row: dict) -> dict:
+    return {k: _normalize(v) for k, v in row.items()}
 
 
-class _Recorded:
-    """Um passo da cadeia: nome do método + argumentos."""
+class KobeDB:
+    """A ponte. Quatro verbos, `(sql, params)` em todos.
 
-    __slots__ = ("name", "args", "kwargs")
+    - `query`  — várias linhas
+    - `one`    — a primeira linha, ou `None`
+    - `scalar` — o primeiro valor da primeira linha, ou `None`
+    - `execute`— escrita; devolve as linhas do `RETURNING`, ou lista vazia
 
-    def __init__(self, name: str, args: tuple, kwargs: dict) -> None:
-        self.name, self.args, self.kwargs = name, args, kwargs
-
-
-class _QueryProxy:
-    """Espelha um builder de consulta, gravando a cadeia pra poder remontá-la.
-
-    Tudo que não é `execute()` é delegado ao builder real e devolvido embrulhado
-    num proxy novo (a cadeia cresce). `execute()` é o único ponto que de fato
-    faz rede — e é ali que a resiliência entra.
+    A separação entre os três primeiros e o quarto **não é estética**: é ela
+    que diz se a operação pode ser repetida sem pensar (leitura) ou se precisa
+    obedecer ao `DB_RETRY_WRITES` (escrita). Na ponte anterior isso era
+    adivinhado farejando a cadeia de chamadas; agora é o verbo que a pessoa
+    escolheu.
     """
 
-    __slots__ = ("_owner", "_chain", "_builder")
-
-    def __init__(self, owner: "ResilientClient", chain: list[_Recorded], builder: Any) -> None:
-        self._owner, self._chain, self._builder = owner, chain, builder
-
-    def __getattr__(self, name: str) -> Any:
-        # `execute` NÃO cai aqui — está definido na classe, e `__getattr__` só
-        # roda quando a busca normal falha. Todo o resto (select, eq, order,
-        # limit, single…) é delegado e re-embrulhado, fazendo a cadeia crescer.
-        attr = getattr(self._builder, name)
-        if not callable(attr):
-            return attr  # propriedade simples do builder
-
-        def _call(*args, **kwargs):
-            return _QueryProxy(
-                self._owner,
-                self._chain + [_Recorded(name, args, kwargs)],
-                attr(*args, **kwargs),
-            )
-
-        return _call
-
-    def execute(self) -> Any:
-        """Executa com reciclagem preventiva + repetição em erro de transporte."""
-        return self._owner._run(self._chain)
-
-
-class ResilientClient:
-    """Cliente do banco com reciclagem por ociosidade e retry de transporte.
-
-    Substituto direto do `Client` do supabase-py para o uso que o Kobe faz
-    (`.table(...)`). Identidade estável: o objeto é passado adiante por todo o
-    código e continua o mesmo — quem troca é o cliente INTERNO.
-
-    Thread-safe: o Kobe chama o banco de dentro de `asyncio.to_thread`, então
-    dois turnos podem bater aqui ao mesmo tempo. O lock protege a troca do
-    cliente interno (a operação em si roda fora do lock, sem serializar o banco).
-    """
-
-    def __init__(self, factory: Callable[[], Client]) -> None:
-        self._factory = factory
+    def __init__(self, conninfo: str, *, open_now: bool = True) -> None:
+        self._conninfo = conninfo
         self._lock = threading.Lock()
-        self._inner: Client = factory()
-        self._last_ok = time.monotonic()
-        self._generation = 0
-
-    # -- ciclo de vida do cliente interno --------------------------------
-
-    def _recycle(self, expected_generation: int, motivo: str) -> None:
-        """Troca o cliente interno. `expected_generation` evita que duas threads
-        que falharam na mesma conexão morta reciclem duas vezes seguidas."""
-        with self._lock:
-            if self._generation != expected_generation:
-                return  # outra thread já reciclou esta conexão
-            self._generation += 1
-            self._inner = self._factory()
-            self._last_ok = time.monotonic()
-        logger.info("db: cliente reciclado (%s) gen=%d", motivo, self._generation)
-
-    def _client_for_call(self) -> tuple[Client, int]:
-        """Devolve o cliente a usar, reciclando antes se estiver ocioso demais.
-
-        Com a resiliência desligada isto é passe-livre TOTAL — nem reciclagem
-        preventiva. `DB_RESILIENCE_ENABLED=false` tem que devolver exatamente o
-        comportamento legado, senão não é rollback de verdade.
-        """
-        with self._lock:
-            inner, generation = self._inner, self._generation
-            idle = time.monotonic() - self._last_ok
-        if _resilience_enabled() and idle > _idle_recycle_seconds():
-            self._recycle(generation, f"ocioso há {idle:.0f}s")
-            with self._lock:
-                return self._inner, self._generation
-        return inner, generation
+        self._pool = ConnectionPool(
+            conninfo=conninfo,
+            min_size=1,
+            max_size=_pool_max_size(),
+            max_idle=_idle_recycle_seconds(),
+            kwargs={
+                "row_factory": dict_row,
+                "autocommit": True,
+                # Fuso fixado na sessão: a ponte não pode depender do que o
+                # cluster ou o banco tenham configurado. Vide o cabeçalho.
+                "options": "-c TimeZone=UTC",
+            },
+            open=open_now,
+            name="kobe",
+        )
 
     # -- execução --------------------------------------------------------
 
-    @staticmethod
-    def _is_write(chain: list[_Recorded]) -> bool:
-        return any(
-            step.name in ("insert", "update", "upsert", "delete") for step in chain
-        )
-
-    def _replay(self, client: Client, chain: list[_Recorded]) -> Any:
-        target: Any = client
-        for step in chain:
-            target = getattr(target, step.name)(*step.args, **step.kwargs)
-        return target.execute()
-
-    def _run(self, chain: list[_Recorded]) -> Any:
+    def _run(self, sql: str, params: Sequence[Any], *, write: bool) -> list[dict]:
         if not _resilience_enabled():
-            # Rollback trivial: sem reciclagem, sem retry — comportamento legado.
-            return self._replay(self._inner, chain)
+            # Rollback trivial: uma tentativa, sem repetição — o comportamento
+            # de quem não quer a camada.
+            return self._attempt(sql, params)
 
-        may_retry = _retry_writes() or not self._is_write(chain)
-        client, generation = self._client_for_call()
+        may_retry = _retry_writes() or not write
 
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                result = self._replay(client, chain)
+                return self._attempt(sql, params)
             except TRANSPORT_ERRORS as exc:
-                last_step = chain[-1].name if chain else "?"
                 if attempt >= _MAX_RETRIES or not may_retry:
                     logger.warning(
-                        "db: erro de transporte em %s (tentativa %d) — desistindo: %s",
-                        last_step, attempt + 1, exc,
+                        "db: erro de transporte (tentativa %d) — desistindo: %s",
+                        attempt + 1, exc,
                     )
                     raise
                 logger.warning(
-                    "db: erro de transporte em %s (tentativa %d/%d) — reciclando: %s",
-                    last_step, attempt + 1, _MAX_RETRIES + 1, exc,
+                    "db: erro de transporte (tentativa %d/%d) — reconectando: %s",
+                    attempt + 1, _MAX_RETRIES + 1, exc,
                 )
-                self._recycle(generation, "erro de transporte")
                 time.sleep(_BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)])
-                with self._lock:
-                    client, generation = self._inner, self._generation
-            else:
-                with self._lock:
-                    self._last_ok = time.monotonic()
-                return result
 
         raise AssertionError("inalcançável")  # pragma: no cover
 
-    # -- superfície usada pelo Kobe --------------------------------------
+    def _attempt(self, sql: str, params: Sequence[Any]) -> list[dict]:
+        """Uma tentativa. Conexão quebrada é descartada pelo pool na devolução,
+        então a tentativa seguinte já sai com uma nova."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params) if params else None)
+                if cur.description is None:
+                    return []  # comando sem resultado (UPDATE/DELETE sem RETURNING)
+                return [_normalize_row(row) for row in cur.fetchall()]
 
-    def table(self, *args, **kwargs) -> _QueryProxy:
-        client, _ = self._client_for_call()
-        return _QueryProxy(
-            self, [_Recorded("table", args, kwargs)], client.table(*args, **kwargs)
-        )
+    # -- os quatro verbos ------------------------------------------------
 
-    def rpc(self, *args, **kwargs) -> _QueryProxy:
-        client, _ = self._client_for_call()
-        return _QueryProxy(
-            self, [_Recorded("rpc", args, kwargs)], client.rpc(*args, **kwargs)
-        )
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[dict]:
+        return self._run(sql, params, write=False)
 
-    def __getattr__(self, name: str) -> Any:
-        """Qualquer outra coisa (auth, storage…) vai direto ao cliente real,
-        sem resiliência. O Kobe não usa nada disso hoje — mas se um dia usar,
-        funciona, só não ganha retry."""
-        return getattr(self._inner, name)
+    def one(self, sql: str, params: Sequence[Any] = ()) -> Optional[dict]:
+        rows = self._run(sql, params, write=False)
+        return rows[0] if rows else None
+
+    def scalar(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        row = self.one(sql, params)
+        if not row:
+            return None
+        return next(iter(row.values()))
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> list[dict]:
+        return self._run(sql, params, write=True)
+
+    # -- ciclo de vida ---------------------------------------------------
+
+    def close(self) -> None:
+        """Fecha o pool. O bot não chama em operação normal — o processo morre
+        e o sistema operacional recolhe. Existe para teste e para scripts."""
+        with self._lock:
+            self._pool.close()
+
+    def __repr__(self) -> str:  # pragma: no cover — diagnóstico
+        # NUNCA imprime a conninfo: ela pode carregar senha.
+        return f"<KobeDB pool={self._pool.name!r}>"
 
 
-def build_client(config: Config) -> Client:
-    """Cliente do banco pronto pra uso. Com `DB_RESILIENCE_ENABLED=false` ainda
-    devolve o wrapper, mas ele vira passe-livre (nem recicla, nem repete)."""
-    url, key = config.supabase_url, config.supabase_key
-    return ResilientClient(lambda: create_client(url, key))  # type: ignore[return-value]
-
-
-def build_raw_client(config: Config) -> Client:
-    """Cliente cru, sem wrapper. Só pra teste/diagnóstico."""
-    return create_client(config.supabase_url, config.supabase_key)
+def build_client(config: Config) -> KobeDB:
+    """A ponte pronta pra uso, a partir da configuração carregada."""
+    return KobeDB(config.database_url)

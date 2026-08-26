@@ -17,7 +17,7 @@ run de background — o agente só copia a string, não inventa data.
 Variáveis de ambiente (injetadas pelo bot do Kobe ao invocar `claude -p`):
     KOBE_CHAT_ID      chat do tópico atual
     KOBE_THREAD_ID    (opcional) forum topic; vazio = "general"
-    SUPABASE_URL / SUPABASE_KEY   acesso ao banco
+    DATABASE_URL                  acesso ao banco
 
 Sai 0 sempre que conseguir consultar (mesmo sem mensagens novas); !=0 só
 em erro de configuração/conexão.
@@ -37,7 +37,7 @@ if str(_KOBE_HOME) not in sys.path:
 
 # Re-exec no Python do venv do projeto se as deps não estiverem no interpretador
 # atual. O shebang `#!/usr/bin/env python3` resolve pro Python do SISTEMA, que
-# não tem as deps do bot (supabase etc.) — só o venv (.venv) tem. Idempotente:
+# não tem as deps do bot (psycopg etc.) — só o venv (.venv) tem. Idempotente:
 # não re-exec se já somos o venv nem se a dep já está disponível.
 import importlib.util  # noqa: E402
 
@@ -45,7 +45,7 @@ _VENV_PY = _KOBE_HOME / ".venv" / "bin" / "python"
 if (
     _VENV_PY.exists()
     and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("supabase") is None
+    and importlib.util.find_spec("psycopg") is None
 ):
     os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
@@ -70,29 +70,33 @@ def main() -> int:
 
     chat_id = os.environ.get("KOBE_CHAT_ID", "").strip()
     thread_id_raw = os.environ.get("KOBE_THREAD_ID", "").strip()
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
-    supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
+    database_url = os.environ.get("DATABASE_URL", "").strip()
 
-    if not chat_id or not supabase_url or not supabase_key:
+    if not chat_id or not database_url:
         print(
-            "kobe-recall-since: envs KOBE_CHAT_ID/SUPABASE_URL/SUPABASE_KEY "
-            "ausentes (só funciona chamado de um agente do Kobe)",
+            "kobe-recall-since: envs KOBE_CHAT_ID/DATABASE_URL ausentes "
+            "(só funciona chamado de um agente do Kobe)",
             file=sys.stderr,
         )
         return 1
 
+    db = None
     try:
-        from supabase import create_client
-
+        from bot.db import KobeDB
         from bot.topic_manager import ensure_topic, get_messages_since
 
-        db = create_client(supabase_url, supabase_key)
+        db = KobeDB(database_url)
         thread_id = int(thread_id_raw) if thread_id_raw else None
         topic_id = ensure_topic(db, thread_id, chat_id=int(chat_id))
         novas = get_messages_since(db, topic_id, since_iso)
     except Exception as exc:  # noqa: BLE001 — qualquer falha vira erro claro
         print(f"kobe-recall-since falhou: {exc}", file=sys.stderr)
         return 1
+    finally:
+        # Processo de vida curta: fecha o pool pra não deixar conexão pendurada
+        # no servidor enquanto o interpretador desmonta.
+        if db is not None:
+            db.close()
 
     if not novas:
         print(f"(nenhuma mensagem nova depois de {since_iso})")

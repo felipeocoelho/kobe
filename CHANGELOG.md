@@ -4,6 +4,552 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Bateria funcional C3 executada — 13 verdes, 1 vermelho (2026-08-26)
+
+**Operador pediu:** rodar a Camada 3 (cenários F1–F14) do Novo Ambiente Postgres contra o
+bot de dev, registrando verde/vermelho com evidência, e atualizar o runbook com os números
+que saíssem de F13 e F14.
+
+**Por quê:** as Camadas 1 e 2 provam que o dado migrou íntegro e que a suíte não regrediu.
+Nenhuma das duas prova que **o produto funciona rodando em cima do banco novo** — palavra
+do operador em 26/08: *"Ah, legal, foi tudo ok com a migração. Então vamos ver se isso aqui
+tá funcionando."* A Camada 3 era a lacuna.
+
+**Foi feito:** os 14 cenários, contra `@hal_dev_bot` / `kobe_dev` com 3.469 mensagens
+reais. Roteiro completo em `.local/migracao/bateria-c3.txt`; os cenários que não são
+conversa viraram scripts próprios ao lado dele. Relatório com evidência por cenário em
+`pendencias/2026-08-26-bateria-testes-exaustiva.md`; runbook atualizado com os números.
+
+**O vermelho — e ele não é do ambiente novo.** F9 ("dev que constrói dev") falhou: a Trava 1
+do dispatcher do Coder recusa o disparo com uma mensagem que se refuta sozinha — *"a cwd
+`<árvore de dev>` está sob a raiz de PRODUÇÃO (`<a MESMA árvore de dev>`)"* — o caminho
+recusado e a "produção" acusada são a mesma string.
+A causa está em `plugins/public/coder/scripts/run_remote.py`, `_prod_cwd_reason`: ela deriva
+"raiz de produção" de `$KOBE_HOME`, e o `.env` de dev define `KOBE_HOME` como a árvore de
+dev. **Não é artefato do arnês** — o `kobe-dev.service` tem o mesmo `KOBE_HOME`, logo
+nenhuma sessão Coder pode nascer a partir do bot de dev. **Não consertado de propósito:**
+mudar a fonte de dado de uma trava de segurança é decisão de arquitetura, do operador.
+
+**Quatro premissas da especificação que não se sustentaram**, todas verificadas na fonte
+antes de virarem teste — nenhuma é regressão da migração:
+
+1. **F6** — o Kobe não grava embedding (`bot/artifacts.py` diz que a coluna fica vazia até a
+   "Fase 9"; 0 de 5 artefatos têm vetor). Não existe caminho de produto que escreva vetor,
+   então o cenário passou a provar o **ambiente** (pgvector 0.6: escrita 1536-d, volta bit a
+   bit, cosseno 0/1, índice ivfflat), com o escopo dito na cara.
+2. **F7** — "Apolo lista contatos (ORDER BY nome)" não existe: a coluna é `nome_canonico` e
+   o Apolo não tem `ORDER BY` nenhum. O caminho real é `nome_canonico ILIKE %s`, que depende
+   do **ctype** — sob `C` um contato acentuado ficaria invisível **sem erro no log**. O
+   cenário melhorou: testa ordenação e busca.
+3. **F10** — o Keyko **não fala com o Postgres** (estado dos alertas é YAML). O segundo
+   cliente do banco de verdade é o **Apolo**, que abre `psycopg.connect` próprio. Cenário
+   partido em dois: o daemon (disparou, verde) e a concorrência real (dois clientes, 40
+   rodadas cada, sem perda nem duplicata).
+4. **F12** — `CONNECTION LIMIT 0` **não derruba** o banco em dev, porque não se aplica a
+   superusuário e a conexão de dev é do `felipe`. Refeito pelo modo de falha real. Revelou
+   uma assimetria que vale para o corte: em produção a role `kobe` **não** é superusuário.
+
+**Testes:** os 14 cenários são o teste. Suíte de regressão: `pytest -q tests/` com **597
+passando**. Latência medida do banco novo: p50 0,20 ms · p95 0,52 ms (n=300) — três ordens
+de grandeza abaixo do turno completo (p50 33,5 s), que é dominado pelo LLM.
+
+**Reversão:** nada a reverter — a bateria é leitura e escrita de sondas, todas apagadas ao
+fim. Estado conferido: dev em `main`, serviço ativo, `kobe_dev` com `datconnlimit=-1`,
+**produção intocada** e a **instância 5433 ainda vazia** (só as 6 linhas de
+`schema_migrations`).
+
+### Trava 0 do arnês: o `.env` da árvore vence o ambiente herdado (2026-08-26)
+
+**Operador pediu:** nada — este apareceu **rodando**, na primeira execução real da bateria
+C3, minutos depois do conserto das duas pernas. Vai registrado porque é da família dos
+erros que a sessão do Coder existe pra não deixar passar.
+
+**Por quê:** `load_dotenv()` **não sobrescreve** variável que já está no ambiente. Uma
+sessão automatizada disparada pelo Kobe de **produção** herda o ambiente dele —
+`TELEGRAM_BOT_TOKEN`, `GROQ_API_KEY`, `TELEGRAM_ALLOWED_USER_IDS`. Resultado observado: o
+arnês subiu **falando como `@felipe_kobe_bot`** (o bot de produção) apontado para o chat de
+**dev**.
+
+Não houve estrago, e vale dizer exatamente por quê: o bot de produção **não é membro** do
+grupo de dev, então o Telegram respondeu `BadRequest: Chat not found` e nada foi enviado.
+Isso é sorte com cara de trava. Com os dois bots no mesmo grupo, a ferramenta teria falado
+como produção sem avisar ninguém — que é precisamente a "porta dos fundos" que o docstring
+deste arquivo diz temer.
+
+**Foi feito:**
+
+- **`forcar_env_do_arquivo(env_path)`** — aplica o `.env` da árvore **por cima** do
+  ambiente e **devolve a lista do que atropelou**, que vira `WARNING` no log. Para uma
+  ferramenta cujo propósito *é* rodar a configuração de dev, o arquivo manda e o ambiente
+  não; e substituição silenciosa não serve nem quando está certa.
+- **`get_me()` no arranque**, registrando `@usuário` e id do bot antes de qualquer injeção.
+  Trocar de bot sem perceber passa a ser impossível **mesmo se a trava um dia falhar** —
+  é a mesma lógica da reação 👀: um sinal primitivo que não depende do resto dar certo.
+- Invólucro operacional `.local/migracao/injeta-dev.sh`, que limpa as variáveis herdadas e
+  garante `~/.local/bin` no `PATH` (o turno chama o CLI do `claude`).
+
+**Testes:** dois novos em `tests/test_dev_inject.py` — o `.env` sobrescreve token herdado e
+a substituição é reportada; variável que só existe no arquivo **não** entra no aviso
+(ruído em aviso é aviso que ninguém lê). Suíte inteira segue verde.
+
+**Reversão:** `git revert 6111d2d`. Volta ao comportamento anterior — que é o que herdava o
+token de produção.
+
+### O arnês de injeção volta a funcionar — as duas pernas do conserto (2026-08-26)
+
+**Operador pediu:** rodar a Bateria funcional C3 (F1–F14) do Novo Ambiente contra o bot de
+dev, e — antes disso — consertar `infra/dev_inject.py`, "que monta o `Update` sem bot
+associado e estoura em `_react_received`". É código de repositório, então vai com teste.
+
+**Por quê:** o operador declarou que não vai testar o ambiente novo digitando. Sem um arnês
+que funcione, a Camada 3 inteira depende dele — e o requisito não fecha. A ferramenta
+existia, mas **nenhum turno chegava a começar**.
+
+**Foi feito — e o bug era DOIS, o segundo escondido atrás do primeiro:**
+
+1. **`Update` sem bot associado.** `montar_update` usava os construtores da
+   python-telegram-bot; o objeto resultante não carrega bot, e `_react_received`
+   (`bot/telegram_handler.py:391`) chama `message.get_bot()` na **primeira linha** do
+   handler, pra reagir 👀. Resultado: `RuntimeError: This object has no bot associated
+   with it` e o turno morria antes de existir. Agora monta por `Update.de_json(bruto,
+   bot)` — o mesmo caminho que o PTB usa ao receber do Telegram, e que desce o bot pela
+   árvore inteira do objeto. `set_bot()` não serviria: marca só a raiz e deixa os filhos
+   órfãos pra estourar adiante.
+2. **A mensagem sintética não existia do lado do Telegram.** Consertada a perna 1, o turno
+   passava a andar e morria mais tarde: o bot responde **citando** a mensagem de entrada
+   (`ProgressReporter` leva `reply_to_message_id`, `telegram_handler.py:1134`), e um
+   `message_id` inventado faz o Telegram recusar com *"Message to be replied not found"*.
+   Agora a ferramenta **publica** o texto no tópico (marcado com 🧪), usa o `message_id`
+   real, e injeta. O `from` do update segue sendo o operador — quem julga é o `authz` de
+   verdade; o eco só faz o objeto existir. Bônus alinhado ao que o arquivo sempre disse
+   querer: o operador **assiste** a bateria ao vivo no grupo de dev. `--sem-eco` mantém o
+   caminho antigo pra diagnóstico sem rede, com o risco documentado.
+
+Mais duas peças que a bateria exige e que não existiam: **cronômetro por turno com resumo
+p50/p95** (sem instrumento, latência vira achismo) e **modo `--rajada`**, que injeta sem
+esperar o turno anterior fechar — sem ele não existe rajada, existe fila, e o FIFO por
+tópico nunca seria exercitado.
+
+Registrado também no docstring: o turno chama o CLI do `claude` em `~/.local/bin`, e um
+shell sem esse `PATH` faz a bateria responder "o CLI do Claude não está disponível" —
+falha do arnês, não do bot. Custou a primeira tentativa do dia.
+
+**Testes:** `pytest -q tests/` — **597 passando** com `KOBE_TEST_DATABASE_URL`
+(553 + 53 pulados sem banco), o mesmo número de referência do runbook, agora incluindo
+**9 testes novos** em `tests/test_dev_inject.py`: o de regressão que amarra o bot
+(`get_bot()` na mensagem, no chat e no usuário), o que garante que sem bot a montagem
+funciona mas `get_bot()` recusa, os do `message_id` real, o da marca de teste no eco, e
+quatro do percentil (amostra de um, ordenação, p95 que não estoura índice, amostra vazia
+que recusa em vez de inventar 0.0).
+
+**Achado fora do escopo, não consertado aqui:** com banco, 9 testes de
+`tests/test_db_integration.py` falham — **e falham igual na árvore intocada**, antes de
+qualquer mudança minha. A causa é resíduo no banco de rascunho `kobe_test` (65 mensagens,
+54 tópicos de execuções anteriores): as fixtures derivam o canal de `crc32(nome do teste)`,
+que é determinístico, então `ensure_topic` reencontra o tópico velho e conta as sobras
+junto (`assert 9 == 3`). É limpeza de banco de rascunho, não código — e limpar banco é
+operação destrutiva, que não faço sem a palavra do operador.
+
+**Commits:** ver `fix(dev-inject)` abaixo.
+
+**Reversão:** `git revert` do commit do conserto. A árvore de dev volta a `701f6cb0`, o
+arnês volta a não funcionar, e nada mais no Kobe é afetado — `tests/test_dev_inject.py`
+prova que nenhum arquivo de `bot/` importa este módulo.
+
+### Diretriz do operador: o instalador PROVISIONA o banco, nao o pressupoe (2026-08-26)
+
+**Operador pediu:** diretriz permanente, chegada depois do `C13` — *"O instalador nao vai partir do principio que existe um banco em algum lugar; ele vai criar esse banco."* Registrada em `.local/diretrizes/instalador-provisiona-o-banco.md`. A aplicacao a esta sessao e estreita e esta escrita la: **o `C13` nao pode cimentar a premissa contraria**. Construir o instalador completo e a sessao do instalador publico.
+
+**Auditei o `C13` na fonte e ele CIMENTAVA a premissa, em tres lugares:**
+
+1. `install.sh` anunciava, nos pre-requisitos, *"PostgreSQL 16+ acessivel, **com um banco vazio criado pro Kobe**"*.
+2. Quando o runner falhava, a primeira causa sugerida era *"o banco nao existe ainda → **createdb kobe**"* — ou seja, mandava a pessoa fazer a mao exatamente o que o instalador deve fazer.
+3. O `README.md` repetia a mesma exigencia.
+
+**Foi feito — o degrau mais baixo e mais comum da diretriz, nada alem:**
+
+- **`infra/provision_db.py`** — cria o banco do `DATABASE_URL` **se ele nao existir**. Conecta ao banco `postgres` do mesmo servidor (nao da pra criar um banco estando conectado a ele), confere `pg_database`, e cria. Idempotente: banco existente e reconhecido e **nao** e tocado. Tem `--dry-run`.
+- **`install.sh` chama o provisionador ANTES do runner**, e os dois passos tem mensagem de falha propria — *"nao consegui preparar o banco"* e *"o banco existe, mas o schema falhou"* sao problemas diferentes e pedem coisas diferentes.
+- Os tres textos foram corrigidos. O instalador agora diz, em maiuscula: **"VOCE NAO PRECISA CRIAR O BANCO — o instalador cria."**
+
+**A parte que nao e burocracia: OS PARAMETROS DE CRIACAO.** Um banco criado com o default do `initdb` **nasce divergente**, e de dois jeitos que esta sessao ja tinha descoberto do jeito dificil:
+
+- **Collation.** O `initdb` do Ubuntu cria em `C.UTF-8`, que ordena por byte cru. O dado e o mesmo; a ordem de `ORDER BY <texto>` muda — e o Kobe ordena a lista de contatos por nome. **Collation nao se troca depois sem recriar o banco.**
+- **Fuso.** Todo banco herda o `TimeZone` do cluster, que fica no fuso local da maquina. Isso muda o TEXTO que o driver devolve pra `timestamptz` — e o Kobe compara `created_at` como string.
+
+Se o instalador criasse com o default, **toda instalacao nova acenderia o portao T4 no primeiro dia**. Entao os parametros **nao sao cravados aqui**: saem de `tests/fixtures/schema_expected.json`, a **mesma** referencia que `infra/compat_gate.py` usa pra julgar. Uma fonte, dois consumidores — nao ha como o criador e o juiz discordarem, e ha teste exigindo que os dois apontem pro mesmo arquivo. Se a referencia estiver ilegivel (copia parcial do repo), o fallback ainda e um banco **sao**, nunca o default do `initdb`.
+
+**A prova ponta a ponta, num banco que nao existia:** `provision_db` criou → `migrate.py up` aplicou as 6 versoes → `compat_gate` deu **verde** → a ponte gravou topico, sessao e mensagem. **De banco inexistente a Kobe funcional, sem ninguem rodar SQL a mao.**
+
+**A FRONTEIRA, escrita no proprio modulo pra a proxima sessao herdar** — e com teste documental que falha se alguem apagar a lista. O que este arquivo **nao** faz: (1) detectar se ha PostgreSQL na maquina e qual versao, em vez de so tentar conectar; (2) decidir com a pessoa entre usar o cluster existente ou subir um dedicado; (3) criar cluster/instancia e criar **role** proprio com o minimo de privilegio — hoje o usuario da conexao e reaproveitado como dono; (4) instalar o PostgreSQL e o pgvector quando faltarem.
+
+**Testes:** `tests/test_provision_db.py`, **21 testes**. Os que importam: os parametros de criacao batendo com a referencia; o criador e o juiz lendo o **mesmo** arquivo; um banco criado com esses parametros **passando pelo comparador de ambiente** (fecha o circulo sem tocar em banco); referencia ausente, corrompida e parcial caindo num default sao e **nunca** em `C.UTF-8`; leitura do nome do banco nas quatro formas usuais de string de conexao; URL sem nome de banco dando erro **explicado** em vez de `KeyError`; e a url de manutencao trocando **so** o banco, preservando host, porta e usuario — mudar o host por engano provisionaria no lugar errado.
+
+Suite verde — **544 passando + 53 pulados**; com banco, **597 passando**. `tests/portability_guard.sh` verde. `bash -n install.sh` limpo.
+
+**Reversao:** revert do commit. `provision_db.py` e arquivo novo; `install.sh` volta a so migrar.
+
+### Fecho da Sessao #3: o contrato do projeto acompanha a ponte (2026-08-26)
+
+**Operador pediu:** o R7 equivalente desta sessao — deixar a documentacao contando a verdade sobre o que mudou.
+
+**Por que importa mais do que parece:** documentacao que descreve um sistema que nao existe mais **nao e ruido — mente com autoridade**. O `CLAUDE.md` e carregado a cada turno do agente; deixa-lo dizendo "memoria persistente no Supabase" faria o proprio Kobe raciocinar sobre um banco que ele nao usa mais.
+
+**Foi feito:**
+
+- **Backup datado do `CLAUDE.md`** em `.local/backups/`, feito **antes** de qualquer edicao (regra dura do operador). Foi o primeiro ato da sessao, junto da tag.
+- **`CLAUDE.md`** — a secao de memoria persistente passou a dizer o que e verdade: **PostgreSQL acessado direto por `psycopg`**, sem PostgREST e sem adaptador; **onde o banco mora e configuracao, nao codigo** (uma linha `DATABASE_URL`); e `bot/db.py` e o unico arquivo que sabe qual banco e. Entraram as duas ferramentas de manutencao que passaram a existir, com o que cada uma garante: o runner (`status`/`up`/`baseline`, ordem, idempotencia, recusa de fora de ordem, drift, e **migration aplicada e imutavel**) e o portao de compatibilidade — com a **ordem fisica das colunas** nomeada, porque e a divergencia que nenhum diff por nome enxerga e a que quebra carga posicional em silencio.
+
+**⚠️ A NOTA DE DEPLOY — o unico ponto desta sessao que exige leitura devagar.**
+
+**Este merge nao se deploya sozinho: ele E o corte.** A partir do commit da ponte, o repositorio **nao sobe em producao** — a producao ainda fala com o banco antigo, e um `git pull` que traga isto sem uma `DATABASE_URL` valida faz o servico **nao subir**.
+
+Isso e **por desenho, nao descuido**. Nao ha como ter a ponte direta e manter os dois caminhos vivos ao mesmo tempo sem um seletor de backend — que esta explicitamente banido desde 2026-07-25. O desenho do proprio operador ja respondia a isso, e e o que esta sendo seguido:
+
+- **Rollback plano A** ("troca a connection string e reinicia") serve pra trocar de **alvo Postgres**. Ele **nao** leva de volta ao banco antigo: isso exigiria a senha do banco daquele servico, que e coisa diferente do token de administracao que existe. Registrado pra nao virar surpresa no pior momento.
+- **Rollback plano B** e o caminho de volta de verdade, e funciona **sem senha nenhuma**: a tag **`pre-postgres-cutover`** foi criada **antes de o repositorio mudar**, apontando pro ultimo commit da era anterior. `git checkout` nela + reinicio devolve o Kobe como estava.
+- **O corte leva codigo e dado juntos.** Mensagem gravada no banco novo depois do corte fica orfa se alguem voltar pela tag. Isso e assunto do bloco de corte, nao desta sessao — mas fica dito.
+- **O Apolo corta junto.** Ele e repositorio separado, monta o proprio cliente, e le e escreve a **mesma tabela `contacts`**. Se um cortar e o outro nao, os dois escrevem em lugares diferentes **sem erro em log nenhum**. A branch dele esta pronta e nao foi mergeada nem publicada.
+
+**Testes:** portoes finais, todos verdes — suite do Kobe **527 passando + 49 pulados** (sem banco) e **576 passando** (com banco de integracao); `tests/portability_guard.sh` verde; suite do plugin Apolo **35**; suite do plugin Coder **28**; e `infra/compat_gate.py` verde contra os bancos construidos pelo runner.
+
+O portao contra o `kobe_dev` reporta **10 divergencias legitimas** — ele esta atras da migration `005`, exatamente como a producao. Isso e o portao **acertando**, e esta registrado como resultado, nao maquiado como verde.
+
+**Reversao:** revert do commit devolve o texto anterior; o backup datado em `.local/backups/` guarda a versao original independente do git.
+
+### `migrate.py baseline` — o buraco que so apareceu no portao final (2026-08-26)
+
+**Operador pediu:** nada disto explicitamente — apareceu rodando os portoes finais da Sessao #3, e o silencio sobre ele custaria dado.
+
+**O que eu vi.** Rodando `migrate.py status` contra o `kobe_dev` — que existe, tem o schema e esta carregado com a copia da producao — o runner respondeu **"6 conhecidas, 0 aplicadas, 6 pendentes"**. Correto pela logica dele: o `kobe_dev` foi montado a partir de um dump, nunca passou pelo runner, e portanto **nao tem a tabela de controle**.
+
+**Por que isso e perigoso, e nao so estranho.** Quem visse esse `status` e rodasse `up` pra "acertar o registro" aplicaria a historia inteira. As migrations idempotentes atravessariam sem estrago — mas a **`005` apagaria de verdade** `conversations`, `conversation_tags` e as colunas do Chat Manager. A pessoa que so queria carimbar a versao veria dado sumir, sem ter pedido nada disso. **E o cenario chega em breve**: o banco local de producao vai nascer de uma carga de dados, nao do runner. Ele nasceria exatamente neste estado.
+
+**Foi feito:** `migrate.py baseline --through <versao>` — **registra** versoes como aplicadas **sem executar nenhuma delas**. Diz ao runner "este banco ja esta neste ponto", e dali em diante o `up` so aplica o que veio depois. Duas travas, e as duas sao o ponto:
+
+- **Recusa se o banco ja tiver registro.** Carimbar por cima de um historico existente esconderia exatamente a divergencia que o runner existe pra mostrar.
+- **`--through` e obrigatorio.** Sem ele, o default natural seria "marca tudo" — e "tudo" inclui as destrutivas, que passariam a **nunca** rodar naquele banco, em silencio. Quem chama tem que dizer ate onde.
+
+Com `--dry-run`, imprime o que marcaria **e o que continuaria pendente** — porque a pergunta que a pessoa realmente tem nessa hora e *"o que ainda vai rodar de verdade depois disso?"*.
+
+**Conferido contra o caso real:** `baseline --through 004 --dry-run` no `kobe_dev` lista `000`..`004` pra marcar e mostra a **`005` seguindo pendente**, que e a resposta certa — o `kobe_dev` esta mesmo atras da aposentadoria do Chat Manager, e o `DROP` dela nao e desta sessao.
+
+**Testes:** 3 novos (25 no arquivo). Um exige `--through`, um recusa versao inexistente sem sequer conectar, e um — ao vivo — prova a recusa em banco que ja tem historico.
+
+Suite verde — **527 passando + 49 pulados**; com banco, **576 passando**. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit. `baseline` e subcomando novo; `status` e `up` nao mudaram.
+
+### O instalador provisiona Postgres e aplica o schema sozinho (2026-08-26)
+
+**Operador pediu:** o default declarado no §6.2 do plano — *"o minimo coerente"* —, aprovado.
+
+**Por que nao dava pra deixar quieto.** Depois da troca de driver, o `install.sh` pedia URL e chave do Supabase, gravava `SUPABASE_URL`/`SUPABASE_KEY` no `.env`, e mandava a pessoa **colar `schema.sql` num painel web**. Ou seja: provisionaria um banco que o runtime **nao le**, e produziria um `.env` que faz o bot **nao subir** — com a mensagem de erro guiada de `bot/config.py` como unico sinal. Um instalador assim nao e "fora de escopo": e defeito embarcado.
+
+**Foi feito — o minimo coerente, nada de UX de instalador:**
+
+- **Pergunta `DATABASE_URL`** em vez de URL + chave, mostrando as duas formas (socket unix sem senha, e TCP com usuario e senha).
+- **Aplica o schema chamando `infra/migrate.py up`**, em vez do copiar-e-colar. Isso troca *"cole isto no painel e me avise quando terminar"* por uma operacao que o instalador **executa e verifica** — e que sabe em que versao o banco esta. Numa instalacao ja em dia, e no-op.
+- **A deteccao "o schema ja foi aplicado?" sumiu, e some porque virou desnecessaria.** Ela era um `curl` no PostgREST checando se `topics` respondia 200 — heuristica que inferia o todo a partir de uma tabela. O runner tem tabela de versao: ele **sabe** o que falta, em vez de adivinhar.
+- **Roda o portao de compatibilidade (T4) depois**, e **avisa sem bloquear**. A distincao e deliberada: um banco criado com collation diferente da referencia funciona — so ordena texto de outro jeito. Barrar a instalacao por isso seria remedio pior que a doenca; nao avisar seria deixar a pessoa descobrir daqui a seis meses que a lista de contatos ordena diferente da do vizinho.
+- **Quando o runner falha, o instalador nao morre:** imprime as causas comuns (banco inexistente, usuario sem DDL, `pgvector` nao instalado), diz o comando exato pra retomar, e segue. A pessoa fica com um Kobe instalado e um passo pendente, em vez de sem Kobe.
+- **Entrou um `warn()`** ao lado de `log()` e `err()`. `err()` **encerra o script**, e nenhum destes casos justifica abortar a instalacao inteira por algo que se conserta em um comando.
+- **Os pre-requisitos anunciados no topo** deixaram de pedir conta em servico externo e passaram a pedir PostgreSQL 16+, as tres extensoes, e a string de conexao — com a nota de que **o instalador aplica o schema sozinho e a pessoa nao roda SQL a mao**.
+- `README.md` e `uninstall.sh` acompanharam.
+
+**Verificacao:** `bash -n` limpo nos dois scripts (o caminho interativo do instalador nao da pra exercitar sem uma instalacao de verdade — isto esta dito, nao maquiado). Nenhuma mencao ao servico antigo sobra em `install.sh`, `uninstall.sh` ou `README.md`.
+
+Suite verde — **525 passando + 48 pulados**. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit.
+
+### O ultimo import do driver antigo sai, e `supabase` deixa o `requirements` (2026-08-26)
+
+**Operador pediu:** o default declarado no §6.1 do plano — *"ou deleto, ou converto um script inerte"* —, aprovado.
+
+**Por que nao dava pra deixar quieto.** `infra/decommission_whatsapp_acervo.py` mirava a tabela `whatsapp_messages`, que **nao existe mais** (saiu na `004`; conferido: `to_regclass('public.whatsapp_messages')` devolve vazio). Ele era codigo inerte — **e o ultimo arquivo do repositorio a importar o driver antigo**. Manter um script que nao roda, so pra prender uma dependencia que sai, e o pior dos dois mundos.
+
+**Foi feito:**
+
+- Removidos `infra/decommission_whatsapp_acervo.py` e `tests/test_decommission_whatsapp.py`.
+- **`supabase>=2.0` sai de `bot/requirements.txt`.** Com isso o Kobe nao depende mais do driver antigo em lugar nenhum.
+- `docs/runbooks/decomissionar-acervo-whatsapp.md` ganhou **banner de documento historico**, no mesmo espirito do que a Sessao #2 fez com os runbooks aposentados: diz que o procedimento ja foi cumprido, que o script nao existe mais, e que nada ali deve ser executado. Nao foi apagado de proposito — ele registra o raciocinio e as travas de seguranca de uma operacao que apagou dado de producao, e isso e o tipo de coisa que se quer poder reler daqui a um ano.
+
+**Uma coisa que eu NAO fiz, e o motivo importa:** `infra/migrations/004_remove_whatsapp_messages.sql` cita o script no comentario dela, e agora aponta pra um arquivo que nao existe. **Deixei intacta.** Migration aplicada e imutavel — editar o arquivo faria o **runner construido nesta mesma sessao** acusar drift em qualquer banco que ja a rodou, e com razao: o banco teria o SQL antigo e o repo o novo. A ferramenta do Bloco 1 impediu, na pratica, uma edicao que pareceria arrumacao inofensiva. A explicacao ficou no banner do runbook.
+
+**Verificacao:** alem da suite, um teste direto — importar `bot.db`, `bot.config`, `bot.topic_manager`, `bot.snapshot`, `bot.artifacts`, `bot.memory.working_set`, `bot.apolo_handlers`, `bot.telegram_handler`, `bot.resume`, `bot.compactor` e `bot.main` **com o pacote `supabase` bloqueado no `sys.meta_path`**. Os onze importam limpo. Nao e "removi as mencoes"; e "o runtime inteiro sobe sem o pacote existir".
+
+Suite verde — **525 passando + 48 pulados** (539 antes; os 14 a menos sao os testes do script removido). `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit devolve script, teste e a linha do requirements.
+
+### A prova: 46 testes de integracao contra Postgres de verdade (2026-08-26)
+
+**Operador pediu:** implicitamente, pelo desenho da Sessao #3 — a conversao dos 45 pontos precisava de uma prova que a suite existente **nao dava**.
+
+**Por que este arquivo e a prova, e nao um extra.** O resto da suite finge no nivel de **funcao**, nao de banco: os testes trocam `get_active_session`, `count_messages`, `get_recent_messages` por lambdas. Otimo pra velocidade e blast radius — e e exatamente o buraco desta migracao. **Reescrever o corpo de `get_recent_messages` em SQL nao e coberto por nada la.** Um `ORDER BY` invertido, um `eq` que virou `gte`, um `LIMIT` esquecido, um `RETURNING` faltando: tudo isso passa verde numa suite que substitui a funcao inteira por uma lambda. Os 538 verdes dos commits anteriores **nao provavam** o SQL; estes 46 provam.
+
+**Foi feito:** `tests/test_db_integration.py`, **46 testes** cobrindo cada funcao convertida. Nao se testa "nao levantou excecao" — testa-se **semantica**:
+
+- **topics:** idempotencia do `ensure_topic`; o nome automatico do raiz conforme o sinal do `chat_id` (`Private` x `General`); o `set_topic_name` devolvendo `None` ao criar e o nome **anterior** ao renomear (e o que dispara mover a pasta no filesystem); **o mesmo `thread_id` em chats diferentes gerando topicos distintos** — a razao de a UNIQUE ser composta; slug com acento e caixa; `RETURNING` no `set_topic_status`; e o filtro `status='active'` da lista de nao-onboardados.
+- **Regressao direta do bug do `ON CONFLICT`:** um teste que cria topico **pelo nome** e falharia com `InvalidColumnReference` na forma antiga.
+- **sessions:** `RETURNING` no archive (id na 1a vez, `None` na 2a); o resumo gravado quando vem e **preservado quando nao vem**; status invalido recusado; sessao nova nascendo depois de arquivar.
+- **messages:** campos opcionais; contagem isolada por sessao; ordem cronologica crescente; o limite mantendo as **mais recentes**; a marca-d'agua **estritamente** posterior; e a leitura **por topico e nao por sessao** — de proposito, porque a sessao pode rotacionar entre o despacho de uma run de background e o momento de ela reler.
+- **`awaiting_slash_response`:** `jsonb` de ida e volta, one-shot preservado, e o campo zerado **mesmo quando o estado ja venceu**.
+- **artifacts:** tags gravadas, ausencia virando `NULL`, sessao vazia nao gravando nada, busca por titulo e conteudo sem diferenciar caixa, filtro por topico **excluindo o topico errado**, busca em branco nao varrendo a tabela, ordem e limite.
+- **snapshot:** ciclo completo (grava, le, consome, some); sessao sem mensagem nao virando snapshot; a contagem do cleanup (que depende do `RETURNING`); e **o cleanup nao levando junto o que o operador salvou com `/salvar`** — sem o filtro por tag, levaria.
+- **memoria imediata:** ordem, carimbo como texto, descarte do resumo de sessao legado.
+
+**Dois erros meus, achados pelos proprios testes, e o que cada um ensinou:**
+
+1. **A primeira versao passou na primeira execucao e falhou na segunda**, com dez testes quebrando por dado acumulado da rodada anterior — eu tinha derivado um `(chat_id, thread_id)` do nome do teste e nao limpava nada. **Suite que so passa uma vez nao e suite.** O conserto foi **uma transacao por teste, sempre revertida**: os testes nao se enxergam, a suite e repetivel, e **nao ha um unico comando destrutivo no arquivo**. Conferido: tres execucoes seguidas, todas 46 verdes, e o banco fica com **0 linhas em toda tabela** depois.
+
+2. **Com a transacao, cinco testes de ORDEM passaram a falhar** — e a causa e uma propriedade do schema que vale a pena ter escrita: `created_at` tem `DEFAULT now()`, e `now()` no Postgres e o carimbo de **inicio da transacao**, nao o relogio de parede. Dentro de uma transacao so, tres inserts recebem o **mesmo** `created_at`, os `ORDER BY` empatam, e um teste de ordem passa ou falha **por acaso**. Em producao isso nao acontece (cada insert e sua propria transacao, via `autocommit`). O conserto foi o teste **dizer qual e o instante de cada mensagem** em vez de torcer pela resolucao do relogio — o que, de quebra, deixou as asserções de ordem deterministas.
+
+**Mais a rede que pega o ponto esquecido.** Um teste de **conformidade** varre `bot/` inteiro — incluindo os helpers de `bot/bin/`, que nao tem extensao `.py` e escapam de uma busca por `*.py` — atras de `.table(`, `.rpc(`, `create_client` ou import do driver antigo. A unica mencao tolerada e a de `bot/config.py`, que compoe a mensagem de erro guiada.
+
+Ele **roda sempre, com ou sem banco**, e isso e deliberado: o "pular sem banco" mora na fixture `db`, nao num `pytestmark` de modulo. Com a marca no modulo, a rede so existiria na maquina de quem tem o banco de integracao montado. **Provado que pega:** plantei um `db.table("messages")` num arquivo de `bot/` e o teste ficou vermelho nomeando arquivo e linha.
+
+**Testes:** sem banco, **539 passando + 48 pulados** (o de conformidade roda). Com `KOBE_TEST_DATABASE_URL`, **587 passando, 0 pulados**. `tests/portability_guard.sh` verde. `infra/compat_gate.py` verde contra o banco de integracao.
+
+**Reversao:** revert do commit. So acrescenta arquivo de teste.
+
+### Os 4 helpers de `bot/bin/` atravessam a ponte — inclusive o que nenhum grep achava (2026-08-26)
+
+**Operador pediu:** a conversao da superficie do Kobe para a ponte direta (Sessao #3). Os helpers de `bot/bin/` sao a parte da superficie *"facil de esquecer porque nao sao importados por ninguem"*.
+
+**Correcao ao inventario, ja registrada e agora executada:** sao **quatro**, nao cinco. `kobe-alerta` **nao toca o banco** — o unico hit era um comentario sobre o re-exec no venv, e `bot/alertas/` guarda tudo em YAML no filesystem. Ele so teve o comentario corrigido.
+
+**Foi feito:**
+
+- **`kobe-await-response` (3 pontos).** Resolve `chat_id+thread_id -> topic -> session ativa` e grava o pedido de resposta. Conexao curta, sem pool — e um processo de vida curta. O `jsonb` do estado vai com `Jsonb()` **explicito**: um `dict` cru nao tem adaptacao automatica no psycopg, e sem isso a gravacao falharia.
+- **`kobe-recall-since`** e **`kobe-reflect`.** Ambos montavam cliente proprio; agora usam a ponte (`KobeDB`). Os dois ganharam `close()` num `finally` — sao processos de vida curta, e sem isso a conexao ficaria pendurada no servidor ate o interpretador desmontar. O marcador de re-exec no venv do `kobe-reflect` mudou de `httpx` (que hoje vem junto de outras deps) para `psycopg`, que e o marcador estrito.
+- **`_kobe_topic.py` — o que nenhum grep de `.table()` acha.** Ele falava **PostgREST cru por `urllib`**, montando `{SUPABASE_URL}/rest/v1/topics?select=...` na mao. E o resolvedor de `--topic` do `kobe-notify` e do `kobe-attach`. Se ficasse pra tras, o `--topic` das salas destacadas morreria **em silencio**, porque o caminho e tardio e so dispara quando alguem usa a flag.
+
+**O cuidado que o `_kobe_topic` exigiu.** Ele era **stdlib puro de proposito**: os helpers rodam como subprocess de `claude -p` sob qualquer python3, nao necessariamente o do venv. Consultar por HTTP dava pra fazer com `urllib`; falar Postgres exige `psycopg`, que so existe no venv. A saida foi um **re-exec TARDIO**, dentro de `resolve_topic`:
+
+- o caminho COMUM (`kobe-notify "texto"`, endereçado por env) segue **stdlib puro** e nao encosta em banco nenhum — nada mudou pra ele;
+- so o caminho `--topic` re-executa sob o python do venv, e **so quando `psycopg` faltar**;
+- re-executar ali e seguro porque `resolve_topic` roda **antes** de o helper enviar qualquer coisa: reiniciar o processo nao duplica mensagem nem anexo;
+- **sem venv pra onde ir, o erro ENSINA** em vez de estourar um `ModuleNotFoundError` cru vindo de dentro de uma funcao de resolucao de topico — quem chamou `--topic` nao faria essa ligacao sozinho.
+
+**Um bug encontrado ao provar o re-exec:** `os.execv` substitui o processo, e o que estiver em buffer de saida **some**. Fora de um terminal a saida e bufferizada por bloco, entao isso nao e hipotese — na primeira tentativa de prova as linhas impressas antes do re-exec sumiram, e foi assim que o problema apareceu. Entrou `flush()` de `stdout` e `stderr` antes do `execv`.
+
+**Verificacao ponta a ponta, contra Postgres de verdade:**
+
+- `kobe-await-response` gravou o estado, `pop_awaiting_slash_response` devolveu o plugin certo e a segunda chamada devolveu `None` (one-shot preservado); com `chat_id` inexistente saiu `rc=1` com mensagem clara, sem estourar;
+- `resolve_topic` casou por nome exato, por slug e sem diferenciar maiuscula, e devolveu `LookupError` legivel pro inexistente;
+- **contra o `kobe_dev` real** (7 topicos), `Dev Kobe`/`dev-kobe`/`DEV KOBE` resolveram todos para `(-…900, 475)`;
+- o **re-exec foi provado numa arvore de mentira** com um venv pelado: invocado por um python sem `psycopg`, o processo reapareceu sob o python do venv e resolveu;
+- e o `kobe-notify --topic "Dev Kobe"` **enviou de verdade**, com o destino resolvido pelo Postgres.
+
+Suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde.
+
+De quebra, comentarios e docstrings que descreviam o driver antigo foram corrigidos em `bot/main.py`, `bot/telegram_handler.py`, `bot/turn_guarantee.py`, `bot/memory/working_set.py`, `kobe-notify`, `kobe-attach`, `kobe-dispatch` e `kobe-alerta`. Documentacao que descreve um sistema que nao existe mais nao e ruido: **mente com autoridade**.
+
+**Reversao:** revert do commit.
+
+### As anotacoes de tipo deixam de importar o driver antigo (2026-08-26)
+
+**Operador pediu:** a conversao da superficie para a ponte direta (Sessao #3).
+
+**Por que este commit existe separado:** `bot/compactor.py`, `bot/resume.py` e `bot/telegram_handler.py` **nunca falaram com o banco** — nenhum dos tres tem um ponto de consulta. Eles so importavam `Client` do pacote `supabase` para **anotar o tipo** do parametro `db`, que recebem e repassam. Fica num commit proprio justamente porque nao e conversao: e um import que ficaria pendurado num pacote que sai do `requirements`, e o diff nao deve se misturar com o dos arquivos que realmente mudaram de comportamento.
+
+**Foi feito:** `from supabase import Client` virou `from bot.db import KobeDB`, e `db: Client` virou `db: KobeDB` nos tres. Um comentario em `telegram_handler.py` que explicava a seguranca de thread do driver antigo (*"supabase-py usa httpx.Client"*) foi atualizado pro que vale agora: a ponte usa um pool do `psycopg_pool`, tambem seguro entre threads — o que importa porque o Kobe fala com o banco de dentro de `asyncio.to_thread`.
+
+**Com isto, `bot/` (fora dos helpers de `bot/bin/`) nao tem mais nenhuma mencao ao driver antigo.** As unicas ocorrencias que sobram sao **deliberadas**: as tres linhas de `bot/config.py` que compoem a mensagem de erro guiada, dita a quem ainda tem `SUPABASE_URL` no `.env` e nao tem `DATABASE_URL`.
+
+**Testes:** suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde. Como sao so anotacoes, a propria suite (que exercita os tres arquivos de verdade) e a verificacao adequada aqui.
+
+**Reversao:** revert do commit.
+
+### `artifacts.py`, `memory/working_set.py` e `apolo_handlers.py`: os 4 pontos restantes do nucleo (2026-08-26)
+
+**Operador pediu:** a conversao da superficie do Kobe para a ponte direta (Sessao #3). Estes tres fecham os 33 pontos do nucleo.
+
+**Foi feito:**
+
+- **`bot/artifacts.py` (2).** O `.or_(f"title.ilike.{p},content.ilike.{p}")` virou `WHERE (title ILIKE %s OR content ILIKE %s)`. O insert nomeia as colunas e usa `RETURNING id`. `tags` vai como lista Python quando ha tags e como `NULL` quando nao ha — conferido no round-trip.
+- **`bot/memory/working_set.py` (1).** A janela imediata de memoria. **E o consumidor que motivou o contrato de tipos da ponte:** ele filtra com `created_at >= cutoff` onde `cutoff` e string, e com `datetime` cru levantaria `TypeError`. Exercitado de verdade — as tres mensagens sairam na ordem cronologica certa.
+- **`bot/apolo_handlers.py` (1).** O `/contatos`. Os filtros opcionais (`tipo`, `oculto`) montam o `WHERE` dinamicamente, com os valores ligados. Ficou uma **nota de ambiente no codigo**: este `ORDER BY nome_canonico` e o caso vivo que torna a collation do banco visivel pro operador — `C.UTF-8` ordena por byte cru e joga acento e maiuscula pra lugar diferente de `en_US.UTF-8`. E o T4 que vigia isso, e agora o codigo diz onde olhar.
+
+**Uma decisao de nao-mexer, registrada em vez de tomada em silencio.** Ao traduzir a busca de artefatos eu escrevi o escape de `%` e `_` do LIKE — sem ele, um `%` digitado pelo operador vira curinga e o `/retomar` traz tudo. **Desfiz.** O comportamento antigo era exatamente esse, e trocar o conjunto de resultados de um comando que o operador usa **nao e assunto de uma migracao de driver**: seria mudanca de comportamento nao autorizada, decidida por mim, de madrugada, sem ele. A melhoria e defensavel e ficou **escrita no docstring** pra quem for decidir depois. Migracao de driver troca o transporte, nao a semantica.
+
+**Verificacao contra Postgres de verdade:**
+
+- `save_artifact_from_messages` com tags, sem tags, e com sessao vazia (devolve `None`, nao grava);
+- `search_artifacts` achando por `content` e por `title`, case-insensitive, filtrado por topico (2 no topico certo, 0 num id inexistente), e devolvendo `[]` com entrada em branco;
+- busca com virgula na entrada continua se comportando como antes;
+- `get_immediate_messages` devolvendo as mensagens em ordem cronologica — **a prova pratica do contrato de tipos**;
+- round-trip de `text[]`: `['teste','kobe']` volta lista, e ausencia volta `None`;
+- as **4 combinacoes** de filtro do `/contatos` montadas e rodadas.
+
+Suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit. Tres arquivos, sem estado externo.
+
+### `bot/snapshot.py`: os 7 pontos viram SQL (2026-08-26)
+
+**Operador pediu:** a conversao da superficie do Kobe para a ponte direta (Sessao #3).
+
+**Por que importa:** `snapshot.py` e o que faz o Kobe "voltar sabendo" depois de um restart — grava as ultimas mensagens das sessoes ativas antes de desligar e as reapresenta ao operador no boot. Ele falha de propriedade: qualquer excecao e logada e engolida pra nao derrubar o shutdown. **Isso e util em producao e perigoso numa migracao** — SQL errado aqui nao aparece como erro, aparece como o Kobe silenciosamente parar de lembrar.
+
+**Foi feito:** as 7 cadeias viraram SQL. Dois pontos que precisaram de cuidado:
+
+- **`.contains("tags", [SNAPSHOT_TAG])`** virou `tags @> %s`, o operador de continencia de array do Postgres — que e exatamente o que o PostgREST traduzia por baixo. O valor segue ligado como lista Python; `text[]` vai e volta nativo pelo psycopg.
+- **`cleanup_expired_snapshots` precisou de `RETURNING id`, e isso nao e decorativo.** A funcao devolve a CONTAGEM de snapshots limpos, que antes vinha do `res.data` do delete do PostgREST. Um `DELETE` sem `RETURNING` nao devolve linha nenhuma — a contagem seria **sempre zero**, e a unica coisa a acusar seria um log dizendo "limpei 0" pra sempre. Provado no exercicio abaixo.
+
+**Verificacao contra Postgres de verdade** (a suite nao cobre este arquivo no nivel de SQL):
+
+- `save_pending_snapshots` gravou 1 snapshot de uma sessao ativa;
+- `load_pending_snapshots` releu o payload e as mensagens saíram na ordem certa;
+- `render_resume_message` montou a mensagem de retomada a partir do payload relido;
+- `cleanup_expired_snapshots` devolveu **0** com nada vencido e **1** com o limiar forcado pro passado — que e a prova de que o `RETURNING` conta de verdade;
+- `drop_snapshot` removeu e a lista de pendentes caiu a zero.
+
+Suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit. Arquivo autocontido.
+
+### `bot/topic_manager.py`: os 22 pontos viram SQL — e um bug latente aparece (2026-08-26)
+
+**Operador pediu:** a conversao da superficie do Kobe para a ponte direta (Sessao #3). `topic_manager.py` e o maior bloco: **22 dos 45 pontos vivos**.
+
+**Por que este arquivo primeiro:** ele concentra quase metade da superficie e e o unico caminho por onde topic, session e message nascem. Converte-lo sozinho, num commit so, mantem o diff auditavel linha a linha contra as cadeias originais.
+
+**Foi feito:** as 22 cadeias `.table().select().eq()` viraram SQL com parametros ligados. Mapeamentos nao-obvios, todos conferidos contra o comportamento original:
+
+- `.update(...)` cujo chamador lia `res.data[0]["id"]` virou `UPDATE ... RETURNING id` — sem o `RETURNING`, `set_topic_status` e `archive_active_session` devolveriam `None` sempre e o Kobe passaria a achar que nunca ha sessao pra arquivar.
+- `.select("id", count="exact")` virou `SELECT count(*)`. A forma antiga trazia uma linha inteira so pra ler um contador do cabecalho da resposta.
+- `.is_("welcomed_at","null").not_.is_("telegram_chat_id","null")` virou `WHERE welcomed_at IS NULL AND telegram_chat_id IS NOT NULL`.
+- Em `archive_active_session`, `summary` so entra no `SET` quando foi passado — um `None` explicito apagaria um resumo ja gravado, e o contrato ali e "nao mexe se nao veio". O `SET` e montado dinamicamente; os valores seguem ligados.
+
+**O achado: um bug latente vivo em producao, encontrado ao traduzir.** `set_topic_name` fazia `.upsert(..., on_conflict="telegram_thread_id")` — apontando para uma UNIQUE em `telegram_thread_id` sozinha. Essa constraint **nao existe**: `infra/schema.sql` a **remove explicitamente** (`ALTER TABLE topics DROP CONSTRAINT topics_telegram_thread_id_key`) e a substitui pela composta `(telegram_chat_id, telegram_thread_id)` — justamente para separar o chat privado do "Geral" do supergrupo, que colidiriam com `thread_id=0`.
+
+Conferido no banco, nao deduzido — as duas formas rodadas dentro de uma transacao revertida:
+
+```
+ON CONFLICT (telegram_thread_id)                    -> InvalidColumnReference:
+    there is no unique or exclusion constraint matching the ON CONFLICT specification
+ON CONFLICT (telegram_chat_id, telegram_thread_id)  -> OK
+```
+
+O caminho e raro (so dispara num `forum_topic_created`/`forum_topic_edited` de um topico que o bot **nunca viu**; qualquer mensagem anterior ja teria criado a linha por `ensure_topic`), e e por isso que ele nunca acusou. **Nao houve escolha de corrigir ou nao:** transcrever fielmente produziria SQL que levanta excecao. A traducao usa a UNIQUE que existe.
+
+**Verificacao — e a distincao que importa aqui.** A suite ficou verde, e isso **nao prova nada** sobre este commit: ela finge no nivel de FUNCAO (`get_active_session`, `count_messages` sao trocados por lambdas nos testes), entao SQL errado passaria verde. A prova real foi exercitar **as 22 funcoes contra Postgres de verdade**, conferindo semantica e nao so ausencia de excecao:
+
+- `ensure_topic` idempotente (segunda chamada devolve o mesmo id);
+- `set_topic_name` devolve `None` ao criar e o nome **anterior** ao renomear — que e o que o caller usa pra detectar rename real e mover a pasta no filesystem;
+- `list_unwelcomed_topics` cai de 1 para 0 depois do `mark_welcomed`;
+- `get_recent_messages` sai em ordem cronologica crescente (a consulta e decrescente e a lista e revertida);
+- `get_messages_since` com marca no futuro devolve vazio;
+- `archive_active_session` devolve o id na primeira vez e `None` na segunda;
+- `count_messages` bate.
+
+Suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit. O arquivo e autocontido; nada fora dele muda.
+
+### A ponte pro Postgres: `bot/db.py` fala psycopg direto, e `DATABASE_URL` substitui o Supabase (2026-08-26)
+
+**Operador pediu:** o coracao da Sessao #3 — *"Ponte DIRETA psycopg. Sem adaptador, sem DAL, sem backend plugavel"*, e *"Conexao por CONFIGURACAO, uma linha de `.env`"*. Decisao batida em 2026-07-25: *"nao faz sentido colocar um codigo na frente do outro codigo se eu posso ir direto pra ele."*
+
+**Por que os dois juntos num commit so:** eles sao mutuamente dependentes. `bot/db.py` precisa de `config.database_url`, e `database_url` nao teria consumidor sem a ponte. Separa-los deixaria um commit intermediario que nao roda — o oposto de "suite verde a cada passo".
+
+**Foi feito:**
+
+- **`bot/db.py` reescrito.** Quatro verbos, `(sql, params)` em todos: `query` (varias linhas), `one` (a primeira ou `None`), `scalar` (o primeiro valor) e `execute` (escrita; devolve o `RETURNING`, ou lista vazia). Pool `psycopg_pool` — o Kobe fala com o banco de dentro de `asyncio.to_thread`, entao dois turnos batem ali ao mesmo tempo.
+- **O proxy de cadeia MORREU, e essa e a prova de que ir direto foi a decisao certa.** A versao anterior tinha ~60 linhas que **gravavam a cadeia de chamadas** (`.table(...).select(...).eq(...)`) so pra poder remonta-la num cliente novo depois de reconectar — porque a consulta ja montada apontava pro pool morto. Com SQL, "a cadeia" e um par `(sql, params)`. **A ponte saiu menor que o involucro que substituiu.**
+- **A classificacao leitura/escrita deixou de ser adivinhacao.** Antes, "isto e escrita?" era decidido farejando a cadeia atras de `insert`/`update`/`upsert`/`delete`. Agora e o **verbo que quem escreveu escolheu**. Ha teste provando a diferenca: um `SELECT` com a palavra *insert* dentro do texto continua sendo leitura.
+- **`bot/config.py`:** entra `database_url` (obrigatoria), saem `supabase_url` e `supabase_key`. E um **leitor guiado**: se faltar `DATABASE_URL` mas o `.env` ainda tiver `SUPABASE_URL`, o erro nao diz "variavel ausente" — diz que este Kobe fala Postgres direto, aponta o `infra/migrate.py up`, e avisa que o caminho de volta ao Supabase e a tag `pre-postgres-cutover`, nao uma variavel. Uma instalacao nessa situacao nao esta com uma chave faltando; esta com o `.env` de antes da migracao, e o erro tem que dizer isso.
+- **`.env.example`** documenta as duas formas (socket unix sem senha, e TCP com usuario/senha) e aponta o runner e o portao.
+
+**O contrato de tipos — a parte que quebraria longe e em silencio.** O PostgREST devolvia JSON: `uuid` como string, `timestamptz` como texto ISO. O psycopg devolve `UUID` e `datetime`. Medido contra o `kobe_dev` antes de escrever uma linha. A quebra concreta: `bot/memory/working_set.py` filtra a janela imediata com `created_at >= cutoff` onde **`cutoff` e string** — `datetime >= str` levanta `TypeError` e a memoria imediata morre inteira, a seis arquivos de distancia da causa. Mesmo padrao em `bot/memory/aging.py`, `bot/claude_runner.py`, `bot/resume.py` e `bot/telegram_handler.py`. Entao a ponte normaliza **dois tipos, e so dois**: `UUID` vira `str`, `datetime` vira `.isoformat()`. `text[]` e `jsonb` ja chegam nativos e passam intactos.
+
+**O fuso e fixado na conexao.** `timestamptz` guarda instante absoluto, mas o TEXTO que o driver devolve sai no fuso da sessao — e todo banco criado no cluster do Ubuntu nasce herdando o fuso local da maquina (achado do T4). Sem fixar, o mesmo instante sairia como `...T00:46:25-03:00` em vez de `...T03:46:25+00:00`. A ponte manda `-c TimeZone=UTC` na conexao e fica imune ao que estiver configurado no cluster ou no banco.
+
+**Resiliencia:** o *contrato* de env e o mesmo — `DB_RESILIENCE_ENABLED`, `DB_RETRY_WRITES`, `DB_IDLE_RECYCLE_SECONDS` (este virou o `max_idle` do pool) — com a semantica que o operador aprovou. Erro de TRANSPORTE (`psycopg.OperationalError`) repete; erro de NEGOCIO nao. **Nota honesta, escrita no cabecalho do arquivo:** a dor original (3 sumicos em 30 dias por socket ocioso derrubado por intermediario) **praticamente desaparece** com socket unix local — nao ha intermediario. A camada fica por rigor e porque o banco pode morar noutra maquina amanha, nao porque a dor persista.
+
+**`tests/test_turn_guarantee.py` migrou junto** (3 testes falhavam): ele levantava `httpx.RemoteProtocolError`/`httpx.ReadError` pra simular conexao caida. `bot/turn_guarantee.py` pergunta a `bot/db.py` se um erro e de transporte — e o desacoplamento aguentou a troca de driver sem mudar uma linha; so os testes precisaram falar a lingua do driver novo.
+
+**Testes:** `tests/test_db_resilience.py` reescrito — **35 testes** (eram 11). Alem de toda a politica de repeticao herdada, agora ha o bloco que **pina o contrato de tipos**: o formato ISO exato, o fecho do circulo (o texto que a ponte devolve volta a ser `datetime` pelos parsers que ja existem), a comparacao string-a-string que motivou tudo, e a coincidencia entre ordem lexicografica e cronologica — de que `working_set` depende. Mais: `repr` nao vaza a conninfo (ela pode carregar senha), a conexao fixa UTC, e a conexao pede linhas como dicionario.
+
+Fumaca contra o `kobe_dev` real: `id` saiu `str`, `created_at` saiu `'2026-08-26T03:46:25.275243+00:00'`, `tags` saiu lista, `count` deu 3443, consulta vazia deu `None`.
+
+Suite verde — **538 passando + 3 pulados**. `tests/portability_guard.sh` verde.
+
+⚠️ **A PARTIR DESTE COMMIT O REPOSITORIO NAO E DEPLOYAVEL EM PRODUCAO.** A producao ainda fala Supabase; um `git pull` que traga isto e nao traga uma `DATABASE_URL` valida faz o `kobe.service` nao subir. Isso e **por desenho** — nao ha como ter a ponte direta e manter os dois caminhos vivos sem um backend plugavel, que esta explicitamente banido. **Este merge nao se deploya sozinho: ele e o corte**, e o corte leva codigo e dado juntos. O caminho de volta e a tag `pre-postgres-cutover`, criada antes de o repo mudar.
+
+**Reversao:** `git checkout pre-postgres-cutover` + reinicio devolve o Kobe falando Supabase, sem exigir senha de banco nenhuma.
+
+### T4 — portao permanente de compatibilidade de ambiente (2026-08-26)
+
+**Operador pediu:** o T4 do adendo de 26/08 — *"um teste (ou script de guarda, no espirito do `portability_guard.sh`) que compara o banco alvo contra a referencia e falha quando divergir"*, cobrindo collation/ctype, ordem fisica das colunas, `data_checksums`, encoding, `TimeZone`, versao do servidor e das extensoes, e schema-versionado x banco-real. *"Deve rodar sem exigir a producao no ar."*
+
+**Por que:** tres divergencias de AMBIENTE entre o banco de dev e o de producao atravessaram 100% de uma suite de **456 testes sem acender nada**. Nenhuma e bug de codigo; todas fazem *"testei em dev"* mentir — e duas delas um diff por nome/tipo/nulo nao enxerga:
+
+- **Collation.** O `initdb` do Ubuntu cria em `C.UTF-8` (ordena por byte cru); a producao esta em `en_US.UTF-8`. O dado e o mesmo; a **ordem de saida** de `ORDER BY <texto>` muda. Ha caso vivo: a lista de contatos e ordenada por nome.
+- **Ordem FISICA das colunas.** Duas colunas de `topics` entraram por migration na producao (e foram parar no fim) e estao no meio no `infra/schema.sql`. Mesmo nome, mesmo tipo, posicao diferente. Nao afeta o Kobe (o codigo acessa por nome), mas **quebra carga posicional em silencio**, empurrando texto pra dentro de campo numerico.
+- **`data_checksums`.** Ligado na producao, desligado por default no `initdb`.
+
+**Foi feito:** tres pecas, mais um achado.
+
+- **`infra/schema_fingerprint.py`** — introspecta um banco num JSON canonico e deterministico: propriedades do banco, extensoes com versao, e por tabela as colunas **com a posicao fisica** (`attnum` cru vai junto, porque buraco na numeracao e ele proprio um sinal), tipo, nulabilidade, default e collation de coluna; mais indices e restricoes. A tabela de controle do runner fica **de fora** de proposito — o `applied_at` dela faria a impressao digital mudar a cada aplicacao e o portao viraria ruido.
+- **`tests/fixtures/schema_expected.json`** — a referencia versionada, **gerada de um banco de apoio erguido pelo proprio runner** a partir de `infra/schema.sql` + `infra/migrations/`. E isso que faz o item *"schema versionado x banco real"* ser verdade **por construcao**, e nao por promessa. E e isso que dispensa a producao no ar.
+- **`infra/compat_gate.py`** — compara e falha nomeando a classe: `ambiente`, `extensao`, `tabela`, `coluna`, **`ordem-de-coluna`** (classe propria, com as duas ordens impressas e o aviso de que quebra calado), `indice`, `restricao` e `pgvector`.
+
+**O achado: uma QUARTA armadilha da mesma familia, encontrada pelo portao na primeira execucao — `TimeZone`.** O cluster do Ubuntu fica no fuso local da maquina, e **todo banco criado nele nasce herdando esse fuso**, enquanto a producao esta em UTC. O valor guardado e o mesmo (timestamptz e absoluto), mas o **texto** que o driver devolve muda de `+00:00` pro deslocamento local — e o Kobe compara `created_at` como **string** em pelo menos um caminho (`bot/memory/working_set.py`). Medido: sob `America/Sao_Paulo` o mesmo instante sai como `2026-08-26T00:46:25-03:00`; sob UTC, `2026-08-26T03:46:25+00:00`. Consequencia adotada: os bancos de apoio foram fixados em UTC, e a ponte vai fixar o fuso da propria conexao — nao basta confiar no default do cluster.
+
+**Sobre o item do `pgvector`, com a ressalva escrita no codigo:** *"o codigo usa recurso acima da 0.6"* **nao e introspectavel do banco** — a extensao nao expoe quais dos seus simbolos alguem chamou. O que existe e uma **lista de proibidos** dos identificadores que so passaram a existir da 0.7 em diante (`halfvec`, `sparsevec`, `binary_quantize`, opclasses novas...), varrida no SQL e no Python do repo, comparada contra a versao que a referencia fixa. Pega o caso realista; nao e prova. Esta dito assim no cabecalho da funcao.
+
+**Testes:** `tests/test_compat_gate.py`, **39 testes**. Cada armadilha do §C tem um teste que a **injeta de proposito** e exige o portao vermelho — inclusive um que prova que a de ordem fisica e **invisivel** para um diff por nome/tipo/nulo (asseverando primeiro que os dois bancos sao identicos por esse criterio, e so entao que o portao acende). Ha teste tambem para o que NAO pode acender: `16.15 -> 16.16` e atualizacao de seguranca, nao classe de incompatibilidade — alarmar ali treinaria todo mundo a ignorar o portao. Os testes de logica usam fingerprint sintetico e rodam **sem banco nenhum**, porque "pulado" e verde por ausencia, que e o modo de falhar que o portao existe pra impedir.
+
+**Prova ao vivo, com estrago injetado:** um banco criado exatamente como o `initdb` do Ubuntu criaria (`C.UTF-8`, herdando o fuso do cluster) e com uma coluna acrescentada no fim acendeu **4 divergencias de uma vez** — collation, ctype, `TimeZone` e coluna sobrando. E o portao rodado contra o `kobe_dev` real reportou **10 divergencias legitimas**: ele esta atras da migration `005` (ainda tem `conversations`, `conversation_tags`, `messages.embedding`, os dois `conversation_id` e seus indices e chaves estrangeiras). O `kobe_dev` **nao foi alterado** — ele e copia fiel da producao, que tambem nao rodou a `005`; o portao esta certo em acusa-lo, e a mensagem aponta pro `migrate.py status`.
+
+Suite verde — **514 passando + 3 pulados** (456 + 22 + 39, com os 3 ao vivo pulando sem env de banco). Com `KOBE_TEST_DATABASE_URL` setada: **517 passando**. `tests/portability_guard.sh` verde; a referencia versionada nao carrega caminho absoluto nenhum.
+
+**Reversao:** revert do commit. So acrescenta arquivos; nada aqui e importado pelo runtime do bot.
+
+### Runner de migrations versionado (2026-08-26)
+
+**Operador pediu:** dentro da Sessao #3 — *"Runner de migrations versionado e teu escopo. Hoje `infra/migrations/` sao 5 SQLs soltos (001..005), sem runner e sem tabela de versao. Construa: tabela de controle, aplicacao idempotente, ordem deterministica, e recusa de aplicar fora de ordem."*
+
+**Por que:** ate aqui "aplicar o schema" era copiar `infra/schema.sql` e colar num painel web, e as migrations eram arquivos soltos. Ninguem — nem o codigo, nem o operador — conseguia responder *"em que versao este banco esta?"* sem inspecionar tabela por tabela. Com a ponte pro Postgres direto, essa pergunta passa a precisar de resposta mecanica: o instalador, o ambiente de dev e o corte dependem dela.
+
+**Foi feito:** `infra/migrate.py`, com quatro garantias e uma ausencia deliberada.
+
+- **Tabela de controle** `schema_migrations(version, filename, checksum, applied_at)`.
+- **Ordem deterministica** pelo prefixo numerico, nunca pela ordem alfabetica do filesystem — que poria `010` antes de `002` no dia em que o projeto passar de 9 migrations. `infra/schema.sql` e sempre a versao `000`, o alicerce.
+- **Idempotencia:** o que ja consta no controle e pulado; `up` duas vezes seguidas nao faz nada na segunda.
+- **Recusa de aplicar fora de ordem:** pendente com numero menor que o maior aplicado faz o runner parar. E o caso de dois branches criarem `006` e `007`, o `007` entrar primeiro e o `006` chegar atrasado — aplica-lo produziria um banco que nenhuma outra instalacao tem.
+- **Deteccao de drift:** checksum sha256 de cada arquivo aplicado fica gravado. Se o conteudo de uma migration ja aplicada mudar, o runner para — o banco tem o SQL antigo e o repo tem o novo, e ninguem mais sabe qual e a verdade. Migration aplicada e imutavel; correcao vira migration nova, pra frente.
+- **Atomicidade:** o SQL da migration e o registro da versao vao na MESMA transacao. Nunca ha banco que aplicou sem registrar (rodaria de novo) nem que registrou sem aplicar (nunca rodaria).
+- **Sem `down`, de proposito.** Reverter DDL por script e fonte classica de perda de dado silenciosa: o `down` de um `ADD COLUMN` apaga a coluna. O caminho de volta e o do resto do projeto — backup, ou migration nova pra frente.
+- **Sem alvo default:** vem de `--database-url` ou `DATABASE_URL`. Apontar pro banco errado tem que custar um ato explicito.
+- **Arquivo `.sql` sem prefixo numerico e versao duplicada sao ERRO**, nao arquivo ignorado — "ignorado em silencio" e como uma migration deixa de ser aplicada sem ninguem notar.
+
+Conferido de quebra: as 5 migrations do repo sao idempotentes por construcao (todas guardadas por `IF EXISTS`/`IF NOT EXISTS` ou bloco `DO $$`), e nenhuma usa `CREATE INDEX CONCURRENTLY` — que nao rodaria dentro de transacao.
+
+**Testes:** `tests/test_migrate.py`, **22 testes**. 20 de logica pura, sem banco nenhum (arvores sinteticas em `tmp_path`), cobrindo ordem numerica com o caso `010` × `002`, zeros a esquerda preservados, recusa de atrasada, drift, drift checado antes da ordem, prefixo ausente, versao duplicada e resolucao do alvo. 2 ao vivo contra `KOBE_TEST_DATABASE_URL`, pulados quando ela nao existe — asseveram idempotencia real e que **um banco novo nasce sem `conversations`/`conversation_tags`**.
+
+Ponta a ponta em banco de verdade: o runner construiu `kobe_schemaref` do zero (6 versoes aplicadas em ordem), e a segunda execucao devolveu "nada a aplicar". Suite verde — **476 passando + 2 pulados** (456 + 22, dos quais os 2 ao vivo pulam sem a env). Com `KOBE_TEST_DATABASE_URL` setada: 478 passando. `tests/portability_guard.sh` verde.
+
+**Reversao:** revert do commit. So acrescenta arquivos; o bot nao importa `infra/migrate.py` em lugar nenhum, entao o runtime nao muda.
+
+### Ponte pro Postgres — dependencias do driver (2026-08-26)
+
+**Operador pediu:** Sessao #3 do Projeto Novo Ambiente Kobe — a ponte pro Postgres (§2.9 do briefing V4 + o T4 do adendo de 26/08).
+
+**Por que:** o Kobe fala com o banco por PostgREST sobre HTTP (cliente Supabase). A ponte direta em psycopg — decisao batida em 2026-07-25, *"nao faz sentido colocar um codigo na frente do outro codigo se eu posso ir direto pra ele"* — precisa do driver antes de qualquer outra coisa. Primeiro commit da sessao, deliberadamente sozinho e 100% aditivo: nada de runtime muda, o repo segue deployavel.
+
+**Foi feito:**
+- `psycopg[binary]>=3.2` e `psycopg_pool>=3.2` em `bot/requirements.txt`, instalados no venv de dev (resolveram para 3.3.4 e 3.3.1).
+- `supabase>=2.0` **fica por enquanto** — sai so quando o ultimo import dele morrer, no fecho da sessao. Remover agora quebraria o runtime no meio do caminho.
+
+**Testes:** suite verde — 456 passando. `tests/portability_guard.sh` verde. Import de `psycopg`/`psycopg_pool` conferido no venv de dev.
+
+**Reversao:** revert do commit + `pip uninstall psycopg psycopg-binary psycopg_pool`. Nao ha estado fora do git.
+
 ### Os quatro comandos de memoria ganham teste (2026-08-25)
 
 **Operador pediu:** implicitamente, pelo criterio de aceite da sessao — *"`/nova`, `/contexto`, `/salvar`, `/retomar` respondem — comportamento pre-Chat-Manager, **com teste**"*.

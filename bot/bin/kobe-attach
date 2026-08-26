@@ -15,7 +15,7 @@ Dois modos de endereçamento (iguais ao kobe-notify):
 1. **Por ambiente** (default): KOBE_TELEGRAM_BOT_TOKEN / KOBE_CHAT_ID /
    KOBE_THREAD_ID (opcional), injetadas pelo bot ao invocar `claude -p`.
 2. **Por nome do tópico** (`--topic "<nome>"`): resolve o destino pela tabela
-   `topics` do Supabase (match por current_name/slug). Pra salas detached que
+   `topics` do banco (match por current_name/slug). Pra salas detached que
    nascem sem KOBE_CHAT_ID. Token cai pra TELEGRAM_BOT_TOKEN do .env.
 
 Implementação: chama `curl` em subprocess pra evitar reimplementar
@@ -59,7 +59,7 @@ def main() -> int:
         token = (read_dotenv({"TELEGRAM_BOT_TOKEN"}).get("TELEGRAM_BOT_TOKEN") or "").strip()
 
     if topic is not None:
-        # Caminho novo: resolve o destino pelo nome do tópico (Supabase).
+        # Caminho novo: resolve o destino pelo nome do tópico (tabela topics).
         try:
             chat_id_int, thread_int = resolve_topic(topic)
         except LookupError as exc:

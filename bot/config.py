@@ -33,8 +33,10 @@ class Config:
     # qualquer chat, que é o comportamento da produção hoje. Preenchido, tudo
     # fora da lista é ignorado em silêncio. Ver bot/authz.py.
     telegram_allowed_chat_ids: frozenset[int]
-    supabase_url: str
-    supabase_key: str
+    # Conexão com o Postgres do Kobe. Uma linha do `.env` — trocar host,
+    # porta, banco ou usuário é configuração e reinício, nunca código. Ver
+    # `bot/db.py`, que é o único arquivo que sabe qual banco é.
+    database_url: str
     groq_api_key: str
     kobe_home: Path
     kobe_claude_cwd: Path
@@ -160,6 +162,31 @@ def _require(name: str) -> str:
     return value
 
 
+def _require_database_url() -> str:
+    """`DATABASE_URL`, com um erro que ensina em vez de só reclamar.
+
+    O Kobe falou com o banco por PostgREST/Supabase até a migração para o
+    Postgres direto. Uma instalação que ainda tenha `SUPABASE_URL` no `.env`
+    e não tenha `DATABASE_URL` não está com uma variável faltando: está com o
+    `.env` de antes da migração. Um `ConfigError` genérico mandaria a pessoa
+    procurar a chave errada — este diz o que de fato aconteceu.
+    """
+    value = os.getenv("DATABASE_URL")
+    if value and value.strip():
+        return value.strip()
+
+    if os.getenv("SUPABASE_URL"):
+        raise ConfigError(
+            "DATABASE_URL ausente, mas o .env ainda tem SUPABASE_URL: este Kobe "
+            "fala Postgres direto, não mais Supabase por PostgREST. Aponte "
+            "DATABASE_URL para o banco (ex.: postgresql:///kobe) e aplique o "
+            "schema com `python infra/migrate.py up`. Para voltar ao Supabase, o "
+            "caminho é a tag `pre-postgres-cutover`, não uma variável."
+        )
+
+    raise ConfigError("Variável obrigatória ausente: DATABASE_URL")
+
+
 def _parse_user_ids(raw: str) -> frozenset[int]:
     ids: set[int] = set()
     for chunk in raw.split(","):
@@ -220,8 +247,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         telegram_allowed_chat_ids=_parse_chat_ids(
             os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
         ),
-        supabase_url=_require("SUPABASE_URL"),
-        supabase_key=_require("SUPABASE_KEY"),
+        database_url=_require_database_url(),
         groq_api_key=_require("GROQ_API_KEY"),
         kobe_home=kobe_home,
         kobe_claude_cwd=kobe_claude_cwd,

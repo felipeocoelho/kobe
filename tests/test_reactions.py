@@ -241,8 +241,7 @@ def test_config_le_emojis_do_env() -> None:
     env = {
         "TELEGRAM_BOT_TOKEN": "t",
         "TELEGRAM_ALLOWED_USER_IDS": "1",
-        "SUPABASE_URL": "u",
-        "SUPABASE_KEY": "k",
+        "DATABASE_URL": "postgresql:///kobe_fake",
         "GROQ_API_KEY": "g",
         "KOBE_HOME": "/tmp",
         "TELEGRAM_REACTIONS_ENABLED": "true",
@@ -266,8 +265,7 @@ def _load_config_with(**extra):
     env = {
         "TELEGRAM_BOT_TOKEN": "t",
         "TELEGRAM_ALLOWED_USER_IDS": "1",
-        "SUPABASE_URL": "u",
-        "SUPABASE_KEY": "k",
+        "DATABASE_URL": "postgresql:///kobe_fake",
         "GROQ_API_KEY": "g",
         "KOBE_HOME": "/tmp",
         "TELEGRAM_REACTIONS_ENABLED": "true",

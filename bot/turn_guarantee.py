@@ -50,7 +50,7 @@ observadas morreram todas na leitura do histórico — antes da marca.
 Agnóstico de banco — DE PROPÓSITO
 ──────────────────────────────────────────────────────────────────────────
 
-Este módulo não sabe se o banco é Supabase, Postgres local ou outra coisa. Ele
+Este módulo não sabe qual é o banco nem qual é o driver. Ele
 só sabe que o turno levantou e que a mensagem não pode se perder. A única
 concessão é `is_transport_error()`, que decide se vale re-tentar — e ela
 pergunta ao `bot/db.py` (o ponto único que conhece o driver) em vez de decidir

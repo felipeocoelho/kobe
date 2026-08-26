@@ -1,22 +1,31 @@
 """Resolução de tópico por nome para os helpers `kobe-notify`/`kobe-attach`.
 
-Stdlib-only de propósito: os helpers rodam como subprocess de `claude -p` sob
-qualquer python3 (não necessariamente o do venv), então aqui não dependemos de
-`supabase`/`dotenv`. A tabela `topics` é consultada via REST (PostgREST) e as
-credenciais saem do `.env` do projeto.
-
 Compartilhado pelos dois helpers pra a flag `--topic` ter comportamento
 idêntico (mesmo match por `current_name`/slug, mesmos erros).
+
+SOBRE O "STDLIB-ONLY" — o que continua valendo e o que mudou
+-------------------------------------------------------------
+Os helpers rodam como subprocess de `claude -p` sob qualquer python3, não
+necessariamente o do venv. O caminho COMUM (`kobe-notify "texto"`, endereçado
+pelas envs) segue **stdlib puro** e não encosta em banco nenhum.
+
+O que mudou é só o caminho `--topic`: antes ele consultava `topics` por HTTP
+(PostgREST), o que dava pra fazer com `urllib`. Com a ponte direta pro Postgres
+ele precisa de `psycopg`, que só existe no venv — então esse caminho, e só ele,
+re-executa sob o python do venv quando necessário.
+
+**Este arquivo é fácil de esquecer numa migração**, e por isso o aviso: ele não
+usa o cliente do bot nem aparece numa busca por pontos de consulta. Se ficasse
+para trás, o `--topic` das salas destacadas morreria em silêncio — o caminho é
+tardio e só dispara quando alguém usa a flag.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
+import sys
 import unicodedata
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 # Raiz do projeto ($KOBE_HOME): bot/bin/_kobe_topic.py → bin → bot → raiz.
@@ -34,6 +43,44 @@ def slugify(name: str) -> str:
     s = ascii_only.lower().strip()
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
+
+
+def _garantir_psycopg() -> None:
+    """Garante que `psycopg` esteja disponível, re-executando sob o venv se não.
+
+    O shebang dos helpers resolve pro python do SISTEMA, que não tem as deps do
+    projeto. Mesmo padrão de `kobe-await-response` — mas aqui o re-exec é
+    TARDIO, dentro de `resolve_topic`, para que o caminho comum (endereçamento
+    por env, sem `--topic`) continue rodando sob qualquer python3 sem custo.
+
+    Re-executar aqui é seguro porque `resolve_topic` é chamada ANTES de o
+    helper enviar qualquer coisa: reiniciar o processo não duplica mensagem
+    nem anexo. Se o venv não existir, seguimos e o `import` falha com um erro
+    claro, em vez de re-executar às cegas.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("psycopg") is not None:
+        return
+
+    venv_py = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if venv_py.exists() and sys.executable != str(venv_py):
+        # `execv` substitui o processo: o que estiver em buffer de saída e não
+        # foi descarregado some. Fora de um terminal a saída é bufferizada por
+        # bloco, então isso não é hipotético.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(str(venv_py), [str(venv_py), *sys.argv])
+
+    # Sem venv pra onde ir. Melhor um erro que diz o que fazer do que um
+    # `ModuleNotFoundError` cru vindo de dentro de uma função de resolução
+    # de tópico — quem chamou `--topic` não vai adivinhar a ligação.
+    raise LookupError(
+        "`--topic` precisa do pacote `psycopg`, que não está disponível neste "
+        f"python ({sys.executable}) e não achei o venv do projeto em "
+        f"{venv_py}. Rode o helper pelo python do venv, ou use o endereçamento "
+        "por env (KOBE_CHAT_ID/KOBE_THREAD_ID), que não toca no banco."
+    )
 
 
 def read_dotenv(keys: set[str]) -> dict[str, str]:
@@ -75,35 +122,26 @@ def resolve_topic(name: str) -> tuple[int, int | None]:
     `telegram_thread_id` 0/None (raiz general/private) vira None — o chamador
     não deve setar `message_thread_id` nesse caso.
     """
-    env = read_dotenv({"SUPABASE_URL", "SUPABASE_KEY"})
-    url = (env.get("SUPABASE_URL") or "").rstrip("/")
-    key = env.get("SUPABASE_KEY") or ""
-    if not url or not key:
+    _garantir_psycopg()
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    env = read_dotenv({"DATABASE_URL"})
+    url = (env.get("DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
         raise LookupError(
-            "SUPABASE_URL/SUPABASE_KEY ausentes no .env — não consigo resolver "
-            "o tópico por nome. Verifique o .env do projeto."
+            "DATABASE_URL ausente no .env — não consigo resolver o tópico por "
+            "nome. Verifique o .env do projeto."
         )
 
-    endpoint = (
-        f"{url}/rest/v1/topics"
-        "?select=current_name,telegram_chat_id,telegram_thread_id"
-    )
-    req = urllib.request.Request(
-        endpoint,
-        headers={
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Accept": "application/json",
-        },
-    )
     try:
-        raw = urllib.request.urlopen(req, timeout=15).read()
-        rows = json.loads(raw)
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:300]
-        raise LookupError(f"Supabase respondeu HTTP {exc.code}: {body}") from exc
-    except Exception as exc:  # noqa: BLE001 — rede/timeout/parse
-        raise LookupError(f"falha consultando topics no Supabase: {exc}") from exc
+        with psycopg.connect(url, row_factory=dict_row, connect_timeout=15) as conn:
+            rows = conn.execute(
+                "SELECT current_name, telegram_chat_id, telegram_thread_id FROM topics"
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — conexão/timeout/permissão
+        raise LookupError(f"falha consultando topics no banco: {exc}") from exc
 
     target = name.strip().lower()
     target_slug = slugify(name)
@@ -130,8 +168,8 @@ def resolve_topic(name: str) -> tuple[int, int | None]:
     if not matches:
         raise LookupError(
             f"nenhum tópico chamado {name!r} (nem slug {target_slug!r}) na "
-            "tabela topics. Confira o nome exato com /conversas_topico ou o "
-            "cabeçalho [Telegram] tópico: no prompt."
+            "tabela topics. Confira o nome exato no cabeçalho "
+            "[Telegram] tópico: do prompt."
         )
     if len(matches) > 1:
         nomes = ", ".join(repr((m.get("current_name") or "?")) for m in matches)

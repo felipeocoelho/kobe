@@ -3,7 +3,7 @@
 # Kobe — Desinstalador
 #
 # Remove só o que o instalador criou. Não toca em Claude Code, dependências
-# do sistema, dados no Supabase ou no bot do Telegram.
+# do sistema, dados no banco ou no bot do Telegram.
 #
 set -euo pipefail
 
@@ -24,7 +24,7 @@ NÃO vai remover:
   - Seu usuário Linux ($USER)
   - Claude Code
   - Dependências do sistema (Python, ffmpeg, git, etc.)
-  - Dados no Supabase (delete o projeto manualmente se quiser)
+  - Dados no banco (apague o banco manualmente se quiser)
   - Bot do Telegram (delete via @BotFather se quiser)
   - Log da instalação ($HOME/.kobe-install.log)
 

@@ -20,10 +20,10 @@ Dois modos de endereçamento:
 
 2. **Por nome do tópico** (`--topic "<nome>"`): resolve o nome humano →
    `telegram_chat_id` + `telegram_thread_id` consultando a tabela `topics`
-   do Supabase. Útil pra salas de código detached, que nascem sem as envs
+   do banco do Kobe. Útil pra salas de código detached, que nascem sem as envs
    `KOBE_CHAT_ID`/`KOBE_THREAD_ID`. O match é por `current_name`
    case-insensitive OU pelo slug (`Dev Kobe`→`dev-kobe`). Credenciais do
-   Supabase saem do `.env` do projeto (SUPABASE_URL/SUPABASE_KEY). O token
+   banco saem do `.env` do projeto (DATABASE_URL). O token
    ainda vem de KOBE_TELEGRAM_BOT_TOKEN (env) ou TELEGRAM_BOT_TOKEN (.env).
 
 Sai com código 0 em sucesso, !=0 em falha (mensagem vai pro stderr).
@@ -132,7 +132,7 @@ def main() -> int:
         return 1
 
     if topic is not None:
-        # Caminho novo: resolve o destino pelo nome do tópico (Supabase).
+        # Caminho novo: resolve o destino pelo nome do tópico (tabela topics).
         try:
             chat_id, thread_id = resolve_topic(topic)
         except LookupError as exc:

@@ -16,7 +16,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from supabase import Client
+from bot.db import KobeDB
 
 
 # Camada imediata — piso híbrido (doc §3): "últimos 10 min OU últimas N
@@ -42,7 +42,7 @@ _CHARS_PER_TOKEN = 4
 
 
 def _parse_ts(value: str) -> Optional[datetime]:
-    """Parseia timestamp ISO 8601 (created_at do Supabase) com tolerância a
+    """Parseia timestamp ISO 8601 (created_at do banco) com tolerância a
     sufixo 'Z'. None se vazio/inválido — chamador cai no fallback."""
     if not value:
         return None
@@ -53,22 +53,25 @@ def _parse_ts(value: str) -> Optional[datetime]:
 
 
 def get_immediate_messages(
-    db: Client, topic_id: str
+    db: KobeDB, topic_id: str
 ) -> list[dict]:
     """Camada imediata: piso híbrido (10 min OU N msgs, o que for maior).
 
     Filtra por tópico (predicado que evita full scan cruzado). Ordem
     cronológica crescente, pronta pro histórico do prompt.
     """
-    res = (
-        db.table("messages")
-        .select("role, content, created_at, audio_transcribed")
-        .eq("topic_id", topic_id)
-        .order("created_at", desc=True)
-        .limit(IMMEDIATE_HARD_CAP)
-        .execute()
+    rows = list(
+        reversed(
+            db.query(
+                "SELECT role, content, created_at, audio_transcribed"
+                "  FROM messages"
+                " WHERE topic_id = %s"
+                " ORDER BY created_at DESC"
+                " LIMIT %s",
+                (topic_id, IMMEDIATE_HARD_CAP),
+            )
+        )
     )
-    rows = list(reversed(res.data or []))
     # Blindagem: jamais deixar um [Resumo da sessão anterior] (role='system'
     # injetado pelo compactador legado) entrar na janela crua. Com Chat
     # Manager a compactação não roda mais, mas summaries de antes deste fix

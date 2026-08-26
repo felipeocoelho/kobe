@@ -241,7 +241,7 @@ async def _on_shutdown(app: Application) -> None:
     """Pré-shutdown: salva snapshots das sessões ativas recentes.
 
     PTB invoca este hook ao receber SIGTERM/SIGINT (deploy, restart) —
-    rodamos antes do polling fechar, com a conexão ao Supabase ainda
+    rodamos antes do polling fechar, com a conexão ao banco ainda
     viva. Falhas individuais são logadas dentro do snapshot e não
     abortam o shutdown.
     """

@@ -42,7 +42,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from supabase import Client
+from bot.db import KobeDB
 from telegram.ext import Application
 
 from bot.alertas.context import render_alertas_abertos
@@ -148,7 +148,7 @@ def build_resume_prompt(
 
 
 def _load_resume_context(
-    db: Client, config: Config, snap: dict
+    db: KobeDB, config: Config, snap: dict
 ) -> dict:
     """Carrega (síncrono, read-only) as camadas de contexto do tópico.
 
@@ -250,7 +250,7 @@ async def resume_one_snapshot(app: Application, snap: dict) -> None:
     Protegido pelo lock do tópico (serializa com o handler normal). Apaga
     o snapshot ao final em qualquer desfecho — uso único, sem replay.
     """
-    db: Client = app.bot_data["db"]
+    db: KobeDB = app.bot_data["db"]
     claude: ClaudeRunner = app.bot_data["claude"]
     config: Config = app.bot_data["config"]
 

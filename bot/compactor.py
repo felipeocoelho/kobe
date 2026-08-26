@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable, Optional
 
-from supabase import Client
+from bot.db import KobeDB
 
 from bot.claude_runner import ClaudeRunner
 from bot.topic_manager import (
@@ -86,7 +86,7 @@ def _format_transcript(messages: list[dict]) -> str:
 
 async def compact_session(
     *,
-    db: Client,
+    db: KobeDB,
     claude: ClaudeRunner,
     topic_id: str,
     session_id: str,

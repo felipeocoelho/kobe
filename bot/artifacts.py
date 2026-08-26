@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Iterable, Optional
 
-from supabase import Client
+from bot.db import KobeDB
 
 
 logger = logging.getLogger("kobe.artifacts")
@@ -36,7 +36,7 @@ def _format_messages_as_transcript(messages: Iterable[dict]) -> str:
 
 
 def save_artifact_from_messages(
-    db: Client,
+    db: KobeDB,
     *,
     topic_id: str,
     title: str,
@@ -50,22 +50,19 @@ def save_artifact_from_messages(
     if not content:
         return None
 
-    payload: dict = {
-        "topic_id": topic_id,
-        "title": title,
-        "content": content,
-    }
-    if tags:
-        payload["tags"] = tags
-
-    res = db.table("saved_artifacts").insert(payload).execute()
-    if not res.data:
+    criado = db.execute(
+        "INSERT INTO saved_artifacts (topic_id, title, content, tags)"
+        " VALUES (%s, %s, %s, %s)"
+        " RETURNING id",
+        (topic_id, title, content, tags or None),
+    )
+    if not criado:
         raise RuntimeError("insert de saved_artifact não retornou linha")
-    return res.data[0]["id"]
+    return criado[0]["id"]
 
 
 def search_artifacts(
-    db: Client,
+    db: KobeDB,
     query: str,
     *,
     topic_id: Optional[str] = None,
@@ -77,23 +74,36 @@ def search_artifacts(
     embeddings entrarem, esta função vira a estratégia secundária (ou é
     substituída por busca vetorial direta).
 
-    PostgREST `.or_()` usa vírgula como separador entre cláusulas, então
-    a query precisa ser sanitizada — caso contrário uma vírgula no input
-    do operador quebra o filtro.
+    A vírgula continua sendo trocada por espaço na entrada. Com SQL ela
+    deixou de ser sintaxe (o `.or_()` do PostgREST separava cláusulas por
+    vírgula, e uma vírgula digitada pelo operador quebrava o filtro) — mas
+    a normalização segue, porque mudar o conjunto de resultados de uma
+    busca que o operador usa não é assunto desta migração.
+
+    NUANCE CONHECIDA, DELIBERADAMENTE PRESERVADA: `%` e `_` digitados pelo
+    operador continuam valendo como curinga do LIKE, porque valiam antes.
+    Escapá-los seria uma melhoria defensável — um `%` solto hoje faz a busca
+    trazer tudo — mas é mudança de comportamento num comando que o operador
+    usa (`/retomar`), e mudar isso não é assunto de uma migração de driver.
+    Fica registrado para quem for decidir depois.
     """
     sanitized = query.replace(",", " ").strip()
     if not sanitized:
         return []
 
     pattern = f"%{sanitized}%"
-    builder = (
-        db.table("saved_artifacts")
-        .select("id, title, content, topic_id, created_at")
-        .or_(f"title.ilike.{pattern},content.ilike.{pattern}")
-        .order("created_at", desc=True)
-        .limit(limit)
-    )
+
+    sql = [
+        "SELECT id, title, content, topic_id, created_at",
+        "  FROM saved_artifacts",
+        " WHERE (title ILIKE %s OR content ILIKE %s)",
+    ]
+    params: list = [pattern, pattern]
     if topic_id is not None:
-        builder = builder.eq("topic_id", topic_id)
-    res = builder.execute()
-    return list(res.data or [])
+        sql.append("   AND topic_id = %s")
+        params.append(topic_id)
+    sql.append(" ORDER BY created_at DESC")
+    sql.append(" LIMIT %s")
+    params.append(limit)
+
+    return db.query("\n".join(sql), params)

@@ -34,6 +34,15 @@ err() {
   exit 1
 }
 
+# Aviso que NÃO aborta. `err` mata a instalação, e há casos (banco divergente,
+# schema que dá pra aplicar depois) em que parar tudo seria remédio pior que a
+# doença — a pessoa fica sem Kobe por causa de algo que ela conserta em um
+# comando.
+warn() {
+  echo "AVISO: $*" >&2
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] AVISO: $*" >>"$LOG_FILE"
+}
+
 confirm() {
   # confirm "Pergunta?" [default Y|N]
   local prompt="$1"
@@ -179,11 +188,14 @@ ANTES DE CONTINUAR, você vai precisar de:
 
   1. Bot Telegram criado via @BotFather (token em mãos)
   2. Supergrupo Telegram com tópicos habilitados (você como admin)
-  3. Conta Supabase com projeto criado:
-       - Project URL e Secret Key copiados
-         (Project Settings → API Keys → "Secret keys" → "service_role".
-          NÃO use a publishable/anon key — o Kobe precisa de acesso server-side.)
-       - Extensão "vector" habilitada (Database → Extensions)
+  3. PostgreSQL 16+ no ar, e um usuário que possa criar banco nele.
+     VOCÊ NÃO PRECISA CRIAR O BANCO — o instalador cria, com a codificação
+     e o fuso corretos, e aplica o schema. Você não roda SQL à mão.
+       - Extensões necessárias: vector, uuid-ossp, pg_trgm
+         (Debian/Ubuntu: apt install postgresql-<versão>-pgvector)
+       - Escolha um nome pro banco e monte a string de conexão, ex.:
+           postgresql:///kobe                              (socket local)
+           postgresql://usuario:senha@localhost:5432/kobe  (TCP)
   4. Conta Groq com API key (https://console.groq.com)
   5. Claude Code instalado e autenticado
      (https://docs.claude.com/en/docs/claude-code/setup)
@@ -322,7 +334,7 @@ com permissão 600 (só seu usuário consegue ler).
 
 EOF
 
-  local tg_token tg_users supa_url supa_key groq_key
+  local tg_token tg_users database_url groq_key
 
   read -r -p "Telegram Bot Token: " tg_token
   [[ -n "$tg_token" ]] || err "Bot token vazio."
@@ -331,13 +343,13 @@ EOF
   read -r -p "Telegram User IDs permitidos (CSV, ex: 12345,67890): " tg_users
   [[ -n "$tg_users" ]] || err "Lista de user IDs vazia (Kobe ignoraria todo mundo)."
 
-  read -r -p "Supabase URL: " supa_url
-  [[ -n "$supa_url" ]] || err "URL do Supabase vazia."
-
-  echo "Supabase Secret Key (Project Settings → API Keys → Secret/service_role)."
-  echo "NÃO é a publishable/anon — o bot precisa de acesso server-side."
-  read -r -p "Supabase Secret Key: " supa_key
-  [[ -n "$supa_key" ]] || err "Chave do Supabase vazia."
+  echo ""
+  echo "O Kobe fala Postgres direto (psycopg). Informe a string de conexão."
+  echo "O banco NÃO precisa existir ainda — se faltar, eu crio."
+  echo "  socket unix local, sem senha:  postgresql:///kobe"
+  echo "  por TCP, com usuário e senha:  postgresql://usuario:senha@localhost:5432/kobe"
+  read -r -p "DATABASE_URL: " database_url
+  [[ -n "$database_url" ]] || err "DATABASE_URL vazia."
 
   read -r -p "Groq API Key: " groq_key
   [[ -n "$groq_key" ]] || err "Groq API key vazia."
@@ -361,9 +373,8 @@ EOF
 TELEGRAM_BOT_TOKEN=$tg_token
 TELEGRAM_ALLOWED_USER_IDS=$tg_users
 
-# Supabase
-SUPABASE_URL=$supa_url
-SUPABASE_KEY=$supa_key
+# Banco (Postgres) — a única coisa que diz onde o banco mora.
+DATABASE_URL=$database_url
 
 # Groq (transcrição)
 GROQ_API_KEY=$groq_key
@@ -460,76 +471,86 @@ init_user_data() {
 # [8/9] Banco
 # ----------------------------------------------------------------------------
 
-# Checa via REST se o schema já foi aplicado neste projeto Supabase.
-# Critério: tabela `topics` acessível via /rest/v1/topics?limit=0.
-# Como o schema.sql cria tudo num único arquivo idempotente, a presença
-# de uma tabela indica que o conjunto foi aplicado.
-#
-# Códigos esperados:
-#   200 → tabela existe (schema aplicado)
-#   404 / "PGRST205" → tabela não existe (schema pendente)
-#   401 / 403 → chave inválida (não decide — segue pro fluxo manual)
-#   outros / falha de rede → não decide (segue pro fluxo manual)
-schema_already_applied() {
-  local supa_url supa_key http_code
-  supa_url=$(grep -E "^SUPABASE_URL=" "$KOBE_HOME/.env" | cut -d= -f2- | tr -d '\r')
-  supa_key=$(grep -E "^SUPABASE_KEY=" "$KOBE_HOME/.env" | cut -d= -f2- | tr -d '\r')
-  [[ -n "$supa_url" && -n "$supa_key" ]] || return 1
-
-  http_code=$(curl --max-time 8 -s -o /dev/null -w '%{http_code}' \
-    -H "apikey: $supa_key" \
-    -H "Authorization: Bearer $supa_key" \
-    "${supa_url%/}/rest/v1/topics?limit=0" 2>/dev/null) || return 1
-
-  [[ "$http_code" == "200" ]]
-}
-
+# Aplica o schema pelo runner versionado (infra/migrate.py), em vez de mandar
+# a pessoa colar SQL num painel web. O runner é idempotente e sabe em que
+# versão o banco está — rodar de novo numa instalação em dia é no-op.
 setup_database() {
   log "[8/9] Configurando banco..."
 
-  if schema_already_applied; then
-    log "Schema já está aplicado — pulando [8/9]."
-    cat <<EOF
-
-==================================================================
-  Schema do banco Supabase — já aplicado ✓
-==================================================================
-
-Detectei via REST que as tabelas já existem neste projeto Supabase.
-Pulando o passo de aplicar o schema.
-
-Se você fizer upgrade futuro com mudanças destrutivas, as notas de
-release vão sinalizar e você reaplica manualmente.
-
-EOF
+  local database_url
+  database_url=$(grep -E "^DATABASE_URL=" "$KOBE_HOME/.env" | cut -d= -f2- | tr -d '\r')
+  if [[ -z "$database_url" ]]; then
+    warn "DATABASE_URL ausente no .env — pulando o schema."
+    warn "Aplique depois com: $KOBE_HOME/.venv/bin/python $KOBE_HOME/infra/migrate.py up"
     return
   fi
 
-  cat <<EOF
+  # Primeiro CRIAR o banco se ele não existir. O instalador não pressupõe
+  # banco pronto: ele provisiona. E provisiona com a codificação, a collation
+  # e o fuso da referência versionada — banco criado com o default do initdb
+  # nasce divergente, e collation não se troca depois sem recriar.
+  if ! "$KOBE_HOME/.venv/bin/python" "$KOBE_HOME/infra/provision_db.py" \
+       --database-url "$database_url"; then
+    cat <<EOF
 
 ==================================================================
-  Schema do banco Supabase
+  Não consegui preparar o banco
 ==================================================================
 
-Você precisa rodar o arquivo abaixo no SQL Editor do seu projeto
-Supabase (as keys do Supabase — publishable/anon ou secret/service_role
-— não fazem DDL via REST API; SQL Editor é o caminho correto):
+Causas comuns:
 
-  $KOBE_HOME/infra/schema.sql
+  - o servidor PostgreSQL não está no ar, ou a DATABASE_URL aponta
+    pro host/porta/usuário errado
+  - o usuário da conexão não pode criar banco
+    (a mensagem acima diz o SQL exato pra alguém com privilégio rodar)
 
-PASSOS:
-  1. Abra https://app.supabase.com → seu projeto
-  2. Menu lateral: Database → Extensions → habilite "vector"
-  3. Menu lateral: SQL Editor → New query
-  4. Cole o conteúdo de schema.sql e clique em "Run"
+Depois de resolver, rode os dois:
 
-⚠️  Se você JÁ rodou antes (upgrade de instalação existente), pode
-   rodar de novo — o schema é idempotente (CREATE TABLE IF NOT EXISTS
-   em tudo). Mudanças destrutivas no futuro virão sinalizadas nas
-   notas de release.
+  $KOBE_HOME/.venv/bin/python $KOBE_HOME/infra/provision_db.py
+  $KOBE_HOME/.venv/bin/python $KOBE_HOME/infra/migrate.py up
 
 EOF
-  read -r -p "Pressione ENTER quando tiver rodado o schema..."
+    read -r -p "Pressione ENTER quando tiver preparado o banco..."
+    return
+  fi
+
+  if ! "$KOBE_HOME/.venv/bin/python" "$KOBE_HOME/infra/migrate.py" up \
+       --database-url "$database_url"; then
+    cat <<EOF
+
+==================================================================
+  Não consegui aplicar o schema
+==================================================================
+
+O banco existe, mas o runner de migrations falhou. Causas comuns:
+
+  - usuário sem permissão de DDL no banco
+  - as extensões "vector", "uuid-ossp" e "pg_trgm" indisponíveis
+    (no Debian/Ubuntu: apt install postgresql-<versão>-pgvector)
+
+Depois de resolver, rode:
+
+  $KOBE_HOME/.venv/bin/python $KOBE_HOME/infra/migrate.py up
+
+Para ver em que versão o banco está:
+
+  $KOBE_HOME/.venv/bin/python $KOBE_HOME/infra/migrate.py status
+
+EOF
+    read -r -p "Pressione ENTER quando tiver aplicado o schema..."
+    return
+  fi
+
+  # Portão de compatibilidade (T4): pega collation, fuso, data_checksums e
+  # ordem física de coluna divergentes — as coisas que fazem um banco parecer
+  # certo e se comportar diferente. Avisa, não bloqueia: um banco recém-criado
+  # com collation diferente ainda funciona, só ordena texto de outro jeito.
+  if ! "$KOBE_HOME/.venv/bin/python" "$KOBE_HOME/infra/compat_gate.py" \
+       --database-url "$database_url"; then
+    warn "O banco diverge do schema versionado (veja acima)."
+    warn "O Kobe funciona assim, mas ordenação de texto e carimbos de tempo"
+    warn "podem se comportar diferente do esperado."
+  fi
 }
 
 # ----------------------------------------------------------------------------

@@ -91,13 +91,30 @@ Você tem três camadas de memória:
 
 Esses arquivos pertencem ao **operador**, não ao framework. Ficam fora do repo público. Você pode atualizá-los quando ele autorizar.
 
-### 2. Memória persistente (no banco Supabase)
+### 2. Memória persistente (no Postgres do Kobe)
 
 - **Tópicos** (forum topics do Telegram): cada um é um espaço de assunto (ex: "Olimpo", "Pessoal", "Projetos")
 - **Sessões**: dentro de um tópico, conversas delimitadas no tempo. Não há mais
   uma camada de *conversation* acima delas — vide a nota sobre o Chat Manager
 - **Mensagens**: histórico bruto de tudo que foi dito
 - **Artefatos salvos**: documentos persistidos quando o operador disser "salva isso pra depois"
+
+O banco é **PostgreSQL, acessado direto por `psycopg`** — sem PostgREST e sem
+adaptador no meio. Onde ele mora é **configuração**, não código: uma linha
+`DATABASE_URL` no `.env`. `bot/db.py` é o único arquivo que sabe qual banco é;
+o resto do Kobe manda SQL.
+
+Duas ferramentas de manutenção, ambas rodáveis à mão:
+
+- **`infra/migrate.py`** — runner de migrations versionado (tabela de controle,
+  ordem determinística, idempotente, recusa aplicar fora de ordem, detecta
+  drift). `status` diz em que versão o banco está; `up` aplica o que falta.
+  **Migration aplicada é imutável** — correção vira migration nova, pra frente.
+- **`infra/compat_gate.py`** — o portão de compatibilidade de ambiente. Falha
+  quando o banco diverge do schema versionado em collation, ctype, encoding,
+  `data_checksums`, `TimeZone`, versão do servidor/extensões, ou na **ordem
+  física das colunas**. Essa última é a que nenhum diff por nome enxerga e a
+  que quebra carga posicional **em silêncio**.
 
 ### 3. Workspace (em `projetos/`)
 
@@ -180,7 +197,7 @@ Princípios:
 Quando precisar criar arquivo temporário (plano de implementação, dump de análise, script ad-hoc, snapshot pra inspecionar depois), coloque em `.local/` — qualquer pasta com esse nome em qualquer nível da árvore está no `.gitignore`. Exemplos:
 
 - `.local/plano-da-fase-X.md` — rascunho de design antes de virar runbook formal
-- `.local/dump-supabase-2026-05-13.json` — extrato pra investigar
+- `.local/dump-do-banco-2026-05-13.json` — extrato pra investigar
 - `plugins/private/algo/.local/teste.sh` — script só do plugin, não vai pro repo dele
 
 Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.

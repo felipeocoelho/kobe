@@ -1,0 +1,710 @@
+{
+  "fingerprint_version": 1,
+  "database": {
+    "encoding": "UTF8",
+    "collate": "en_US.UTF-8",
+    "ctype": "en_US.UTF-8",
+    "data_checksums": "on",
+    "timezone": "UTC",
+    "server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+    "server_version_major": 16
+  },
+  "extensions": {
+    "pg_trgm": "1.6",
+    "plpgsql": "1.0",
+    "uuid-ossp": "1.1",
+    "vector": "0.6.0"
+  },
+  "tables": {
+    "contacts": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "tipo",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "nome_canonico",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "telefone_e164",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "whatsapp_jid",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "email",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "contexto",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "notas",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "aliases",
+          "type": "text[]",
+          "nullable": false,
+          "default": "'{}'::text[]",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "origens",
+          "type": "text[]",
+          "nullable": false,
+          "default": "'{}'::text[]",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "oculto",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "metadata",
+          "type": "jsonb",
+          "nullable": false,
+          "default": "'{}'::jsonb",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 13,
+          "attnum": 13,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 14,
+          "attnum": 14,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "contacts_aliases_gin",
+          "definition": "CREATE INDEX contacts_aliases_gin ON public.contacts USING gin (aliases)"
+        },
+        {
+          "name": "contacts_jid_uq",
+          "definition": "CREATE UNIQUE INDEX contacts_jid_uq ON public.contacts USING btree (whatsapp_jid) WHERE (whatsapp_jid IS NOT NULL)"
+        },
+        {
+          "name": "contacts_nome_trgm",
+          "definition": "CREATE INDEX contacts_nome_trgm ON public.contacts USING gin (nome_canonico gin_trgm_ops)"
+        },
+        {
+          "name": "contacts_pkey",
+          "definition": "CREATE UNIQUE INDEX contacts_pkey ON public.contacts USING btree (id)"
+        },
+        {
+          "name": "contacts_telefone_uq",
+          "definition": "CREATE UNIQUE INDEX contacts_telefone_uq ON public.contacts USING btree (telefone_e164) WHERE (telefone_e164 IS NOT NULL)"
+        },
+        {
+          "name": "contacts_tipo_oculto",
+          "definition": "CREATE INDEX contacts_tipo_oculto ON public.contacts USING btree (tipo, oculto)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "contacts_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "contacts_tipo_check",
+          "definition": "CHECK ((tipo = ANY (ARRAY['pessoa'::text, 'grupo'::text])))"
+        }
+      ]
+    },
+    "messages": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "session_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "telegram_message_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "role",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "audio_transcribed",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "tokens_used",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_messages_created",
+          "definition": "CREATE INDEX idx_messages_created ON public.messages USING btree (created_at)"
+        },
+        {
+          "name": "idx_messages_session",
+          "definition": "CREATE INDEX idx_messages_session ON public.messages USING btree (session_id)"
+        },
+        {
+          "name": "idx_messages_topic",
+          "definition": "CREATE INDEX idx_messages_topic ON public.messages USING btree (topic_id)"
+        },
+        {
+          "name": "messages_pkey",
+          "definition": "CREATE UNIQUE INDEX messages_pkey ON public.messages USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "messages_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "messages_role_check",
+          "definition": "CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))"
+        },
+        {
+          "name": "messages_session_id_fkey",
+          "definition": "FOREIGN KEY (session_id) REFERENCES sessions(id)"
+        },
+        {
+          "name": "messages_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id)"
+        }
+      ]
+    },
+    "saved_artifacts": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "title",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "embedding",
+          "type": "vector(1536)",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "tags",
+          "type": "text[]",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_artifacts_embedding",
+          "definition": "CREATE INDEX idx_artifacts_embedding ON public.saved_artifacts USING ivfflat (embedding vector_cosine_ops)"
+        },
+        {
+          "name": "idx_artifacts_topic",
+          "definition": "CREATE INDEX idx_artifacts_topic ON public.saved_artifacts USING btree (topic_id)"
+        },
+        {
+          "name": "saved_artifacts_pkey",
+          "definition": "CREATE UNIQUE INDEX saved_artifacts_pkey ON public.saved_artifacts USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "saved_artifacts_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "saved_artifacts_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id)"
+        }
+      ]
+    },
+    "sessions": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'active'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "summary",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 8,
+          "name": "awaiting_slash_response",
+          "type": "jsonb",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_sessions_status",
+          "definition": "CREATE INDEX idx_sessions_status ON public.sessions USING btree (status)"
+        },
+        {
+          "name": "idx_sessions_topic",
+          "definition": "CREATE INDEX idx_sessions_topic ON public.sessions USING btree (topic_id)"
+        },
+        {
+          "name": "sessions_pkey",
+          "definition": "CREATE UNIQUE INDEX sessions_pkey ON public.sessions USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "sessions_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "sessions_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'compacted'::text])))"
+        },
+        {
+          "name": "sessions_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id)"
+        }
+      ]
+    },
+    "topic_name_history": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "changed_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_topic_name_history_topic",
+          "definition": "CREATE INDEX idx_topic_name_history_topic ON public.topic_name_history USING btree (topic_id)"
+        },
+        {
+          "name": "topic_name_history_pkey",
+          "definition": "CREATE UNIQUE INDEX topic_name_history_pkey ON public.topic_name_history USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "topic_name_history_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "topic_name_history_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE"
+        }
+      ]
+    },
+    "topics": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "telegram_thread_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "telegram_chat_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "current_name",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "welcomed_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'active'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "first_seen_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "last_activity_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_topics_status",
+          "definition": "CREATE INDEX idx_topics_status ON public.topics USING btree (status)"
+        },
+        {
+          "name": "idx_topics_telegram_thread",
+          "definition": "CREATE INDEX idx_topics_telegram_thread ON public.topics USING btree (telegram_thread_id)"
+        },
+        {
+          "name": "topics_chat_thread_unique",
+          "definition": "CREATE UNIQUE INDEX topics_chat_thread_unique ON public.topics USING btree (telegram_chat_id, telegram_thread_id)"
+        },
+        {
+          "name": "topics_pkey",
+          "definition": "CREATE UNIQUE INDEX topics_pkey ON public.topics USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "topics_chat_thread_unique",
+          "definition": "UNIQUE (telegram_chat_id, telegram_thread_id)"
+        },
+        {
+          "name": "topics_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "topics_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'deleted'::text, 'archived'::text])))"
+        }
+      ]
+    }
+  }
+}

@@ -8,13 +8,13 @@ Cada usuário cria seu próprio bot Telegram, instala o Kobe na sua VPS, e passa
 
 - **Inteligência mora no Claude, não no Python.** O bot é só um carteiro.
 - **Agnóstico de operador.** Quem clona instala com configuração mínima própria.
-- **Memória em camadas.** Identidade (Git), histórico (Supabase), workspace (filesystem).
+- **Memória em camadas.** Identidade (Git), histórico (PostgreSQL), workspace (filesystem).
 
 ## Stack
 
 - Python 3.11+ (bot)
 - Claude Code CLI (`claude -p`)
-- Supabase (PostgreSQL + pgvector)
+- PostgreSQL 16+ (com `vector`, `uuid-ossp` e `pg_trgm`), acessado direto por psycopg
 - Telegram Bot API
 - Groq Whisper Large-v3 (transcrição)
 - systemd `--user`
@@ -61,7 +61,7 @@ Antes de rodar o instalador, tenha em mãos:
 
 1. **Bot Telegram** criado via [@BotFather](https://t.me/BotFather) — token salvo
 2. **Supergrupo Telegram** com tópicos habilitados (você como admin)
-3. **Conta Supabase** com projeto criado, Project URL + **Secret Key** (Project Settings → API Keys → "Secret keys" / service_role — não use a publishable/anon) e extensão `vector` habilitada (Database → Extensions)
+3. **PostgreSQL 16+** no ar, e um usuário que possa criar banco nele. **Você não precisa criar o banco** — o instalador cria (com a codificação, a collation e o fuso corretos) e aplica o schema. As extensões `vector`, `uuid-ossp` e `pg_trgm` precisam estar disponíveis (Debian/Ubuntu: `apt install postgresql-<versão>-pgvector`). Escolha um nome pro banco e monte a `DATABASE_URL` — você não roda SQL à mão
 4. **Conta Groq** com API key ([console.groq.com](https://console.groq.com))
 5. **Claude Code** instalado e autenticado ([docs](https://docs.claude.com/en/docs/claude-code/setup))
 
@@ -83,7 +83,7 @@ bash ~/kobe/uninstall.sh
 
 (Ajuste o path se você customizou onde o Kobe foi instalado.)
 
-Remove só o que o instalador criou (diretório + unit do systemd). Não toca em Claude Code, Supabase, Telegram nem nas dependências do sistema. Oferece backup do `.env` antes de apagar.
+Remove só o que o instalador criou (diretório + unit do systemd). Não toca em Claude Code, no banco, no Telegram nem nas dependências do sistema. Oferece backup do `.env` antes de apagar.
 
 ### Modo dev (sem instalar como serviço)
 
@@ -137,7 +137,7 @@ INFO kobe.handler: claude_run status=ok elapsed=12.4s prompt_len=3128
 
 Primitivas CORE que o agente (e plugins) usam durante a execução:
 
-- `kobe-notify "<texto>"` — manda texto pro chat ativo (sinal de vida em tarefas longas). Aceita `--topic "<nome>"` pra endereçar um tópico pelo nome (resolve via Supabase) — útil em salas de código detached, que nascem sem `KOBE_CHAT_ID`.
+- `kobe-notify "<texto>"` — manda texto pro chat ativo (sinal de vida em tarefas longas). Aceita `--topic "<nome>"` pra endereçar um tópico pelo nome (resolve pela tabela `topics`) — útil em salas de código detached, que nascem sem `KOBE_CHAT_ID`.
 - `kobe-attach <path> [caption]` — envia arquivo como documento no Telegram. Também aceita `--topic "<nome>"`.
 - `kobe-alerta` — helper de alertas proativos (criar/confirmar/dispensar).
 
