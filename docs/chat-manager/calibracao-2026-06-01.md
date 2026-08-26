@@ -1,5 +1,10 @@
 # Calibração do New Chat Manager — detecção de borda
 
+> **📜 DOCUMENTO HISTÓRICO (2026-08-25).** O Chat Manager foi aposentado —
+> código, menu, schema e suíte. Este documento descreve um sistema que não
+> existe mais; fica no repositório porque registra a análise e o raciocínio da
+> época, não porque descreva o Kobe de hoje. Vide `CHANGELOG.md`.
+
 Gerado: 2026-06-01 22:46 -03
 
 Método: algoritmo puro `detect_segments` contra corpus rotulado à

@@ -1,12 +1,13 @@
 """Memória de trabalho do Kobe (Highlander — Frente 0).
 
-Casa própria da MEMÓRIA, separada da gerência de CONVERSAS (`bot/chat_manager/`).
+Casa própria da MEMÓRIA, separada da gerência de CONVERSAS.
 
 Regra de ouro (plano Highlander v4 §1): a memória de trabalho pode CONSUMIR
 dado de conversa, mas **conversa nunca monta a janela**. Por isso a janela
-imediata (`working_set`) — que era filada dentro de `chat_manager/context.py`
-mesmo sem tocar `conversations` — passa a morar aqui. Os blocos de conversa
-(quente/frio/relações) continuam em `chat_manager`, porque são de conversa.
+imediata (`working_set`) — que era filada dentro do pacote do Chat Manager
+mesmo sem tocar `conversations` — passou a morar aqui. Foi esse desacoplamento
+que deixou a memória sobreviver inteira quando o Chat Manager foi aposentado
+(2026-08-25): o que morreu foi conversa, não memória.
 
 Camadas (a crescer nas próximas frentes):
 - `working_set` — janela imediata: últimas ~10 min / N msgs DESTE tópico, crua.

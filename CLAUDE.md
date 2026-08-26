@@ -94,7 +94,8 @@ Esses arquivos pertencem ao **operador**, não ao framework. Ficam fora do repo 
 ### 2. Memória persistente (no banco Supabase)
 
 - **Tópicos** (forum topics do Telegram): cada um é um espaço de assunto (ex: "Olimpo", "Pessoal", "Projetos")
-- **Sessões**: dentro de um tópico, conversas delimitadas no tempo
+- **Sessões**: dentro de um tópico, conversas delimitadas no tempo. Não há mais
+  uma camada de *conversation* acima delas — vide a nota sobre o Chat Manager
 - **Mensagens**: histórico bruto de tudo que foi dito
 - **Artefatos salvos**: documentos persistidos quando o operador disser "salva isso pra depois"
 
@@ -184,82 +185,35 @@ Quando precisar criar arquivo temporário (plano de implementação, dump de an�
 
 Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.
 
-## Chat Manager — persistência inteligente de conversa por assunto
+## Chat Manager — aposentado (nota histórica)
 
-Implementado em 2026-05-27 (v0.14.0). Substitui parcialmente a convenção de handoff provisória anterior (que ainda vale pra **Claude Code direto** e **plugin Coder dispatched** — só a parte do Hal foi reestruturada).
+Entre 27/05 e 25/08/2026 o Kobe teve um **Chat Manager**: um sistema que agrupava
+sessões por assunto numa camada chamada *conversation* (v1, detector síncrono no
+caminho do turno; v2, classificador-bibliotecário rodando atrás, no daemon Keyko).
+Ele trazia os comandos `/conversas_topico`, `/conversas_global`, `/conversa` e
+`/renomear`, mais o link `/retomar_<id>`.
 
-### Conceito
+**Foi removido em 25/08/2026** — código, menu, schema e suíte. A flag estava
+desligada em produção e o sistema nunca voltou a ser ligado. Palavra do operador:
+*"vamos aposentar o Chat Manager… não quero um Frankenstein"*. Se algo com função
+parecida for feito no futuro, será **algo novo**, não a ressurreição deste.
 
-Sessão deixa de ser **bloco temporal arbitrário** e ganha uma camada acima — **conversation**, que agrupa sessions por **assunto/tema**. Hierarquia:
+O que isso significa na prática, hoje:
 
-```
-Topic (forum do Telegram) → Conversation (tema longevo) → Session (bloco temporal) → Message
-```
+- **Os quatro comandos acima não existem mais.** Se alguém os digitar, caem no
+  handler genérico e chegam a você como texto — trate como mensagem normal.
+- **`/nova`, `/contexto`, `/salvar` e `/retomar` continuam vivos** e nunca foram
+  do Chat Manager. `/nova` arquiva a sessão; `/contexto` mostra a sessão ativa;
+  `/salvar` e `/retomar` trabalham sobre `saved_artifacts`.
+- **A memória não foi afetada.** A janela imediata de memória (`bot/memory/`) foi
+  desacoplada do Chat Manager meses antes, na Frente 0 do Highlander — foi esse
+  desacoplamento que a fez atravessar a aposentadoria intacta. O que morreu foi
+  gerência de **conversa**, não memória.
+- **O helper `bot/bin/kobe-recall` foi removido junto**, porque dependia das
+  tabelas que sumiram. **`bot/bin/kobe-recall-since` FICA** — apesar do nome
+  parecido, é janela temporal sobre `messages` e não tem nada de Chat Manager.
 
-- **Topic** = container fixo do Telegram (Dev Kobe, Olimpo, Pessoal, etc.). Não atravessa.
-- **Conversation** = tema longevo dentro de um topic. Pode dormir e ser retomada após dias. Tem `title`, `slug`, `centroid_embedding`, status (`active`/`dormant`/`archived`).
-- **Session** = bloco contínuo de atividade dentro de uma conversation. Ainda compacta em 40 msgs.
-- **Message** = mensagem individual. Ganhou coluna `embedding` (vector 1536).
-
-### Mecânica do detector (`bot/conversation_detector.py`)
-
-A cada msg do operador:
-1. Calcula embedding via OpenAI text-embedding-3-small (≈$0.01/mês).
-2. Compara com `centroid_embedding` das conversations do **topic atual** (não atravessa).
-3. Decide:
-   - similaridade com ativa ≥ 0.55 → **continue** (mesma conversation)
-   - dormant casa melhor → **reopen**
-   - similaridade ≤ 0.35 → **open_new** (cria conversation nova)
-   - zona cinza → **GPT-4o-mini** judge decide (não consome cota do plano Max)
-4. Atualiza `centroid_embedding` com EMA (peso 0.1) re-normalizada L2.
-5. Arquiva session ativa e cria nova vinculada à conversation alvo quando há transição.
-6. Manda aviso curto pro operador no caso de reopen/open_new.
-
-Princípio: **isolamento total entre topics**. Detector roda independente em cada topic — trocar de assunto em Dev Kobe nunca afeta Olimpo, Pessoal, Private, etc.
-
-### Comandos novos no menu
-
-- `/conversas_topico [filtro]` — lista conversations do topic atual com links clicáveis `/retomar_<id>` em texto.
-- `/conversas_global [filtro]` — todas as conversations, categorizadas, priorizando topic atual.
-- `/conversa <termo>` — busca substring no title; match único = abre direto, múltiplos = mostra lista.
-- `/renomear <novo nome>` — renomeia conversation ativa.
-- `/retomar_<id_curto>` — gerado dinamicamente nas listagens (8 chars do UUID). Clique no link em texto pra reabrir.
-
-Linguagem natural sempre funciona em paralelo: "Hal, lista as conversas", "Hal, retoma aquela conversa sobre X", etc.
-
-Sem parâmetro (clique mobile no menu): cada comando tem comportamento gracioso — `/conversa` cai pra `/conversas_topico`, `/renomear` orienta a passar nome.
-
-### Comandos existentes ajustados
-
-- `/nova` — fecha conversation ativa (marca dormant) **e** arquiva session.
-- `/contexto` — mostra também conversation ativa, idade, qty sessions arquivadas.
-- `/retomar <termo>` — continua buscando `saved_artifacts`. Sugere `/conversa` como fallback quando nada encontrado.
-
-### Convenção de slug
-
-- Chat privado (chat_id > 0, DM 1-on-1) → slug `private`, current_name "Private".
-- "Geral" do supergrupo (chat_id < 0, sem thread_id) → slug `general`, current_name "General".
-- Forum topics → slugify do `current_name` (Dev Kobe → `dev-kobe`, etc.).
-
-UNIQUE composta em `topics(telegram_chat_id, telegram_thread_id)` garante que privado e geral do supergrupo coexistam.
-
-### Feature flag
-
-`CHAT_MANAGER_ENABLED=true|false` no `.env`. Default false (rollback trivial: flag off + restart). Quando off, sistema atual (sessions ortogonais) roda intacto.
-
-### O que sobrou da convenção de handoff provisória
-
-A parte do **Hal** (item 3 da seção antiga) **deixa de ser provisória** — Chat Manager substituiu. Mas Claude Code direto e plugin Coder dispatched **ainda mantêm `<cwd>/.local/handoff.md`** com o formato de 8 campos descrito anteriormente. Essa parte segue valendo enquanto não houver convenção equivalente pra essas instâncias.
-
-### Limitações conhecidas (v0.14.0)
-
-- **Thresholds não calibrados em uso real ainda** (HIGH=0.55, LOW=0.35, CLUSTER=0.55). Validação real é Fase 8 do plano.
-- **Busca de `/conversa <termo>` é substring no title**, não semântica. Pra busca por tema, use linguagem natural ("Hal, retoma a conversa sobre X").
-- **`/renomear` sem parâmetro não pergunta** (MVP simples; estado conversacional fica pra v2).
-- **`messages.embedding` é populado mas não indexado** (sem ivfflat) — só vale se busca em escala virar caso de uso.
-
-Plano completo de design: `~/.claude/plans/claude-sobre-o-chat-noble-dawn.md`.
-Card original: `1ddbeaf7-8e41-4b9a-8b12-bb023592f5cb` no Flow.
+Detalhes de tudo que saiu, e por quê, estão no `CHANGELOG.md`.
 
 ## Helpers do Kobe pra plugins emitirem progresso e anexos
 
@@ -445,7 +399,7 @@ Operador pede algo que tem pipeline pronto (ex: "processa a call do Fulano"). Id
 ### Comando de memória
 - `/nova` — arquiva sessão ativa do tópico, cria nova sessão fresca
 - `/salvar [título]` — consolida discussão atual em `saved_artifacts` com embedding
-- `/retomar [busca]` — busca semântica em `saved_artifacts`, traz contexto de volta
+- `/retomar [busca]` — busca em `saved_artifacts` (ILIKE no título), traz contexto de volta
 - `/contexto` — mostra resumo do que está na memória ativa do tópico
 
 ## Atualização de memória após cada interação

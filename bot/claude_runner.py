@@ -478,12 +478,8 @@ def build_prompt(
     new_message: str,
     plugins_section: str = "",
     topic_context: Optional[str] = None,
-    missao_ativa_info: Optional[str] = None,
     sala_ativa_info: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
-    conversation_active: Optional[dict] = None,
-    conversation_summaries: Optional[list[dict]] = None,
-    chat_manager_section: Optional[str] = None,
     curated_core: Optional[str] = None,
     grounding_signals: Optional[str] = None,
     background_state: Optional[str] = None,
@@ -506,11 +502,10 @@ def build_prompt(
     histórico pra funcionar como instrução de base — o histórico é
     consequência dela.
 
-    `missao_ativa_info` (v0.13): quando há missão ativa no tópico E o
-    orquestrador da missão triou a mensagem como "não é sobre a missão",
-    o bot routea pra cá com essa linha extra de ciência (formato
-    `[Missão ativa: <id> — "<objetivo>"]`). Só uma linha — sem inflar
-    contexto. Hal sabe que existe missão rolando sem precisar gerenciá-la.
+    `sala_ativa_info`: quando há uma SALA DE MISSÃO aberta no tópico, entra
+    uma linha de ciência (`[Sala de missão ativa neste tópico: <id> — ...]`).
+    É ciência, não roteamento: a sala não captura o canal — o agente segue
+    respondendo normal e só repassa pra sala com endereçamento explícito.
     """
     topic_label = (
         f"telegram_thread_id={thread_id}" if thread_id is not None else "geral"
@@ -563,9 +558,6 @@ def build_prompt(
         parts.append("")
         parts.append(curated_core)
 
-    if missao_ativa_info:
-        parts.append(missao_ativa_info)
-
     if sala_ativa_info:
         parts.append("")
         parts.append(sala_ativa_info)
@@ -583,41 +575,12 @@ def build_prompt(
         parts.append("[Contexto do tópico]")
         parts.append(topic_context)
 
-    # New Chat Manager (2026-06-01): bloco residente já mastigado pelo
-    # daemon — ponteiro do quente + catálogo frio + relações + instruções
-    # de pull sob demanda. Substitui o render legado de conversation_active
-    # quando presente (caminho novo do CHAT_MANAGER_ENABLED).
-    if chat_manager_section:
-        parts.append("")
-        parts.append(chat_manager_section)
-
     # Memória durável recuperada (Highlander Frente 2.3): fatos do Hindsight
     # relevantes pra mensagem atual — o "trazer assunto velho de volta". Vem
     # como PISTA cética (a própria seção avisa pra confirmar contra a fonte).
     if durable_memory:
         parts.append("")
         parts.append(durable_memory)
-
-    # Chat Manager (Fase 4 — legado): header da conversation ativa +
-    # cronologia comprimida das sessions arquivadas. Só no caminho antigo
-    # (mantido pra compat; o caminho novo passa chat_manager_section).
-    if conversation_active:
-        parts.append("")
-        title = conversation_active.get("title") or "(sem título)"
-        started = conversation_active.get("started_at") or ""
-        n_summaries = len(conversation_summaries or [])
-        parts.append(
-            f"[Conversation ativa: '{title}' — iniciada em {started[:10]}, "
-            f"{n_summaries} session(s) arquivada(s)]"
-        )
-
-    if conversation_summaries:
-        parts.append("")
-        parts.append("[Cronologia comprimida (sessions arquivadas desta conversation)]")
-        for i, s in enumerate(conversation_summaries, 1):
-            started = (s.get("started_at") or "")[:10]
-            summary = (s.get("summary") or "").strip()
-            parts.append(f"— Session {i} ({started}): {summary}")
 
     # ── Histórico, DATADO (correção de 2026-08-20) ────────────────────────
     # Antes, cada linha virava `papel: conteúdo` e o `created_at` que vinha do

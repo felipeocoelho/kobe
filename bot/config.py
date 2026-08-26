@@ -45,11 +45,10 @@ class Config:
     anthropic_api_key: Optional[str]
     assemblyai_api_key: Optional[str]
     openai_api_key: Optional[str]
-    chat_manager_enabled: bool
     # Memória de trabalho (Highlander Frente 0 — decouple): governa a JANELA de
-    # memória (imediata vs legado de sessão) e a compactação — decisões de
-    # MEMÓRIA que ANTES pegavam carona na flag de CONVERSAS (chat_manager).
-    # Agora separadas: chat_manager = só conversas; working_memory = só memória.
+    # memória (imediata vs legado de sessão) e a compactação. Nasceu separada da
+    # flag do Chat Manager (aposentado em 2026-08-25), que era de CONVERSAS —
+    # foi esse desacoplamento que deixou a memória sobreviver à aposentadoria.
     # On (default): janela imediata + sem compactação (design Highlander).
     # Off: histórico de sessão legado + compactação aos 40 msgs (pré-Highlander).
     working_memory_enabled: bool
@@ -233,11 +232,9 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         assemblyai_api_key=os.getenv("ASSEMBLYAI_API_KEY") or None,
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
-        chat_manager_enabled=_parse_bool(os.getenv("CHAT_MANAGER_ENABLED")),
         # Memória de trabalho desacoplada da flag de conversas (Frente 0).
-        # Default-ON: a janela imediata é o design Highlander. Prod hoje roda
-        # com Chat Manager on (= janela imediata), então default-on preserva o
-        # comportamento. Desligar (=false) volta ao histórico de sessão + compactação.
+        # Default-ON: a janela imediata é o design Highlander. Desligar (=false)
+        # volta ao histórico de sessão + compactação.
         working_memory_enabled=_parse_bool(os.getenv("WORKING_MEMORY_ENABLED", "true")),
         # Highlander: default-ON (decisão do operador 2026-06-24 — "não deixe
         # atrás de flag-off"). Pra desligar, setar a env como false. curated_core

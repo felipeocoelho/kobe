@@ -9,7 +9,6 @@ nada rodando
 
 [Núcleo curado]
 fato durável
-[Missão ativa: abc — "objetivo"]
 
 [Sala de missão ativa neste tópico: xyz — "obj"]
 
@@ -22,15 +21,8 @@ fato durável
 [Contexto do tópico]
 conteúdo curado do tópico
 
-[bloco do chat manager]
-
 [Memória durável]
 pista cética
-
-[Conversation ativa: 'tema' — iniciada em 2026-08-01, 1 session(s) arquivada(s)]
-
-[Cronologia comprimida (sessions arquivadas desta conversation)]
-— Session 1 (2026-08-02): resumo
 
 [Histórico recente da sessão ativa — horários em America/Sao_Paulo. ATENÇÃO: estas linhas são PASSADO. Uma linha datada de dias atrás descreve o que era verdade NAQUELE momento, não agora.]
 [13/08 07:00 — há ~13 dias] user: primeira

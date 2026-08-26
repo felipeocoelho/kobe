@@ -221,14 +221,17 @@ def route_by_type(text: str, *, has_attachment: bool = False) -> Optional[str]:
 async def _ask_mini(text: str) -> Optional[str]:
     """Zona cinza: GPT-4o-mini decide PESADO vs LEVE. None se indisponível.
 
-    Reusa o client OpenAI do detector de conversa (mesma OPENAI_API_KEY, fora
-    da cota do plano Max). Em qualquer falha retorna None — o caller aplica o
-    default conservador (foreground: nunca prende a linha à toa por erro do mini).
+    Reusa a fábrica do client OpenAI (`bot.openai_client` — mesma
+    OPENAI_API_KEY, fora da cota do plano Max). Em qualquer falha retorna None
+    — o caller aplica o default conservador (foreground: nunca prende a linha à
+    toa por erro do mini). ATENÇÃO: esse `except` engole ImportError também, o
+    que já mascarou uma regressão; por isso o endereço do client é coberto por
+    teste em `tests/test_openai_client.py`.
     """
     if not os.environ.get("OPENAI_API_KEY"):
         return None
     try:
-        from bot.conversation_detector import _get_openai
+        from bot.openai_client import _get_openai
 
         resp = await _get_openai().chat.completions.create(
             model=MINI_MODEL,

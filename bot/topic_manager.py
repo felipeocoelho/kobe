@@ -438,7 +438,7 @@ def ensure_topic(
 ) -> str:
     """Get-or-create do topic. Retorna o `topics.id` (UUID em str).
 
-    `chat_id` agora é obrigatório (Fase 1 do Chat Manager) — a UNIQUE
+    `chat_id` é obrigatório — a UNIQUE
     composta `(telegram_chat_id, telegram_thread_id)` permite topics
     diferentes com `thread_id=0` separados por chat: o chat privado do
     operador (`chat_id > 0`) e o "Geral" do supergrupo (`chat_id < 0`).
@@ -539,8 +539,8 @@ def get_messages_since(
     Janela de FRESCOR pra run de background reler o que entrou DEPOIS que ela
     foi despachada — follow-up do operador, cancelamento, correção (decisão
     Fase C, 2026-06-05). É um index seek por (topic_id, created_at): barato.
-    Lê por topic (não por session) de propósito: uma conversation pode ter
-    rotacionado de session entre o despacho e o momento de agir.
+    Lê por topic (não por session) de propósito: a session pode ter
+    rotacionado entre o despacho e o momento de agir.
 
     Retorna [] quando nada novo chegou — o caller (helper kobe-recall-since)
     traduz isso em "nenhuma mensagem nova" pro agente.
@@ -649,81 +649,16 @@ def insert_message(
     return res.data[0]["id"]
 
 
-# ---------------------------------------------------------------------------
-# Helpers do Chat Manager (Fase 4)
-# ---------------------------------------------------------------------------
-
-
-def set_session_conversation(
-    db: Client, session_id: str, conversation_id: str
-) -> None:
-    """Vincula `sessions.conversation_id`. Idempotente — pode chamar várias
-    vezes com mesmo valor sem efeito. Usado pelo detector quando decide
-    a qual conversation a session corrente pertence.
-    """
-    db.table("sessions").update({"conversation_id": conversation_id}).eq(
-        "id", session_id
-    ).execute()
-
-
-def get_conversation_session_summaries(
-    db: Client, conversation_id: str, *, except_session_id: Optional[str] = None
-) -> list[dict]:
-    """Retorna lista de `{title_hint, started_at, ended_at, summary}` das
-    sessions arquivadas/compacted de uma conversation, ordenadas pela
-    data de início. Usado por `build_prompt` pra carregar cronologia
-    comprimida (vide Caso 3 da analogia com Claude Desktop, no plano
-    do Chat Manager).
-
-    `except_session_id` (opcional): exclui a session ativa atual da
-    lista — útil porque o histórico bruto dela já vai pro prompt via
-    `get_recent_messages`.
-
-    Filtra fora sessions sem summary (não compactadas ainda, baixo valor
-    como cronologia).
-    """
-    q = (
-        db.table("sessions")
-        .select("id, started_at, ended_at, summary, status")
-        .eq("conversation_id", conversation_id)
-        .in_("status", ["archived", "compacted"])
-        .not_.is_("summary", "null")
-        .order("started_at", desc=False)
-    )
-    res = q.execute()
-    rows = res.data or []
-    if except_session_id:
-        rows = [r for r in rows if r["id"] != except_session_id]
-    return rows
-
-
-def get_active_conversation_for_topic(
-    db: Client, topic_id: str
-) -> Optional[dict]:
-    """Retorna a conversation ativa (status='active') do topic, ou None.
-    Inclui `id`, `title`, `slug`, `started_at`. Usado pra montar header
-    do prompt e pra `/contexto`.
-    """
-    res = (
-        db.table("conversations")
-        .select("id, title, slug, started_at")
-        .eq("topic_id", topic_id)
-        .eq("status", "active")
-        .limit(1)
-        .execute()
-    )
-    return res.data[0] if res.data else None
-
-
 def get_last_assistant_message_of_session(
     db: Client, session_id: str
 ) -> Optional[str]:
     """Última mensagem com role='assistant' da session, ou None.
 
-    Usado pelo Chat Manager pra montar embedding contextual
-    (turno anterior + msg nova) quando decide a qual conversation a
-    msg pertence. Sem isso, msg que é réplica direta à resposta do
-    agente vira "vetor genérico" e o detector erra.
+    Helper genérico de sessão. Nasceu para o detector de conversa (Chat
+    Manager, aposentado em 2026-08-25) e ficou sem consumidor; não foi
+    removido junto porque não é acoplado a conversation nenhuma — lê
+    `messages` direto e serve qualquer caso de "o que o agente disse por
+    último nesta sessão".
     """
     meta = get_last_assistant_message_meta_of_session(db, session_id)
     return meta["content"] if meta else None
@@ -780,10 +715,9 @@ def get_last_assistant_message_meta_of_session(
 ) -> Optional[dict]:
     """Última msg `assistant` da session com `{content, created_at}`.
 
-    Variante do helper acima usada pelo bypass de "resposta curta a
-    pergunta direta" do detector. Precisa do timestamp pra avaliar a
-    janela de relevância (msg recente = mais provável de ser resposta
-    à última pergunta do agente).
+    Variante do helper acima, com o timestamp — serve pra avaliar janela
+    de relevância (msg recente = mais provável de ser resposta à última
+    pergunta do agente). Mesma nota de consumidor do helper acima.
     """
     res = (
         db.table("messages")
@@ -801,35 +735,3 @@ def get_last_assistant_message_meta_of_session(
         "content": row.get("content"),
         "created_at": row.get("created_at"),
     }
-
-
-def get_last_messages_of_conversation(
-    db: Client, conversation_id: str, limit: int = 6
-) -> list[dict]:
-    """Últimas N msgs da conversation (atravessa sessions vinculadas).
-
-    Retorna `[{role, content, created_at}]` em ordem cronológica
-    crescente (mais antiga primeiro). Usado pelo judge GPT-4o-mini
-    no Chat Manager pra decidir com base em diálogo, não só rótulo.
-
-    Faz 2 queries (Supabase API não tem JOIN nativo): primeiro busca
-    ids das sessions da conversation, depois msgs com `session_id in (...)`.
-    """
-    sessions = (
-        db.table("sessions")
-        .select("id")
-        .eq("conversation_id", conversation_id)
-        .execute()
-    )
-    session_ids = [s["id"] for s in (sessions.data or [])]
-    if not session_ids:
-        return []
-    res = (
-        db.table("messages")
-        .select("role, content, created_at")
-        .in_("session_id", session_ids)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return list(reversed(res.data or []))

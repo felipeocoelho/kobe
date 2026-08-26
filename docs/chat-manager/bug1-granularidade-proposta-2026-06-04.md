@@ -1,5 +1,10 @@
 # BUG 1 — Granularidade macro do detector: diagnóstico + proposta de calibração
 
+> **📜 DOCUMENTO HISTÓRICO (2026-08-25).** O Chat Manager foi aposentado —
+> código, menu, schema e suíte. Este documento descreve um sistema que não
+> existe mais; fica no repositório porque registra a análise e o raciocínio da
+> época, não porque descreva o Kobe de hoje. Vide `CHANGELOG.md`.
+
 **Data:** 2026-06-04
 **Status:** 🟡 Proposta pronta — **aguardando decisão do operador** (muda comportamento em runtime).
 **Card Flow:** `fb0bdaa3-d5e2-4c00-9f9a-554028128fee`

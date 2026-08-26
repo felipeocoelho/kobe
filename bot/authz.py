@@ -20,8 +20,9 @@ libera tudo) não contradiz isso: lista vazia não é dúvida, é a declaração
 não há filtro de canal — o estado em que a produção vive hoje.
 
 Este módulo existe porque a verificação estava **copiada em quatro lugares**
-(`telegram_handler`, `alertas/handlers`, `chat_manager_commands`,
-`mission_control/handlers`), com 22 pontos de chamada. Quatro cópias de uma
+(`telegram_handler`, `alertas/handlers`, `chat_manager_commands` — este
+aposentado junto com o Chat Manager — e `mission_control/handlers`), com 22
+pontos de chamada. Quatro cópias de uma
 regra de segurança é quatro chances de a whitelist falhar ABERTA — que é
 exatamente o desfecho que ela existe para impedir. Agora é uma função só, e
 `tests/test_chat_whitelist.py` assevera por grep que ninguém criou a quinta.

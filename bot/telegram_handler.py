@@ -42,12 +42,8 @@ from bot.handoff import (
 from bot.handoff.destilador import MIN_MESSAGES_FOR_HANDOFF
 from bot.handoff.paths import ensure_topic_handoff_dirs
 from bot.markdown import to_telegram_html
-from bot.mission_control import storage as missoes_storage
-from bot.mission_control import orquestrador as missoes_orquestrador
 from bot.mission_control import sala_dispatch as mission_control_sala
 from bot.alertas.context import render_alertas_abertos
-from bot.chat_manager import activity as cm_activity
-from bot.chat_manager.context import render_chat_manager_section
 from bot.memory import (
     get_immediate_messages,
     load_curated_core,
@@ -65,9 +61,7 @@ from bot.topic_manager import (
     count_messages,
     ensure_active_session,
     ensure_topic,
-    get_active_conversation_for_topic,
     get_active_session,
-    get_conversation_session_summaries,
     get_recent_messages,
     get_topic_slug,
     insert_message,
@@ -728,62 +722,6 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("falha enviando aviso de turno travado", exc_info=True)
 
 
-# Sentinela retornada por `_triagem_missao_se_ativa` quando o
-# orquestrador respondeu à msg do operador — caller deve encerrar
-# sem chamar o Hal. Valor escolhido pra não colidir com nenhum prompt
-# legítimo (contém NUL).
-_TRIAGEM_RESPONDEU = "\x00MISSAO_RESPONDEU\x00"
-
-
-async def _triagem_missao_se_ativa(
-    *,
-    kobe_home: Path,
-    bot_token: str,
-    chat_id: int,
-    thread_id: Optional[int],
-    texto: str,
-) -> Optional[str]:
-    """Decide o destino da msg quando há missão ativa no tópico (v0.13).
-
-    Retorno:
-    - `None` — não há missão ativa, segue fluxo normal pro Hal.
-    - `_TRIAGEM_RESPONDEU` — orquestrador tratou; encerra turno.
-    - string `[Missão ativa: <id> — "<obj>"]` — rouea pro Hal com essa
-      linha extra de ciência (msg não era sobre a missão).
-    """
-    ativa = missoes_storage.find_missao_ativa(kobe_home, chat_id, thread_id)
-    if ativa is None:
-        return None
-
-    # Chamada síncrona ao orquestrador. Vai bloquear o handler do
-    # tópico por até TIMEOUT_TRIAGEM_S (90s) — aceitável: lock por
-    # tópico já serializa, então é só um delay. Rodamos em thread
-    # pra não pendurar o loop asyncio.
-    loop = asyncio.get_running_loop()
-    try:
-        decisao = await loop.run_in_executor(
-            None,
-            lambda: missoes_orquestrador.triar_mensagem_sincrono(
-                kobe_home=kobe_home,
-                missao_id=ativa.id,
-                mensagem_operador=texto,
-                bot_token=bot_token,
-                chat_id=chat_id,
-                thread_id=thread_id,
-            ),
-        )
-    except Exception:  # noqa: BLE001 — fail-safe: deixa o Hal responder
-        logger.exception("triagem missao falhou — fallback pro Hal")
-        objetivo_curto = (ativa.objetivo or "")[:80]
-        return f'[Missão ativa: {ativa.id} — "{objetivo_curto}"]'
-
-    if decisao == "related":
-        return _TRIAGEM_RESPONDEU
-    # decisao == "not_related"
-    objetivo_curto = (ativa.objetivo or "")[:80]
-    return f'[Missão ativa: {ativa.id} — "{objetivo_curto}"]'
-
-
 def _quoted_media_label(reply: Message) -> str:
     """Rótulo curto pra uma mensagem citada que é mídia sem texto."""
     for attr, label in (
@@ -874,27 +812,6 @@ async def _handle_user_text(
         pending = _drain_pending_uploads(message.chat_id, thread_id)
         attachments_section = uploads.render_attachments_section(pending)
 
-    # New Chat Manager (2026-06-01): o turno NÃO classifica mais. O
-    # detector síncrono saiu do caminho crítico (era a fornalha de
-    # latência). Toda a inteligência (embedding, detecção de borda, tags)
-    # roda atrás, no daemon Keyko (bot.chat_manager.source.ClassifierSource),
-    # disparada por debounce de silêncio. Aqui, com a flag ligada, o turno
-    # só: (1) toca o sinal de atividade pro daemon saber que há lote novo;
-    # (2) lê os ponteiros residentes que o daemon já mastigou. Isso tudo é
-    # síncrono e barato — sem rede de LLM/embedding antes do 1º byte.
-    chat_manager_section: Optional[str] = None
-    conversation_summaries: list[dict] = []
-    if config.chat_manager_enabled:
-        try:
-            cm_activity.touch_activity(
-                config.kobe_home,
-                topic_id=topic_id,
-                chat_id=message.chat_id,
-                thread_id=thread_id,
-            )
-        except Exception:  # noqa: BLE001 — sinal é best-effort
-            logger.warning("chat_manager: touch_activity falhou", exc_info=True)
-
     # Compactação (v0.12) — APENAS no modo de memória legado. Com a memória de
     # trabalho ligada (working_memory), o histórico é reconstruído cru do banco
     # a cada turno (janela imediata, limitada por IMMEDIATE_HARD_CAP), então a
@@ -959,32 +876,6 @@ async def _handle_user_text(
             get_recent_messages, db, session_id, limit=config.recent_messages_limit
         )
 
-    async def _load_chat_manager() -> tuple[Optional[str], list[dict]]:
-        # Ponteiros residentes (quente/frio/relações) + cronologia comprimida
-        # das sessions arquivadas da conversation ativa. Tudo já mastigado
-        # pelo daemon — o turno só lê e cola. Read-only, barato.
-        if not config.chat_manager_enabled:
-            return None, []
-        try:
-            section = await asyncio.to_thread(
-                render_chat_manager_section, db, topic_id
-            )
-            active_conv = await asyncio.to_thread(
-                get_active_conversation_for_topic, db, topic_id
-            )
-            summaries: list[dict] = []
-            if active_conv is not None:
-                summaries = await asyncio.to_thread(
-                    get_conversation_session_summaries,
-                    db,
-                    active_conv["id"],
-                    except_session_id=session_id,
-                )
-            return section, summaries
-        except Exception:  # noqa: BLE001 — CM nunca derruba o turno
-            logger.warning("chat_manager: load de contexto falhou", exc_info=True)
-            return None, []
-
     async def _load_topic_ctx() -> tuple[Optional[str], Optional[str]]:
         # Knowledge base do tópico (v0.10): se `user-data/topics/<slug>/`
         # existir, lê prompt.md + knowledge/* e injeta no prompt. Slug é
@@ -999,10 +890,8 @@ async def _handle_user_text(
         )
         return slug, raw
 
-    history, (chat_manager_section, conversation_summaries), (slug, raw_context) = (
-        await asyncio.gather(
-            _load_history(), _load_chat_manager(), _load_topic_ctx()
-        )
+    history, (slug, raw_context) = await asyncio.gather(
+        _load_history(), _load_topic_ctx()
     )
     topic_context, truncated = consume_truncated_marker(raw_context)
     if truncated:
@@ -1065,25 +954,6 @@ async def _handle_user_text(
                 timeout=config.hindsight_timeout_seconds,
             )
         )
-
-    # Triagem de missão (v0.13, decisão 4.1=A): se há missão ativa no
-    # tópico, o orquestrador peneira a msg ANTES de chamar o Hal. Se a
-    # msg é sobre a missão, o orquestrador já respondeu via kobe-notify
-    # e a gente encerra aqui. Se não é, vem com a linha extra de
-    # ciência pro Hal saber que existe missão rolando.
-    missao_ativa_info = await _triagem_missao_se_ativa(
-        kobe_home=config.kobe_home,
-        bot_token=config.telegram_bot_token,
-        chat_id=message.chat_id,
-        thread_id=thread_id,
-        texto=text,
-    )
-    if missao_ativa_info == _TRIAGEM_RESPONDEU:
-        # Orquestrador cuidou. A msg do operador já está persistida
-        # como 'user'; a resposta do orquestrador foi via kobe-notify
-        # direto pro Telegram, não passa pelo histórico — aceitável na
-        # Fase 1 (operador vê resposta, sessão fica sem trace dela).
-        return
 
     # Ciência de sala de missão ativa (Mission Control, forma b) — read-only,
     # atrás da flag. NÃO é roteamento: é só contexto pro Hal reconhecer
@@ -1155,11 +1025,8 @@ async def _handle_user_text(
         new_message=text,
         plugins_section=render_plugins_section(plugins),
         topic_context=topic_context,
-        missao_ativa_info=missao_ativa_info,
         sala_ativa_info=sala_ativa_info,
         alertas_abertos_info=alertas_abertos_info,
-        conversation_summaries=conversation_summaries,
-        chat_manager_section=chat_manager_section,
         curated_core=curated_core,
         grounding_signals=grounding_signals,
         background_state=background_state,
@@ -1906,35 +1773,17 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         archived = archive_active_session(db, topic_id)
 
-        # Chat Manager (Fase 7): se habilitado, também marca conversation
-        # ativa do topic como dormant. Próxima msg dispara detector que
-        # pode reabrir a antiga (se tema continua) ou criar nova.
-        conv_dormant_title: Optional[str] = None
-        if config.chat_manager_enabled:
-            active_conv = get_active_conversation_for_topic(db, topic_id)
-            if active_conv is not None:
-                db.table("conversations").update({"status": "dormant"}).eq(
-                    "id", active_conv["id"]
-                ).execute()
-                conv_dormant_title = active_conv["title"]
-
-        if archived is None and conv_dormant_title is None:
+        if archived is None:
             reply = "Nada pra arquivar aqui — já está zerado. Manda a próxima."
-        elif conv_dormant_title:
-            reply = (
-                f"Sessão arquivada e conversa '{conv_dormant_title}' fechada. "
-                "Próxima mensagem abre nova conversation/session."
-            )
         else:
             reply = (
                 "Sessão arquivada. Memória ativa zerada — a próxima mensagem abre uma nova."
             )
         logger.info(
-            "/nova user=%s %s archived=%s conv_closed=%s",
+            "/nova user=%s %s archived=%s",
             update.effective_user.id if update.effective_user else None,
             _topic_label(thread_id),
             archived,
-            conv_dormant_title or "-",
         )
         await message.reply_text(reply, message_thread_id=thread_id)
 
@@ -1999,24 +1848,6 @@ async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Tópico: {_topic_label(thread_id)}",
             f"Sessão ativa desde {started_at} — {total} mensagem(ns).",
         ]
-
-        # Chat Manager (Fase 7): se habilitado e há conversation ativa,
-        # inclui meta (título, idade, qty sessions arquivadas).
-        if config.chat_manager_enabled:
-            active_conv = get_active_conversation_for_topic(db, topic_id)
-            if active_conv is not None:
-                conv_started = (active_conv.get("started_at") or "")[:10]
-                arquivadas = get_conversation_session_summaries(
-                    db, active_conv["id"], except_session_id=session_id
-                )
-                lines.append("")
-                lines.append(
-                    f"Conversa: '{active_conv['title']}' (desde {conv_started}, "
-                    f"{len(arquivadas)} session(s) arquivada(s))"
-                )
-            else:
-                lines.append("")
-                lines.append("Sem conversa ativa ainda — próxima msg pode criar.")
 
         if snippets:
             lines.append("")
@@ -2285,14 +2116,8 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     query = " ".join(context.args).strip() if context.args else ""
     if not query:
-        hint = "Manda o termo: /retomar <palavra-chave>"
-        if config.chat_manager_enabled:
-            hint += (
-                "\n\nDica: pra retomar uma *conversa* (não um artefato salvo), "
-                "use /conversa <termo> ou /conversas pra listar com botões."
-            )
         await message.reply_text(
-            hint,
+            "Manda o termo: /retomar <palavra-chave>",
             message_thread_id=message.message_thread_id,
             parse_mode="Markdown",
         )
@@ -2302,14 +2127,8 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with _serve(message.chat_id, thread_id):
         results = search_artifacts(db, query)
         if not results:
-            text = f"Não achei nenhum *artefato salvo* com “{query}”."
-            if config.chat_manager_enabled:
-                text += (
-                    f" Tenta /conversa {query} pra buscar entre conversas, "
-                    f"ou /conversas-global pra ver todas."
-                )
             await message.reply_text(
-                text,
+                f"Não achei nenhum *artefato salvo* com “{query}”.",
                 message_thread_id=thread_id,
                 parse_mode="Markdown",
             )

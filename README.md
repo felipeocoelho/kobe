@@ -126,10 +126,12 @@ INFO kobe.handler: claude_run status=ok elapsed=12.4s prompt_len=3128
 - `/contexto` — mostra um resumo da memória ativa.
 - `/salvar <título>` — consolida a sessão num artefato pesquisável.
 - `/retomar <termo>` — busca em artefatos salvos.
-- `/missao <descrição>` — abre uma Missão (trabalho multi-tarefa coordenado). Veja seção abaixo.
-- `/missao_status` — snapshot do painel da missão ativa do tópico.
-- `/missao_abortar` — aborta a missão ativa do tópico.
-- `/missao_lista` — lista missões deste tópico (ativas + 5 últimas encerradas).
+- `/handoff` — registra o estado do trabalho corrente pra outra instância retomar.
+- `/alerta_lista`, `/alerta_pausar <id>`, `/alerta_retomar <id>`, `/alerta_apagar <id>` — gestão de alertas proativos (criar é conversando, não tem slash).
+
+**Sala de missão** (turno longo de raciocínio numa janela tmux visível) abre por
+**linguagem natural** — *"abre uma missão sobre X"* — e não tem comando slash. Veja
+[`docs/mission-control.md`](./docs/mission-control.md).
 
 ### Helpers de runtime (`bot/bin/`)
 
@@ -139,14 +141,15 @@ Primitivas CORE que o agente (e plugins) usam durante a execução:
 - `kobe-attach <path> [caption]` — envia arquivo como documento no Telegram. Também aceita `--topic "<nome>"`.
 - `kobe-alerta` — helper de alertas proativos (criar/confirmar/dispensar).
 
-## Sistema de Missões (v0.13) + Keyko
+## Keyko — o daemon de despertar por gatilho
 
-**Missão** é trabalho multi-tarefa coordenado: o agente quebra o pedido em subtarefas, dispara em paralelo respeitando dependências, e mostra um painel vivo no Telegram que se atualiza sozinho conforme as tarefas terminam. No fim, anexa o resultado consolidado. Resolve dois bugs estruturais:
+**Keyko** é o daemon (`systemd --user`) que acorda o agente por gatilho, sem depender
+de você mandar mensagem. Nome em homenagem a um pastor alemão do operador. Foi pensado
+**genérico** desde o início: cada capacidade que precisa "acordar sozinha" conecta nele
+criando uma `Source` — hoje quem está registrada é a de **alertas proativos** ("me
+lembra toda terça de X").
 
-1. Promessa de continuação que o agente não cumpre (stateless por turno).
-2. Você ter que cobrar status manualmente.
-
-**Keyko** é o daemon (`systemd --user`) que faz a mágica acontecer — observa eventos das missões, atualiza painéis, acorda o orquestrador (Claude background) em marcos. Nome em homenagem a um pastor alemão do operador. Foi pensado **genérico** desde o início: a próxima feature derivada (Sistema de Alertas, agente proativo) vai conectar nele criando só uma `Source` nova — zero refatoração.
+Não há dependência dura do `kobe.service`: bot caindo não para o Keyko, e vice-versa.
 
 ### Instalar o Keyko
 
@@ -162,45 +165,13 @@ systemctl --user enable --now keyko
 systemctl --user status keyko --no-pager
 ```
 
-Não há dependência dura do `kobe.service`: bot caindo não para o Keyko, e vice-versa.
-
-### Usar
-
-No Telegram, num tópico:
-
-```
-/missao analise o debriefing da Fulana e me manda resumo
-```
-
-Em segundos aparece uma mensagem-painel:
-
-```
-🎯 Missão: analise o debriefing da Fulana e me manda resumo
-🟡 Planejando — sem tarefas ainda
-
-💬 Planejando...
-
-🕐 Atualizado: 15:30:12
-```
-
-Quando o orquestrador planeja, vira:
-
-```
-🎯 Missão: analise o debriefing da Fulana e me manda resumo
-▶️ Em andamento — 0/3 tarefa(s)
-
-▶️ T1 — Extrair pontos-chave
-⏳ T2 — Categorizar por tema (aguarda T1)
-⏳ T3 — Redigir resumo final (aguarda T2)
-
-💬 Quebrei em 3 tarefas sequenciais.
-
-🕐 Atualizado: 15:30:24
-```
-
-E vai atualizando sozinho (▶️ → ✅) até fechar com 🟢 e o anexo do resultado.
-
-Detalhes operacionais, troubleshoot e rollback em [`docs/runbooks/keyko-e-missoes.md`](./docs/runbooks/keyko-e-missoes.md). Guia rápido pro operador em [`docs/mission-control.md`](./docs/mission-control.md) (Mission Control: a sala estrategista + a forma fan-out).
+> **Nota histórica (2026-08-25).** A primeira `Source` do Keyko foi o **Sistema de
+> Missões v0.13** — um orquestrador que quebrava o pedido em subtarefas paralelas e
+> mantinha um painel vivo no Telegram, acionado por `/missao`, `/missao_status`,
+> `/missao_abortar` e `/missao_lista`. Ele foi **aposentado** (última atividade real em
+> 09/06/2026) e os quatro comandos não existem mais. **Não confundir com as salas de
+> missão do Mission Control**, que estão vivas, são abertas por linguagem natural e não
+> têm slash command.
 
 ## Troubleshooting
 

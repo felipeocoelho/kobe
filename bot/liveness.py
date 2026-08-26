@@ -209,7 +209,7 @@ async def _chamar_modelo(system: str, pedido: str) -> str:
     if provider != "openai":
         raise ValueError(f"LIVENESS_ACK_PROVIDER desconhecido: {provider!r}")
 
-    from bot.conversation_detector import _get_openai
+    from bot.openai_client import _get_openai
 
     resp = await _get_openai().chat.completions.create(
         model=model,

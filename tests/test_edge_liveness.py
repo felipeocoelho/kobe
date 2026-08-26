@@ -47,7 +47,7 @@ def test_fallback_without_api_key() -> None:
 def test_uses_model_text_when_available() -> None:
     fake = _fake_openai("Beleza, vou varrer a VPS atrás dos arquivos e já te retorno.")
     with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("faz uma varredura na VPS"))
     assert out == "Beleza, vou varrer a VPS atrás dos arquivos e já te retorno."
 
@@ -55,7 +55,7 @@ def test_uses_model_text_when_available() -> None:
 def test_strips_quotes_from_model() -> None:
     fake = _fake_openai('"Vou cuidar disso e já te volto."')
     with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("tarefa"))
     assert out == "Vou cuidar disso e já te volto."
 
@@ -63,7 +63,7 @@ def test_strips_quotes_from_model() -> None:
 def test_empty_model_falls_back() -> None:
     fake = _fake_openai("   ")
     with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("tarefa"))
     assert out == liveness.fallback_ack()
 
@@ -72,7 +72,7 @@ def test_model_error_falls_back_never_raises() -> None:
     client = mock.MagicMock()
     client.chat.completions.create = mock.AsyncMock(side_effect=RuntimeError("boom"))
     with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=client):
+        with mock.patch("bot.openai_client._get_openai", return_value=client):
             out = asyncio.run(liveness.write_ack("tarefa", late=True))
     assert out == liveness.fallback_ack(late=True)
 
@@ -157,7 +157,7 @@ def test_ack_inventado_cai_no_fallback_com_guard_ligado() -> None:
     fake = _fake_openai("Beleza, vou varrer o /home/x atrás de 3 arquivos e já volto.")
     env = {"OPENAI_API_KEY": "x", "LIVENESS_ACK_GUARD_ENABLED": "true"}
     with mock.patch.dict(os.environ, env):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("resolve aquilo lá pra mim"))
     assert out == liveness.fallback_ack(), "invenção não pode chegar ao operador"
 
@@ -166,7 +166,7 @@ def test_ack_ancorado_passa_com_guard_ligado() -> None:
     fake = _fake_openai("Beleza — vou providenciar isso do orçamento e já te volto.")
     env = {"OPENAI_API_KEY": "x", "LIVENESS_ACK_GUARD_ENABLED": "true"}
     with mock.patch.dict(os.environ, env):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("me resolve o orçamento"))
     assert out == "Beleza — vou providenciar isso do orçamento e já te volto."
 
@@ -177,7 +177,7 @@ def test_guard_desligado_deixa_passar() -> None:
     fake = _fake_openai(inventado)
     env = {"OPENAI_API_KEY": "x", "LIVENESS_ACK_GUARD_ENABLED": "false"}
     with mock.patch.dict(os.environ, env):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             out = asyncio.run(liveness.write_ack("resolve aquilo"))
     assert out == inventado
 
@@ -192,7 +192,7 @@ def test_modelo_default_e_o_de_hoje() -> None:
     with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "x"}, clear=False):
         os.environ.pop("LIVENESS_ACK_MODEL", None)
         os.environ.pop("LIVENESS_ACK_PROVIDER", None)
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             asyncio.run(liveness.write_ack("tarefa"))
     assert fake.chat.completions.create.await_args.kwargs["model"] == "gpt-4o-mini"
 
@@ -201,7 +201,7 @@ def test_modelo_configuravel_por_env() -> None:
     fake = _fake_openai("ok, já te volto")
     env = {"OPENAI_API_KEY": "x", "LIVENESS_ACK_MODEL": "gpt-4o"}
     with mock.patch.dict(os.environ, env):
-        with mock.patch("bot.conversation_detector._get_openai", return_value=fake):
+        with mock.patch("bot.openai_client._get_openai", return_value=fake):
             asyncio.run(liveness.write_ack("tarefa"))
     assert fake.chat.completions.create.await_args.kwargs["model"] == "gpt-4o"
 

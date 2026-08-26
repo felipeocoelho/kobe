@@ -137,8 +137,6 @@ def test_chat_allowed_for_com_config_ausente_nao_quebra() -> None:
 MODULOS_DE_HANDLER = [
     "bot/telegram_handler.py",
     "bot/alertas/handlers.py",
-    "bot/chat_manager_commands.py",
-    "bot/mission_control/handlers.py",
 ]
 
 
@@ -175,11 +173,24 @@ def test_a_trava_de_canal_alcanca_os_handlers_sem_autorizacao() -> None:
 
 
 def test_a_contagem_de_pontos_gateados_nao_encolheu() -> None:
-    """Rede contra remoção silenciosa de trava numa refatoração futura."""
+    """Rede contra remoção silenciosa de trava numa refatoração futura.
+
+    O número desce SÓ quando um handler inteiro é aposentado, e o motivo fica
+    escrito aqui — encolher sem justificativa é exatamente o que este teste
+    existe pra pegar.
+
+    Histórico: **23** quando a trava de canal foi centralizada em `bot/authz.py`
+    (2026-08-25) · **18** com a aposentadoria do Chat Manager (2026-08-25), que
+    levou `bot/chat_manager_commands.py` e seus 5 comandos · **14** com a
+    aposentadoria do Sistema de Missões v0.13 (2026-08-25), que levou
+    `bot/mission_control/handlers.py` e seus 4 comandos. As SALAS de missão não
+    têm handler de comando (são abertas por linguagem natural), então nunca
+    apareceram nesta lista — e nada nelas foi tocado.
+    """
     total = sum(
         RAIZ.joinpath(m).read_text(encoding="utf-8").count(
             "_update_authorized(update, config)"
         )
         for m in MODULOS_DE_HANDLER
     )
-    assert total == 23, f"esperados 23 pontos gateados, achei {total}"
+    assert total == 14, f"esperados 14 pontos gateados, achei {total}"

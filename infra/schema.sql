@@ -129,18 +129,21 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_embedding
   ON saved_artifacts USING ivfflat (embedding vector_cosine_ops);
 
 -- ============================================================================
--- Chat Manager — Fase 1 (2026-05-27)
--- Vide ~/.claude/plans/claude-sobre-o-chat-noble-dawn.md pro design completo.
+-- Identidade de tópico (2026-05-27)
 --
--- Mudanças:
+-- Este bloco nasceu com o Chat Manager, mas o que sobrou dele NÃO é Chat
+-- Manager: é a identidade de tópico, que o Kobe usa sempre.
+--
 -- 1. UNIQUE composta em topics (chat_id, thread_id) — separa chat privado
 --    do "Geral" do supergrupo (ambos teriam thread_id=0 antes, colidiam).
--- 2. Tabela conversations — tema longevo aninhando sessions.
--- 3. FK sessions.conversation_id (nullable enquanto Chat Manager está sendo
---    construído; classificação retroativa vai popular).
--- 4. Coluna messages.embedding (pro detector calcular similaridade).
--- 5. Renomear current_name do topic privado existente de 'Geral' → 'Private'
---    pra alinhar com o slug 'private' do `get_topic_slug` atualizado.
+--    É também o que faz um supergrupo separado (ex.: um ambiente de dev)
+--    gerar linhas próprias, sem colidir com as da produção.
+-- 2. Renomear current_name do topic privado existente de 'Geral' → 'Private'
+--    pra alinhar com o slug 'private' do `get_topic_slug`.
+--
+-- O resto do bloco (tabela `conversations`, `sessions.conversation_id`,
+-- `messages.embedding`) saiu na aposentadoria do Chat Manager — vide a nota
+-- deliberada mais abaixo e `infra/migrations/005_remove_chat_manager.sql`.
 -- ============================================================================
 
 -- 1. Topics: UNIQUE composta
@@ -163,38 +166,7 @@ BEGIN
   END IF;
 END $$;
 
--- 2. Tabela conversations
-CREATE TABLE IF NOT EXISTS conversations (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  topic_id UUID NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  slug TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'dormant', 'archived')),
-  centroid_embedding VECTOR(1536),
-  parent_conversation_id UUID REFERENCES conversations(id),
-  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  archived_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_topic_status
-  ON conversations(topic_id, status);
-CREATE INDEX IF NOT EXISTS idx_conversations_embedding
-  ON conversations USING ivfflat (centroid_embedding vector_cosine_ops);
-
--- 3. sessions.conversation_id (nullable até classificação retroativa popular)
-ALTER TABLE sessions
-  ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(id);
-CREATE INDEX IF NOT EXISTS idx_sessions_conversation
-  ON sessions(conversation_id);
-
--- 4. messages.embedding (sem índice ivfflat aqui — só populamos pra detector,
---    busca direta em messages não é caso de uso atual)
-ALTER TABLE messages
-  ADD COLUMN IF NOT EXISTS embedding VECTOR(1536);
-
--- 5. Renomear topic privado existente: 'Geral' → 'Private'
+-- 2. Renomear topic privado existente: 'Geral' → 'Private'
 UPDATE topics
    SET current_name = 'Private'
  WHERE telegram_thread_id = 0
@@ -258,30 +230,27 @@ CREATE INDEX IF NOT EXISTS contacts_tipo_oculto
 -- de backup antes.
 
 -- ============================================================================
--- New Chat Manager — Fase 2 (2026-06-01)
--- Detector síncrono → daemon classificador-bibliotecário. Conversation vira
--- FAIXA derivada de mensagens. Vide migration 003 e o doc de arquitetura:
---   user-data/knowledge/kobe/brainstorms/new-chat-manager-arquitetura.md
--- Tudo aditivo; ocioso com CHAT_MANAGER_ENABLED=false.
+-- NÃO existe estrutura de Chat Manager aqui — e é de propósito (2026-08-25).
+--
+-- O Chat Manager (v1 detector síncrono, v2 classificador-bibliotecário) agrupava
+-- sessions por assunto. Foi aposentado; palavra do operador: "vamos aposentar o
+-- Chat Manager… não quero um Frankenstein". Saíram deste arquivo:
+--
+--   - tabela `conversations` (+ índice de status e índice ivfflat do centroide)
+--   - tabela `conversation_tags` (+ índice de tag)
+--   - coluna `sessions.conversation_id` (+ índice)
+--   - coluna `messages.conversation_id` (+ índice)
+--   - coluna `messages.embedding` (+ índice ivfflat)
+--
+-- Consequência desejada: uma instalação nova do Kobe não cria nada disso. A
+-- memória de trabalho (janela imediata) NÃO dependia deste bloco — ela lê
+-- `messages` por `topic_id` e segue funcionando inteira.
+--
+-- `saved_artifacts.embedding` FICA. Apesar de hoje ter 0 linhas não-nulas, é
+-- gancho declarado do `/salvar`/`/retomar`, que continuam vivos — mexer nela é
+-- outra conversa, não esta.
+--
+-- Pra remover as estruturas de uma instalação que já as tem, vide
+-- `infra/migrations/005_remove_chat_manager.sql` — e leia os dois
+-- pré-requisitos antes. Ela APAGA DADO.
 -- ============================================================================
-
--- Faixa de mensagens: carimba conversation_id direto em messages.
-ALTER TABLE messages
-  ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(id);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation
-  ON messages(conversation_id);
-
--- Índice ivfflat em messages.embedding (busca vetorial da camada fria).
-CREATE INDEX IF NOT EXISTS idx_messages_embedding
-  ON messages USING ivfflat (embedding vector_cosine_ops);
-
--- Tag cloud (catálogo frio) — tag por beat fino dentro da conversation.
-CREATE TABLE IF NOT EXISTS conversation_tags (
-  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  tag TEXT NOT NULL,
-  weight REAL NOT NULL DEFAULT 1.0,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (conversation_id, tag)
-);
-CREATE INDEX IF NOT EXISTS idx_conversation_tags_tag
-  ON conversation_tags(tag);

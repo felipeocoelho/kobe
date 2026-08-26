@@ -97,7 +97,7 @@ def _valor_default(f: dataclasses.Field):
     return ""
 
 
-def _config(chat_manager_enabled: bool = True, **over):
+def _config(**over):
     """`Config` falsa DERIVADA da dataclass real (41 campos e contando).
 
     Antes eram 4 campos escritos à mão; qualquer flag nova lida pelo resume
@@ -112,7 +112,6 @@ def _config(chat_manager_enabled: bool = True, **over):
         telegram_bot_token="tok",
         kobe_home=Path("/tmp/kobe-test"),
         recent_messages_limit=20,
-        chat_manager_enabled=chat_manager_enabled,
         # Default de produção: a camada imediata é a janela de memória vigente.
         working_memory_enabled=True,
     )
@@ -145,14 +144,11 @@ def test_build_resume_prompt_carries_immediate_and_directive():
     prompt = build_resume_prompt(
         thread_id=None,
         immediate_history=history,
-        chat_manager_section="[Chat Manager — assunto corrente]",
         topic_context="[KB do tópico]",
     )
     # Contexto imediato presente verbatim.
     assert "estávamos no passo 3 da migração" in prompt
     assert "faltam 2" in prompt
-    # Ponteiros do Chat Manager preservados (não regredir).
-    assert "Chat Manager — assunto corrente" in prompt
     assert "KB do tópico" in prompt
     # A diretiva de retomada entra como "mensagem nova".
     assert "RETOMADA APÓS REINÍCIO" in prompt
@@ -200,9 +196,6 @@ def _restore(originals: dict):
 _FOLHAS_NEUTRAS = {
     "get_immediate_messages": lambda db, tid: [],
     "get_recent_messages": lambda db, sid, limit=20: [],
-    "render_chat_manager_section": lambda db, tid: None,
-    "get_active_conversation_for_topic": lambda db, tid: None,
-    "get_conversation_session_summaries": lambda db, cid, except_session_id=None: [],
     "get_topic_slug": lambda db, c, t: None,
     "load_topic_context": lambda home, slug: None,
     "load_curated_core": lambda home: None,
@@ -225,13 +218,10 @@ def _ctx(**over):
     pra "camada ausente" — e o teste sobrescreve só o que quer exercitar.
     """
     originals = _patch_context_leaves(dict(_FOLHAS_NEUTRAS))
-    orig_missao = resume.missoes_storage.find_missao_ativa
-    resume.missoes_storage.find_missao_ativa = lambda home, c, t: None
     try:
         base = resume._load_resume_context(object(), _config(), _snap())
     finally:
         _restore(originals)
-        resume.missoes_storage.find_missao_ativa = orig_missao
     desconhecidas = set(over) - set(base)
     assert not desconhecidas, (
         f"o teste quer sobrescrever chave(s) que o produtor não devolve: "
@@ -241,35 +231,26 @@ def _ctx(**over):
     return base
 
 
-def test_load_resume_context_cm_on_uses_immediate_and_pointers():
+def test_load_resume_context_usa_janela_imediata_e_kb():
     originals = _patch_context_leaves(
         {
             "get_immediate_messages": lambda db, tid: [{"role": "user", "content": "imediato"}],
-            "render_chat_manager_section": lambda db, tid: "[CM]",
-            "get_active_conversation_for_topic": lambda db, tid: {"id": "c1"},
-            "get_conversation_session_summaries": lambda db, cid, except_session_id=None: [{"summary": "s1"}],
             "get_topic_slug": lambda db, c, t: "dev-kobe",
             "load_topic_context": lambda home, slug: "KB",
             "render_alertas_abertos": lambda home, c, t: None,
         }
     )
-    # missao via submódulo
-    orig_missao = resume.missoes_storage.find_missao_ativa
-    resume.missoes_storage.find_missao_ativa = lambda home, c, t: None
     try:
-        ctx = resume._load_resume_context(object(), _config(True), _snap())
+        ctx = resume._load_resume_context(object(), _config(), _snap())
     finally:
         _restore(originals)
-        resume.missoes_storage.find_missao_ativa = orig_missao
 
     assert ctx["immediate"] == [{"role": "user", "content": "imediato"}]
-    assert ctx["chat_manager_section"] == "[CM]"
-    assert ctx["conversation_summaries"] == [{"summary": "s1"}]
     assert ctx["topic_context"] == "KB"
-    print("ok: _load_resume_context (CM on) usa imediato + ponteiros")
+    print("ok: _load_resume_context usa janela imediata + KB do tópico")
 
 
-def test_load_resume_context_cm_off_uses_session_history():
+def test_load_resume_context_com_memoria_legada_usa_historico_da_sessao():
     originals = _patch_context_leaves(
         {
             "get_recent_messages": lambda db, sid, limit=20: [{"role": "user", "content": "legado"}],
@@ -277,25 +258,19 @@ def test_load_resume_context_cm_off_uses_session_history():
             "render_alertas_abertos": lambda home, c, t: None,
         }
     )
-    orig_missao = resume.missoes_storage.find_missao_ativa
-    resume.missoes_storage.find_missao_ativa = lambda home, c, t: None
     try:
         # O ramo legado (histórico da sessão arquivada) é governado pela flag de
-        # MEMÓRIA, não pela de conversas — as duas foram desacopladas na Frente 0
-        # e o nome deste teste ficou pra trás. Por isso as duas vêm explícitas:
-        # `chat_manager_enabled=False` cobre o que o nome promete (sem ponteiros
-        # de conversa) e `working_memory_enabled=False` é o que de fato escolhe
-        # o histórico da sessão em vez da janela imediata.
+        # MEMÓRIA. Ela nasceu desacoplada da flag do Chat Manager na Frente 0 —
+        # e foi esse desacoplamento que deixou a memória sobreviver intacta à
+        # aposentadoria do Chat Manager (2026-08-25).
         ctx = resume._load_resume_context(
-            object(), _config(False, working_memory_enabled=False), _snap()
+            object(), _config(working_memory_enabled=False), _snap()
         )
     finally:
         _restore(originals)
-        resume.missoes_storage.find_missao_ativa = orig_missao
 
     assert ctx["immediate"] == [{"role": "user", "content": "legado"}]
-    assert ctx["chat_manager_section"] is None
-    print("ok: _load_resume_context (CM off) usa histórico da sessão")
+    print("ok: _load_resume_context (memória legada) usa histórico da sessão")
 
 
 def test_produtor_e_consumidor_do_contexto_nao_se_desencontram():
@@ -363,7 +338,7 @@ def _run_resume(app, snap, *, ctx, **patches):
 
 def test_resume_invokes_agent_and_sends_synthesis():
     claude = FakeClaude(text="Voltei — estávamos no passo 3 da migração, sigo daí.")
-    app = FakeApp(db=object(), claude=claude, config=_config(True))
+    app = FakeApp(db=object(), claude=claude, config=_config())
     ctx = _ctx(immediate=[
         {
             "role": "user",
@@ -397,7 +372,7 @@ def test_resume_invokes_agent_and_sends_synthesis():
 
 def test_resume_falls_back_to_ping_when_agent_fails():
     claude = FakeClaude(raise_exc=ClaudeError("boom"))
-    app = FakeApp(db=object(), claude=claude, config=_config(True))
+    app = FakeApp(db=object(), claude=claude, config=_config())
     ctx = _ctx(immediate=[
         {"role": "user", "content": "x", "created_at": "2026-06-04T09:59:00+00:00"}
     ])
@@ -415,7 +390,7 @@ def test_resume_falls_back_to_ping_when_agent_fails():
 
 def test_resume_skips_when_activity_after_snapshot():
     claude = FakeClaude(text="não deveria rodar")
-    app = FakeApp(db=object(), claude=claude, config=_config(True))
+    app = FakeApp(db=object(), claude=claude, config=_config())
     # Mensagem MAIS NOVA que saved_at (10:00) → operador já voltou a falar.
     # (Este teste passava com o dict capenga de 6 chaves por SORTE: a guarda de
     # atividade retorna antes da linha que lia as chaves faltantes. Bomba armada

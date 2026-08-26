@@ -25,18 +25,9 @@ def build_sources(
     por toda a lógica de SUA fonte (Keyko só executa despertares).
 
     `kobe_home` e `bot_token` são passados pra sources que precisam
-    (Missões usa pra ler estado e editar painel via HTTP).
+    (a fonte de alertas usa pra ler estado e responder via HTTP).
     """
     sources: list[Source] = []
-
-    # MissoesSource — Fase 1, sempre ativa.
-    try:
-        from bot.mission_control.source import MissoesSource
-    except ImportError:
-        logger.exception("MissoesSource indisponível — pacote bot.mission_control faltando?")
-    else:
-        sources.append(MissoesSource(kobe_home=kobe_home, bot_token=bot_token))
-        logger.info("source registrada: missoes")
 
     # AlertasSource — 2ª fonte (gatilho de tempo: cron/one-shot venceu).
     try:
@@ -46,16 +37,5 @@ def build_sources(
     else:
         sources.append(AlertasSource(kobe_home=kobe_home, bot_token=bot_token))
         logger.info("source registrada: alertas")
-
-    # ClassifierSource — New Chat Manager (gatilho: debounce por silêncio).
-    # Não acorda o Claude; faz o trabalho do bibliotecário atrás do turno.
-    # Inerte enquanto CHAT_MANAGER_ENABLED=false (checa a flag no tick).
-    try:
-        from bot.chat_manager.source import ClassifierSource
-    except ImportError:
-        logger.exception("ClassifierSource indisponível — pacote bot.chat_manager faltando?")
-    else:
-        sources.append(ClassifierSource(kobe_home=kobe_home, bot_token=bot_token))
-        logger.info("source registrada: chat_manager")
 
     return sources

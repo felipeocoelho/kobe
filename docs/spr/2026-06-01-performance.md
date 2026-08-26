@@ -146,11 +146,11 @@ Ordenados por impacto provável na **latência percebida** (maior primeiro).
 
 ## Gaps baixos (P2 — backlog priorizado)
 
-- [ ] **Detector de conversa no caminho crítico** —
-  `bot/telegram_handler.py:404` (`detect`) chama embedding OpenAI (+ eventual juiz
-  GPT-4o-mini) **antes** de invocar o Claude, serial. Custa ~0,3–2s por turno e
-  está com `CHAT_MANAGER_ENABLED=true` na prod. Fix: sobrepor com as outras
-  leituras (parte do #5) ou rodar especulativo.
+- [x] **Detector de conversa no caminho crítico** — ~~chamava embedding OpenAI
+  (+ eventual juiz GPT-4o-mini) **antes** de invocar o Claude, serial; custava
+  ~0,3–2s por turno.~~ **RESOLVIDO POR REMOÇÃO (2026-08-25):** o detector saiu do
+  caminho crítico ainda em 2026-06-01 (v2, daemon), e em 25/08/2026 o Chat Manager
+  inteiro foi aposentado. Este custo não existe mais.
 
 - [ ] **Cold start do `claude -p` por turno** — `bot/claude_runner.py:136` sobe um
   processo Node novo a cada mensagem (boot do CLI + auto-load do CLAUDE.md de 26KB

@@ -4,18 +4,21 @@
 > troubleshoot, rollback), veja
 > [`docs/runbooks/keyko-e-missoes.md`](./runbooks/keyko-e-missoes.md).
 
-## Duas formas
+## O que e uma missao
 
-Uma **missão** é um turno longo de raciocínio do agente. Tem duas formas:
+Uma **missao** e um turno longo de raciocinio do agente: uma **sala visivel**
+(tmux `--remote-control`, navegavel no Claude Code Desktop) pra pensar fundo,
+analisar, encadear raciocinio. Prompt de estrategista (nao dev), roda em bypass,
+sem rito de codificacao. Abre por **linguagem natural** ("abre uma missao sobre
+X") — **nao ha comando slash**.
 
-- **Sala estrategista** (forma principal) — uma **sala visível** (tmux
-  `--remote-control`, navegável no Claude Code Desktop) pra pensar fundo,
-  analisar, encadear raciocínio. Prompt de estrategista (não dev), roda em
-  bypass, sem rito de codificação. Abre por **linguagem natural** ("abre uma
-  missão sobre X"). Detalhe na seção [Sala estrategista](#sala-estrategista).
-- **Fan-out** (forma multi-tarefa) — o orquestrador quebra em sub-tarefas
-  paralelas com um painel vivo. Acionado pelos comandos `/missao*`. Detalhe no
-  resto deste guia.
+> **Nota historica (2026-08-25).** Ate esta data existia uma segunda forma: o
+> **fan-out** do Sistema de Missoes v0.13, que quebrava o pedido em sub-tarefas
+> paralelas com um painel vivo no Telegram, acionado pelos comandos `/missao`,
+> `/missao_status`, `/missao_abortar` e `/missao_lista`. Ela foi **aposentada** —
+> ultima atividade real em 09/06/2026; palavra do operador: *"e codigo velho,
+> pode morrer"*. Os quatro comandos nao existem mais. **A sala estrategista, que
+> e o que este guia descreve daqui pra baixo, nao foi tocada.**
 
 ---
 
@@ -73,137 +76,38 @@ Destilação durável sobre o Kobe sai do `workspace/` pra
 
 ---
 
-## O que é (forma fan-out)
+## Conversa paralela com uma sala aberta
 
-**Missão fan-out** é trabalho multi-tarefa coordenado pelo agente. Você descreve
-o que quer, o orquestrador quebra em sub-tarefas, dispara em paralelo
-respeitando dependências, e mostra um **painel vivo** no Telegram que se
-atualiza sozinho. Quando termina, manda o resultado consolidado como
-anexo.
-
-Diferente do papo normal, onde você pergunta uma coisa e o agente
-responde uma coisa, missão é "vai lá, executa N etapas, me avisa quando
-tiver pronto". Você pode sair do chat e voltar 1h depois — o painel vai
-estar atualizado.
-
-## Quando usar
-
-**Use missão quando:**
-- O trabalho tem 2+ etapas concretas (extrair → analisar → resumir).
-- Algumas etapas dão pra fazer em paralelo.
-- Não te interessa o passo-a-passo, só o resultado final.
-- O trabalho pode demorar minutos / dezenas de minutos.
-
-**NÃO use missão pra:**
-- Pergunta simples (papo normal já dá conta).
-- Coisa de 1 etapa só (cria uma missão de 1 tarefa é overhead à toa).
-- Trabalho onde você quer ir guiando — você perde controle granular.
-
-## Comandos
-
-### `/missao <descrição>`
-
-Cria uma missão nova. Só uma missão ativa por tópico.
-
-```
-/missao analise o debriefing da Fulana, extraia os 5 pontos críticos,
-e me manda um resumo executivo em markdown
-```
-
-Em 1-2s você recebe o painel placeholder. Em 5-15s o orquestrador
-planeja e dispara as primeiras tarefas. Depois é só observar o painel
-atualizando sozinho.
-
-### `/missao_status`
-
-Snapshot do painel da missão ativa do tópico (não edita o painel vivo,
-manda uma cópia separada). Útil pra revisar sem rolar o chat.
-
-### `/missao_abortar`
-
-Mata os processos das tarefas em execução e marca a missão como
-abortada. O painel atualiza pra ⏸️.
-
-### `/missao_lista`
-
-Lista o que tem no tópico: ativas + 5 últimas encerradas.
-
-## Painel — como ler
-
-```
-🎯 Missão: <objetivo curto>
-▶️ Em andamento — 2/5 tarefa(s)
-
-✅ T1 — Extrair pontos-chave
-✅ T3 — Identificar bloqueios
-▶️ T2 — Categorizar por tema (60%)
-⏳ T4 — Redigir resumo (aguarda T2)
-⏳ T5 — Enviar (aguarda T4)
-
-💬 T1 e T3 prontas; T2 rodando; T4 e T5 esperam.
-
-🕐 Atualizado: 15:31:42
-```
-
-**Glyphs por status da missão**: 🟡 planejando · ▶️ em andamento ·
-🟢 concluída · 🔴 falhou · ⏸️ abortada.
-
-**Glyphs por status da tarefa**: ⏳ pendente · ▶️ rodando · ✅ concluída ·
-❌ falhou.
-
-**Quando a missão termina**, o painel fica **read-only** com o status
-final (🟢/🔴/⏸️). Não deletamos nem sobrescrevemos — fica de histórico
-no chat. Os outputs de cada tarefa chegam como anexos.
-
-## Conversa paralela durante missão ativa
-
-Você pode mandar mensagem normal no mesmo tópico enquanto a missão roda:
-
-- Se a msg é **sobre a missão** ("pula a T3", "como tá?", "redirecionar
-  T2 pra X"), o orquestrador entende e age (responde, atualiza plano,
-  aborta tarefa, etc.).
-- Se é **sobre outro assunto** (papo, outra dúvida), o agente principal
-  (Hal) responde — e sabe que existe missão rolando, mas não tenta
-  gerenciar.
-
-A triagem é automática. Custo: ~5-15s a mais de latência na resposta
-quando há missão ativa (orquestrador peneira primeiro).
+Voce fala normalmente no topico enquanto a sala existe. **A sala nao captura o
+canal**: por padrao o agente principal responde, como se ela nao estivesse la.
+So vai pra sala com **endereçamento explicito** ("manda pra sala…", "pra
+missao…"). Em duvida, o agente **pergunta antes** de repassar.
 
 ## Onde mora o estado
 
 ```
 user-data/missoes/<YYYY-MM-DD-slug>/
-├── estado.json         ← view materializada (status, tarefas, painel_msg_id)
-├── eventos.jsonl       ← log append-only de tudo que aconteceu
-├── orquestrador.log    ← stdout das invocações do orquestrador
-├── logs/T<n>.log       ← stdout/stderr de cada tarefa
-├── outputs/T<n>.md     ← resultado final de cada tarefa
-└── prompts/T<n>.txt    ← prompt da tarefa (escrito pelo orquestrador)
+├── sala.json              ← estado de runtime da sala (status, pid, turn_count…)
+├── sala.sysprompt.txt     ← prompt de estrategista
+├── sala-launch.sh         ← script que vira o comando da sala tmux
+├── sala.log               ← log do worker que monitora a sala
+└── workspace/
+    ├── raciocinio.md          o raciocinio registrado (memoria duravel da sala)
+    ├── handoff-brief.md       o brief, quando a missao vira "vamos construir X"
+    └── rascunhos/
 ```
 
-Tudo dentro de `user-data/` é privado e ignorado pelo Git. Se quiser
-inspecionar uma missão depois, basta abrir esses arquivos.
+Tudo dentro de `user-data/` e privado e ignorado pelo Git. Pra inspecionar uma
+missao depois, basta abrir esses arquivos.
 
-## Limitações conhecidas da Fase 1
-
-- **1 missão ativa por tópico.** Tentou abrir outra com uma já rodando?
-  O bot rejeita e mostra qual está ativa.
-- **Sem retry automático** de tarefa falhada. O orquestrador decide
-  pular ou fechar a missão como falhou; você decide se reabre.
-- **Sem timer pra tarefa travada** (será adicionado em Fase 2). Timeout
-  duro de 600s por tarefa pra não pendurar.
-- **Sem detecção automática** — você sempre precisa invocar `/missao`
-  explicitamente. Detecção pelo agente principal vem na Fase 2.
-- **Sem persistência cross-missão** (busca, filtragem) — pra isso
-  vamos pra Supabase na Fase 3.
+> Ate 25/08/2026 estas pastas tambem podiam conter `estado.json`,
+> `eventos.jsonl`, `logs/`, `outputs/` e `prompts/` — artefatos do Sistema de
+> Missoes v0.13, aposentado. Os que ja existem no disco **continuam la**: sao
+> dado do operador, e ninguem os apagou. Simplesmente nao ha mais codigo que os
+> leia ou escreva.
 
 ## Custo aproximado
 
-- Planejamento: 1 invocação do orquestrador (~$0,01).
-- Cada subtarefa: 1 invocação `claude -p` (~$0,01-0,05 dependendo de
-  complexidade).
-- Cada marco (tarefa termina): 1 invocação do orquestrador (~$0,01).
-- Triagem de msg do operador durante missão: 1 invocação (~$0,002-0,01).
-
-Missão típica (3 tarefas, sem msg paralela do operador) ≈ $0,15-0,30.
-Missão complexa (5 tarefas, várias trocas com operador) ≈ $1-2.
+Uma sala parada custa ~$0 — ela so gasta quando ha um turno rodando. O custo e
+o de um turno longo de raciocinio, proporcional ao tamanho do tema e ao numero
+de idas e vindas.

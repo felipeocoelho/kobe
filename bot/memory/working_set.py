@@ -1,9 +1,9 @@
 """Janela imediata — a camada crua e barata da memória de trabalho.
 
-Movida de `bot/chat_manager/context.py` na Frente 0 do Highlander (refactor
-sem mudar comportamento). É memória PURA: consulta `messages` só por `topic_id`
-(não toca `conversations`), então o lugar dela é aqui, não no gerenciador de
-conversas.
+Movida do pacote do Chat Manager na Frente 0 do Highlander (refactor sem mudar
+comportamento). É memória PURA: consulta `messages` só por `topic_id`, então o
+lugar dela é aqui — e foi por já estar aqui que ela atravessou intacta a
+aposentadoria do Chat Manager (2026-08-25).
 
 O turno é burro e rápido: lê o que já está no banco e cola no prompt. Nada de
 embedding/LLM aqui (plano §6). Filtrada por tópico (predicado obrigatório —

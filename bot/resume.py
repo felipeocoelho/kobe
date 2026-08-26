@@ -7,7 +7,7 @@ fixo em Python ("⏯️ Voltei, você tinha mandado X", citando só a última
 fala do operador) e o enviava direto pro Telegram. **O agente nunca era
 invocado.** Ele só voltava a se "inserir no fluxo" SE/QUANDO o operador
 mandasse uma mensagem nova — que aí sim passa pelo turno normal (onde a
-camada imediata do Chat Manager já funciona). Resultado: numa retomada,
+camada imediata de memória já funciona). Resultado: numa retomada,
 o contexto imediato (≈últimos 10 min) não chegava ao agente, e a mensagem
 de volta era um template burro, não uma síntese real de onde a conversa
 estava.
@@ -15,9 +15,8 @@ estava.
 Correção
 --------
 Pra cada tópico com snapshot pendente, montamos o MESMO contexto de um
-turno normal — camada imediata (`get_immediate_messages`), ponteiros do
-Chat Manager (`render_chat_manager_section` + cronologia comprimida),
-knowledge base do tópico, alertas/missão abertos — e invocamos o agente
+turno normal — camada imediata (`get_immediate_messages`), knowledge base
+do tópico, alertas/missão abertos — e invocamos o agente
 com uma diretiva de retomada. Ele relê, entende onde estava e manda ao
 operador UMA síntese de onde param. Uniforme com o turno normal: toda
 retomada apresenta o contexto imediato ao agente.
@@ -47,7 +46,6 @@ from supabase import Client
 from telegram.ext import Application
 
 from bot.alertas.context import render_alertas_abertos
-from bot.chat_manager.context import render_chat_manager_section
 from bot.memory import (
     get_immediate_messages,
     load_curated_core,
@@ -56,14 +54,11 @@ from bot.memory import (
 from bot.claude_runner import ClaudeError, ClaudeRunner, build_prompt
 from bot.config import Config
 from bot.markdown import to_telegram_html
-from bot.mission_control import storage as missoes_storage
 from bot.snapshot import drop_snapshot, render_resume_message
 from bot.topic_manager import (
     GENERAL_THREAD_ID,
     consume_truncated_marker,
     ensure_active_session,
-    get_active_conversation_for_topic,
-    get_conversation_session_summaries,
     get_recent_messages,
     get_topic_slug,
     insert_message,
@@ -129,10 +124,7 @@ def build_resume_prompt(
     *,
     thread_id: Optional[int],
     immediate_history: list[dict],
-    chat_manager_section: Optional[str] = None,
-    conversation_summaries: Optional[list[dict]] = None,
     topic_context: Optional[str] = None,
-    missao_ativa_info: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
     curated_core: Optional[str] = None,
     grounding_signals: Optional[str] = None,
@@ -149,10 +141,7 @@ def build_resume_prompt(
         history=immediate_history,
         new_message=RESUME_DIRECTIVE,
         topic_context=topic_context,
-        missao_ativa_info=missao_ativa_info,
         alertas_abertos_info=alertas_abertos_info,
-        conversation_summaries=conversation_summaries,
-        chat_manager_section=chat_manager_section,
         curated_core=curated_core,
         grounding_signals=grounding_signals,
     )
@@ -183,19 +172,6 @@ def _load_resume_context(
             else []
         )
 
-    chat_manager_section: Optional[str] = None
-    conversation_summaries: list[dict] = []
-    if config.chat_manager_enabled:
-        try:
-            chat_manager_section = render_chat_manager_section(db, topic_id)
-            active_conv = get_active_conversation_for_topic(db, topic_id)
-            if active_conv is not None:
-                conversation_summaries = get_conversation_session_summaries(
-                    db, active_conv["id"], except_session_id=snap.get("session_id")
-                )
-        except Exception:  # noqa: BLE001 — CM nunca derruba a retomada
-            logger.warning("resume: load Chat Manager falhou", exc_info=True)
-
     # Knowledge base do tópico (prompt.md + knowledge/*).
     topic_context: Optional[str] = None
     if chat_id is not None:
@@ -217,27 +193,17 @@ def _load_resume_context(
         else None
     )
 
-    # Alertas abertos e missão ativa — linhas baratas de ciência (sem LLM).
+    # Alertas abertos — linha barata de ciência (sem LLM).
     alertas_abertos_info: Optional[str] = None
-    missao_ativa_info: Optional[str] = None
     if chat_id is not None:
         alertas_abertos_info = render_alertas_abertos(
             config.kobe_home, chat_id, thread_id
         )
-        ativa = missoes_storage.find_missao_ativa(
-            config.kobe_home, chat_id, thread_id
-        )
-        if ativa is not None:
-            objetivo_curto = (ativa.objetivo or "")[:80]
-            missao_ativa_info = f'[Missão ativa: {ativa.id} — "{objetivo_curto}"]'
 
     return {
         "immediate": immediate,
-        "chat_manager_section": chat_manager_section,
-        "conversation_summaries": conversation_summaries,
         "topic_context": topic_context,
         "alertas_abertos_info": alertas_abertos_info,
-        "missao_ativa_info": missao_ativa_info,
         "curated_core": curated_core,
         "grounding_signals": grounding_signals,
     }
@@ -315,10 +281,7 @@ async def resume_one_snapshot(app: Application, snap: dict) -> None:
             prompt = build_resume_prompt(
                 thread_id=_api_thread_id(raw_thread),
                 immediate_history=ctx["immediate"],
-                chat_manager_section=ctx["chat_manager_section"],
-                conversation_summaries=ctx["conversation_summaries"],
                 topic_context=ctx["topic_context"],
-                missao_ativa_info=ctx["missao_ativa_info"],
                 alertas_abertos_info=ctx["alertas_abertos_info"],
                 curated_core=ctx["curated_core"],
                 grounding_signals=ctx["grounding_signals"],

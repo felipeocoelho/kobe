@@ -25,7 +25,7 @@ Começamos pelos casos-âncora; expande pros 35 conforme cada família ganha con
 ## Limitações conhecidas (honestas)
 - **Não-determinismo:** uma alucinação pode não reaparecer numa única run. Pra baseline
   sério, rodar cada caso N vezes e medir TAXA de falha (o arnês aceita re-execução).
-- **Reconstrução parcial:** o arnês replica histórico + nota de background + `[Agora]`;
-  ainda não replica `chat_manager_section`/cronologia (fiel pros casos-âncora, cujo gatilho
-  vive nessas camadas).
+- **Reconstrução parcial:** o arnês replica histórico + nota de background + `[Agora]`.
+  (Até 25/08/2026 faltava também a camada de conversa do Chat Manager; ela deixou de ser
+  uma lacuna quando o Chat Manager foi aposentado — não existe mais o que replicar.)
 - **Checagem keyword** dá falso-positivo/negativo; `llm_judge` é o próximo passo.

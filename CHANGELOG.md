@@ -4,6 +4,164 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Os quatro comandos de memoria ganham teste (2026-08-25)
+
+**Operador pediu:** implicitamente, pelo criterio de aceite da sessao — *"`/nova`, `/contexto`, `/salvar`, `/retomar` respondem — comportamento pre-Chat-Manager, **com teste**"*.
+
+**Por que:** na conferencia final do aceite, o grep mostrou que os quatro **nao tinham teste nenhum**. Eles sempre foram do Kobe, nunca do Chat Manager — mas o Chat Manager tinha enxertado ramos condicionais em tres deles: `/nova` fechava a *conversation* junto e devolvia outro texto, `/contexto` imprimia um bloco de meta dela (ou o "sem conversa ativa ainda"), e `/retomar` sugeria `/conversa` quando nao achava artefato. Esses ramos sairam nesta sessao. Sem teste, a remocao poderia ter mudado o texto, a ordem ou o caminho de erro **sem nada acusar** — e so se descobriria pelo operador digitando o comando e recebendo coisa errada.
+
+**Foi feito:** `tests/test_comandos_memoria.py`, **10 testes** que exercitam os quatro handlers de verdade (com dubles de mensagem e das folhas de banco) e travam:
+
+- `/nova` arquiva a sessao e responde; sem sessao ativa, avisa que ja esta zerado.
+- `/contexto` mostra a sessao ativa, a contagem e as ultimas mensagens — e **nao** imprime mais `Conversa:` nem `Sem conversa ativa`.
+- `/salvar` consolida em artefato e cobra o titulo quando falta (nao foi tocado nesta sessao; o teste e rede contra regressao colateral).
+- `/retomar` pede o termo e reporta "nao achei" **sem sugerir `/conversa` ou `/conversas-global`**.
+- Um teste de **conformidade** que le o corpo das quatro funcoes e falha se a palavra `conversation` reaparecer em qualquer uma — rede contra um ramo voltar por copy-paste.
+
+A `Config` falsa e **derivada da dataclass real** (mesmo truque de `test_resume.py`), entao campo novo ou removido na producao nao passa despercebido aqui.
+
+**Testes:** suite verde — **456 passando** (446 + 10). `tests/portability_guard.sh` verde.
+
+**Reversao:** so acrescenta arquivo de teste; o revert o remove e nao toca em codigo de runtime.
+
+### Documentacao da aposentadoria — e a varredura que achou o README mentindo (2026-08-25)
+
+**Operador pediu:** o R7 — tirar a secao de Chat Manager do `CLAUDE.md`, registrar tudo no changelog, e varrer `docs/`.
+
+**Por que importa mais do que parece:** documentacao que descreve um sistema morto nao e so ruido — ela mente com autoridade. Um runbook de junho com um `sed -i` escrevendo uma flag inexistente no `.env` de producao e uma armadilha, nao um arquivo velho.
+
+**Foi feito:**
+
+- **Backup do `CLAUDE.md` com timestamp** em `.local/backups/` **antes** de editar, com o md5 conferido contra o original (regra dura do operador).
+- **`CLAUDE.md`** — a secao "Chat Manager — persistencia inteligente de conversa por assunto" (com mecanica, comandos e limitacoes) deu lugar a uma **nota historica** que diz o que existiu, o que morreu e — o que importa pro agente no dia a dia — **o que continua vivo**: `/nova`, `/contexto`, `/salvar` e `/retomar` nunca foram do Chat Manager, e a memoria de trabalho tambem nao era. Corrigidas de quebra duas coisas menores que a secao arrastava: a descricao de `/retomar` (dizia "busca semantica"; e ILIKE no titulo) e a mencao a uma camada de *conversation* acima das sessions.
+- **`README.md` — aqui estava o pior achado, e ele NAO estava na lista do escopo.** O README, que e a cara publica do projeto, anunciava `/missao`, `/missao_status`, `/missao_abortar` e `/missao_lista` como **comandos vivos**, e dedicava uma secao inteira ao fan-out da v0.13, com painel e tudo. Seria a primeira coisa que um instalador novo leria — e nao funcionaria. A lista de comandos foi reescrita **conferida contra o menu real** (`_CORE_SLASH_COMMANDS` carregado do codigo, nao de memoria), a secao virou "Keyko — o daemon de despertar por gatilho", e ficou dito em nota que a `Source` de missoes morreu e **que nao se deve confundir com as salas de missao**.
+- **`docs/mission-control.md`** — perdeu a "forma fan-out" inteira e virou o guia so das salas. O layout de estado passou a descrever `sala.json`/`workspace/`, com a nota de que os `estado.json` antigos **continuam no disco** (sao dado do operador; ninguem os apagou — so nao ha mais codigo que os leia).
+- **`docs/runbooks/ligar-new-chat-manager.md`** e **`docs/runbooks/keyko-e-missoes.md`** ganharam **banner de obsolescencia no topo**, dizendo o que nao pode mais ser executado e por que. O primeiro e o mais perigoso (o `sed -i` no `.env` de producao); no segundo ficou marcado, com precisao, o que dele **continua valendo**: o daemon Keyko, o padrao de `Source` nova, e a secao final das salas.
+- **`docs/chat-manager/*`** (calibracao e diagnostico do bug 1) ganharam banner de **documento historico**. Nao foram apagados de proposito: registram analise e raciocinio da epoca, que e o tipo de coisa que se quer ler daqui a um ano.
+- Referencias soltas corrigidas em `docs/runbooks/despacho-turno-pesado.md` (a `OPENAI_API_KEY` nao e mais "a mesma do Chat Manager" — agora aponta pra `bot/openai_client.py`), `docs/spr/2026-06-01-performance.md` (o item "detector de conversa no caminho critico" fechou — **resolvido por remocao**) e no README do arnes de avaliacao em `infra/` (a lacuna de replicar a camada de conversa deixou de ser lacuna: nao ha mais o que replicar).
+
+**Testes:** suite verde — **446 passando**, `tests/portability_guard.sh` verde. A lista de comandos do README foi **conferida contra o menu carregado do codigo**, nao contra memoria.
+
+**Reversao:** so documentacao — o revert desta mudanca devolve os textos. O `CLAUDE.md` tem, alem disso, backup timestamped em `.local/backups/`.
+
+### As estruturas do Chat Manager saem do schema — migration 005 escrita, NAO executada (2026-08-25)
+
+**Operador pediu:** tirar do schema o que o Chat Manager deixou, e deixar o `DROP` **escrito e bloqueado**, para o Hal executar com ele ciente.
+
+**Por que nao executo:** apagar tabela e apagar dado, e o banco e compartilhado dev/prod — rodar o DDL atinge a producao na hora. A sala escreve a migration; quem roda e o Hal, depois do dump conferido. Mesmo rito do decomissionamento do acervo de WhatsApp (migration `004`).
+
+**Foi feito:**
+
+- **`infra/schema.sql`** — saem a tabela `conversations` (+ indice de status e o ivfflat do centroide), a tabela `conversation_tags` (+ indice), as colunas `sessions.conversation_id` e `messages.conversation_id` (+ indices) e a coluna `messages.embedding` (+ ivfflat). No lugar do bloco entrou uma **nota de ausencia deliberada**, no mesmo padrao do que foi feito com `whatsapp_messages`: quem chegar depois le por que nao ha nada ali, em vez de achar que faltou.
+- **Duas coisas do mesmo bloco NAO sairam, porque nao sao Chat Manager**, apesar de terem entrado junto com ele na migration `001`: a **UNIQUE composta `topics(telegram_chat_id, telegram_thread_id)`** — que e o que separa o chat privado do "Geral" do supergrupo, e o que vai permitir um segundo ambiente conviver no mesmo banco — e o **rename `Geral` → `Private`**. O cabecalho do bloco foi reescrito para dizer isso.
+- **`saved_artifacts.embedding` FICA.** Tem 0 linhas nao-nulas hoje e e tentador levar junto, mas e gancho declarado do `/salvar`/`/retomar`, que continuam vivos. Esta escrito na migration para ninguem incluir por associacao.
+- **Decisao explicita sobre `messages.embedding`: REMOVER.** O grep confirmou que so o Chat Manager escrevia e lia essa coluna, e o unico consumidor de leitura (`kobe-recall`) foi aposentado junto. Sem eles, sao ~726 vetores carregando um indice ivfflat sem ninguem para consultar. E o dado que mais doi nesta migration, e por isso esta isolado numa secao propria, com o aviso em cima.
+- **`infra/migrations/005_remove_chat_manager.sql`** — DDL destrutivo com os **dois pre-requisitos escritos na cara** (dump conferido, com as tres contagens esperadas; e codigo novo ja no ar, senao o bot recria linha depois do drop), mais as queries de conferencia de antes e de depois. Ordem deliberada: colunas de vinculo primeiro (FK), depois `messages.embedding`, depois as tabelas — e `conversation_tags` antes de `conversations`, que e quem ela referencia.
+
+**Testes:** suite verde — **446 passando**, portability verde. **E o schema foi exercitado de verdade, num Postgres limpo e descartavel** (container `pgvector/pgvector:pg18` com `--rm`, sem volume, sem porta publicada e com `--network none` — nao encostou em nenhuma stack rodando; removido ao fim, conferido por `docker ps -a`):
+
+1. **`infra/schema.sql` novo num banco zerado:** aplica com `ON_ERROR_STOP=1`, sai limpo. As tabelas criadas sao `contacts`, `messages`, `saved_artifacts`, `sessions`, `topic_name_history`, `topics` — **nenhuma** `conversations`/`conversation_tags`. Zero colunas `conversation_id`/`centroid_embedding`, zero `messages.embedding`. E o que tinha de sobreviver sobreviveu: `saved_artifacts.embedding` e a UNIQUE de `topics`, ambos presentes.
+2. **A migration `005` foi rodada de verdade**, sobre o schema ANTIGO (tirado do git) e com **dado semeado**: uma `conversation` com centroide, uma tag, uma `session` vinculada e uma `message` com vetor. Depois do DDL: 0 tabelas do Chat Manager, 0 colunas `conversation_id`, 0 `messages.embedding` — e a mensagem, a sessao e o topico **continuaram la**, junto com `saved_artifacts.embedding` e a UNIQUE. Ou seja: apaga o que deve e nao leva junto o que nao deve.
+
+**Reversao:** o revert desta mudanca devolve o `schema.sql` anterior e remove o arquivo da migration. **Nada foi executado no banco do operador** — as tabelas continuam la, intactas, ate ele mandar rodar. O dump previo ja existe em `user-data/backups/chat-manager-2026-08-25/` (conversations, conversation_tags e messages), o que satisfaz o PRE-REQUISITO 1 quando ele for conferir.
+
+### O Sistema de Missoes v0.13 e aposentado — as SALAS de missao ficam intactas (2026-08-25)
+
+**Operador pediu:** aposentar o sistema antigo de Missoes. Palavra dele: *"e codigo velho, pode morrer"*. E, com enfase maxima, o inverso: *"tenha um extremo cuidado pra voce nao matar o sistema de missoes errado. O antigo pode matar se a gente nao ta usando. Mas o novo, por favor, nao me arrume problemas."*
+
+**Por que a enfase.** Este repositorio tinha **dois** sistemas chamados "missao", dividindo o mesmo diretorio de estado (`user-data/missoes/`) e o mesmo pacote Python (`bot/mission_control/`):
+
+| | Missoes v0.13 — MORREU | Salas de missao (Mission Control) — VIVE |
+|---|---|---|
+| Como se aciona | comandos `/missao`, `/missao_status`, `/missao_abortar`, `/missao_lista` | linguagem natural ("abre uma missao sobre X") — **sem slash command** |
+| Estado | `estado.json` + `eventos.jsonl` | `sala.json` |
+| Ultima atividade | 09/06/2026 | 24/08/2026 |
+
+Os dois nunca se enxergaram (a listagem do v0.13 varria `*/estado.json`; as salas so gravam `sala.json`), mas **a separacao sempre foi por ARQUIVO, nunca por pasta**. Uma delecao pelo caminho da pasta, ou um "removi o modulo mission_control", mataria a ferramenta viva sem deixar um erro sequer no log. Por isso o corte foi feito arquivo a arquivo, a partir de um mapa levantado na fonte — nunca por grep de "missao"/"mission".
+
+**Foi feito — saiu:**
+
+- `bot/mission_control/{handlers,orquestrador,executor,painel,prompts,source,models}.py`.
+- A camada `estado.json` de `storage.py`: `existe`, `carregar`, `salvar`, `mutar`, o log append-only (`append_evento`, `ler_eventos_a_partir`), `listar_missoes` e `find_missao_ativa`, mais os paths de log/output de subtarefa.
+- **`bot/telegram_handler.py`: a triagem sincrona inteira** (`_triagem_missao_se_ativa` + a sentinela `_TRIAGEM_RESPONDEU`). Ela nao estava na lista do escopo e foi achada na reconferencia: com uma missao v0.13 ativa, ela **bloqueava o handler do topico por ate 90 segundos** chamando o orquestrador antes do agente.
+- `missao_ativa_info` do prompt (`bot/claude_runner.py`) e da retomada (`bot/resume.py`); a `MissoesSource` do Keyko (`bot/keyko/registry.py`); os 4 comandos do menu e do roteamento (`bot/main.py`).
+
+**Foi feito — ficou, e esta provado:**
+
+- `sala_dispatch.py`, `sala_prompt.py`, `sala_worker.py`, `handoff.py` e `bot/sala/*`: **zero linha de diff**, verificado por `git diff --stat` contra a base do passo **e** por conferencia de md5 dos 9 arquivos.
+- De `storage.py`, a camada de paths inteira, que e de onde as salas vivem: `missoes_root`, `missao_dir`, `path_sala_json/sysprompt/launcher/log`, `workspace_dir`, `ensure_workspace`, `gerar_id`, `_file_lock`, `_write_atomic`, `now_iso`.
+- O docstring de `storage.py` e do `__init__.py` do pacote agora **carregam a nota historica** e a regra "a separacao aqui e por arquivo, nunca por pasta" — pra quem chegar depois nao repetir o risco.
+
+**Testes:** suite verde — **446 passando**. `tests/portability_guard.sh` verde.
+
+**Provas do gate bloqueante (execucao, nao leitura):**
+
+1. `git diff --stat` dos arquivos de sala contra a base: **vazio**. Md5 dos 9: todos `OK`.
+2. `test_mission_control_sala.py`, `test_sala_core.py`, `test_mission_control_handoff.py`: **27 passando**.
+3. **Uma sala real foi aberta e encerrada DEPOIS da remocao.** O `abrir` devolveu `ok: true`, criou `sala.json` + `workspace/`, subiu a sessao tmux `mission-prova-vida-sala-depois-remocao-2-72618196` e o `sala.json` foi a `status: running` com PID real. O `encerrar` devolveu `ok: true, tmux_morta: true`, o `sala.json` foi a `status: encerrada` e a sessao tmux sumiu. Nenhum `estado.json` foi criado — como esperado, ja que o v0.13 nao existe mais.
+   *(Na primeira tentativa o worker morreu com `ModuleNotFoundError: supabase`. Nao era regressao: `sala_dispatch:146` procura o interpretador em `<KOBE_HOME>/.venv`, e o teste apontava `KOBE_HOME` pra uma arvore sem venv. Corrigido o setup, a sala subiu. Fica registrado porque a distincao entre "quebrou" e "meu teste estava torto" e exatamente o que nao se deve varrer pra debaixo do tapete.)*
+4. O dourado do prompt perdeu **uma unica linha** — `[Missao ativa: ...]`. A linha `[Sala de missao ativa neste topico: ...]` **continua la**, o que e a prova, no proprio artefato de teste, de que a sala sobreviveu ate no prompt.
+
+O teste de conformidade da trava de canal desceu de 18 para 14 pontos gateados (os 4 comandos `/missao*`), com o historico escrito na docstring. As salas nunca apareceram nessa lista porque **nao tem handler de comando** — sao abertas por linguagem natural.
+
+**Reversao:** o revert desta mudanca devolve os arquivos do v0.13 (estao na historia). Nenhum dado do operador foi tocado: `user-data/missoes/` segue intacto, com os `estado.json` antigos onde estavam.
+
+### O codigo do Chat Manager e apagado (2026-08-25)
+
+**Operador pediu:** o apagao em si, depois que o caminho vivo ja estava limpo.
+
+**Por que:** com os consumidores removidos no passo anterior, os modulos ficaram sem nenhum importador. Codigo morto atras de flag desligada e pior que codigo removido: continua aparecendo em toda busca, em toda leitura e em todo raciocinio sobre arquitetura, cobrando atencao sem entregar nada.
+
+**Foi feito - apagados:**
+
+- `bot/chat_manager/` (o pacote inteiro: `__init__`, `activity`, `classifier`, `context`, `source`), `bot/chat_manager_commands.py`, `bot/conversation_detector.py`, `bot/embedding.py`.
+- **`bot/bin/kobe-recall`** - nao estava na lista original do escopo; **entrou por decisao do operador nesta sessao**, na palavra dele: *"nao faz sentido ter um helper que nao vai ter codigo correspondente"*. Ele e 100% Chat Manager (le `conversations` e `messages.embedding`, importa `bot.embedding`) e viraria um helper quebrado no primeiro uso. **`bot/bin/kobe-recall-since` FICA** - apesar do nome parecido, e janela temporal sobre `messages`, sem nada de Chat Manager.
+- `infra/calibrate_chat_manager.py` e `infra/migrate_sessions_to_conversations.py` (one-shot, ja rodou).
+- `tests/test_chat_manager_classifier.py`, `tests/test_chat_manager_transition.py`, `tests/test_chat_manager_tail_flush.py`.
+
+**Antes de apagar `bot/embedding.py`, o grep foi refeito** (o levantamento era de horas antes e o codigo tinha mudado): os unicos consumidores eram o proprio Chat Manager, os dois scripts orfaos e o `kobe-recall` - todos indo embora junto.
+
+Os comentarios que citavam o pacote morto foram corrigidos em `bot/authz.py`, `bot/memory/__init__.py` e `bot/memory/working_set.py`, em vez de deixados apontando pra um endereco que nao existe.
+
+**Testes:** suite verde - **447 passando** (462 menos os 15 dos tres arquivos de teste do Chat Manager). `tests/portability_guard.sh` verde. Smoke de import de `bot.main`, `bot.keyko.registry` e `bot.resume`. **Gate do escopo conferido:** o grep de `chat_manager` / `conversation_detector` / `CHAT_MANAGER_ENABLED` em `bot/`, `infra/` e `tests/` devolve **zero ocorrencia funcional** - o que sobra e nota historica em docstring, os literais do proprio teste de conformidade que impede o acoplamento voltar, e a migration `003` (que e historia e nao se reescreve).
+
+**Reversao:** o revert desta mudanca devolve todos os arquivos - eles estao na historia do repositorio. Nada de banco foi tocado: as tabelas continuam la ate o Hal rodar a migration `005`.
+
+### O Chat Manager sai do caminho vivo (2026-08-25)
+
+**Operador pediu:** aposentar o Chat Manager. Palavra dele: *"vamos aposentar o Chat Manager… não quero um Frankenstein"*.
+
+**Por quê:** a flag estava `false` em produção e o sistema não voltou a ser ligado. Manter um subsistema de ~2.800 linhas atrás de uma flag desligada custa em toda leitura do código e em toda decisão de arquitetura. Este commit tira o Chat Manager do **caminho de execução** — os arquivos ainda existem, e são apagados no commit seguinte. A ordem é deliberada: remover os consumidores antes dos módulos; o contrário quebraria import no meio do caminho.
+
+**Foi feito:**
+
+- **`bot/telegram_handler.py`** — saem o `touch_activity`, o `_load_chat_manager` (o `asyncio.gather` do turno volta de 3 para 2 vias) e os argumentos de prompt. **`/nova` e `/contexto` voltam ao comportamento pré-Chat-Manager**: a primeira arquiva a sessão e ponto, a segunda mostra a sessão e ponto. As duas dicas de `/conversa` no `/retomar` saem. **`/salvar` e `/retomar` não foram tocados** — não são do Chat Manager.
+- **`bot/resume.py`** — sai o bloco de ponteiros da retomada; **`bot/claude_runner.py`** — saem os três blocos de prompt (residente, header de conversation e cronologia comprimida); **`bot/keyko/registry.py`** — sai o registro da `ClassifierSource`; **`bot/config.py`** e **`.env.example`** — sai `CHAT_MANAGER_ENABLED`.
+- **`bot/topic_manager.py`** — saem as 4 funções de conversation. **Ficaram** `get_last_assistant_message_of_session` e a variante `_meta_`: nasceram para o detector e perderam o consumidor, mas não são acopladas a conversation nenhuma (leem `messages` direto) — a docstring de cada uma agora diz isso, em vez de citar um sistema que não existe mais.
+- **`bot/main.py`** — 4 comandos fora do menu, 4 `CommandHandler` fora do roteamento, e o `MessageHandler` regex de `/retomar_<id>`. Esse regex era o **único** handler registrado entre os `CommandHandler` e o `filters.TEXT` genérico; ele sai inteiro, então a ordem relativa do que sobrou não muda.
+- **`WORKING_MEMORY_ENABLED` fica, intacta.** A memória de trabalho foi desacoplada da flag de conversas na Frente 0 do Highlander — foi esse desacoplamento, feito meses antes, que permitiu a memória sobreviver inteira à aposentadoria.
+
+**Testes:** suíte verde — **462 passando**. `tests/portability_guard.sh` verde. `tests/test_rajada_fifo.py` verde (7), que é o aceite do roteamento depois da remoção do regex. Smoke de import do `bot.main` e conferência do menu: os 4 comandos sumiram. **O fixture dourado do prompt foi regenerado e o diff, auditado linha a linha** — ele perde **exatamente** os três blocos do Chat Manager (`[bloco do chat manager]`, `[Conversation ativa: ...]`, `[Cronologia comprimida ...]`) e **nada mais se move**, o que é a prova de que a montagem do prompt não foi deslocada. O teste `test_a_contagem_de_pontos_gateados_nao_encolheu` desceu de 23 para 18 pontos (os 5 de `chat_manager_commands.py`), com o histórico e o motivo escritos na própria docstring — encolher em silêncio é o que aquele teste existe pra pegar.
+
+**Reversão:** `git revert` deste commit. Os módulos do Chat Manager ainda existem neste ponto da história, então o revert é suficiente e não depende de nenhum outro.
+
+### A fábrica do cliente OpenAI sai do detector de conversa (2026-08-25)
+
+**Operador pediu:** o primeiro passo da Sessão #2 do "Projeto Novo Ambiente Kobe" — desacoplar, ANTES de aposentar o Chat Manager, a peça viva que mora dentro dele.
+
+**Por quê:** `_get_openai()` (a fábrica singleton do client `AsyncOpenAI`) e a constante `JUDGE_MODEL` moravam em `bot/conversation_detector.py` por acidente de história — o judge do detector foi o primeiro consumidor de OpenAI do Kobe. Com o tempo, **duas funções que não têm nada a ver com Chat Manager** passaram a importar de lá, em import tardio dentro da função: o ack semântico da borda (`bot/liveness.py`, provider `openai`, que é o default e o que roda hoje) e o desempate de zona cinza do roteador de turno (`bot/turn_classifier.py`). Apagar o detector com elas apontando pra lá quebrava o ack em runtime (`ImportError` sobe) e degradava o classificador **em silêncio** — a chamada dele está dentro de um `except` que devolve `None`. **Nenhum teste da suíte anterior pegava isso**, porque os dois imports são tardios e um é engolido.
+
+**Foi feito:**
+
+- **`bot/openai_client.py`** — endereço neutro, sem dono: `JUDGE_MODEL`, `_openai_client`, `_get_openai()`. Mudança de endereço, zero lógica nova. O módulo não depende de nada do Kobe, só do `OPENAI_API_KEY` no ambiente.
+- **`bot/liveness.py` e `bot/turn_classifier.py` repontados.** `bot/conversation_detector.py` e `bot/chat_manager/classifier.py` também — eles morrem depois, mas não podem ficar quebrados no meio do caminho.
+- **`tests/test_openai_client.py`** — a trava que não existia. Cobre o caminho do ack com `provider=openai` (prova que sai o texto do modelo, não o fallback), o caminho da zona cinza (prova que volta **veredito**, não `None`), o singleton, o erro sem chave, e uma conformidade por grep que impede reintroduzir o import do detector.
+- **Os 9 `mock.patch("bot.conversation_detector._get_openai")` de `tests/test_edge_liveness.py`** repontados pro endereço novo.
+
+**Testes:** suíte inteira verde — **463 passando** (eram 457; +6 do arquivo novo). `tests/portability_guard.sh` verde. **E a trava foi provada, não prometida:** simulei a regressão na árvore (os dois consumidores voltando a importar do detector + o detector removido) e o arquivo novo **falhou em 4 testes**, incluindo os dois caminhos vivos. Restaurado em seguida; `git diff` conferido.
+
+**Reversão:** este commit é revertível sozinho por construção — `git revert` dele devolve os imports antigos, e o detector ainda existe neste ponto da história.
+
 ### Camada de ambiente — o Kobe passa a saber em que ambiente roda (2026-08-25)
 
 **Operador pediu:** a Sessão #1 do "Projeto Novo Ambiente Kobe" — a camada que permite o Kobe rodar em **dois ambientes independentes** na mesma máquina (bot, canal, configuração, memória durável e alcance de WhatsApp separados), **sem alterar em nada o comportamento da produção com o `.env` que ela tem hoje**.
