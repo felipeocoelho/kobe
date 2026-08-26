@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
 from zoneinfo import ZoneInfo
 
+from bot import environment as env_layer
 from bot.memory import aging
 
 
@@ -43,6 +44,19 @@ from bot.memory import aging
 # passado/futuro espelhado (bug observado: jogo "amanhã 12/05" lido como
 # ontem porque o servidor já estava em 13/05 UTC).
 OPERATOR_TZ = ZoneInfo("America/Sao_Paulo")
+
+# Aviso de ambiente injetado no TOPO do prompt quando a instância é de dev.
+# Só em dev: em produção nenhum caractere é acrescentado — a camada de ambiente
+# é aditiva por invariante, e o prompt de produção tem que sair byte-a-byte
+# igual ao de antes dela existir (tests/test_prompt_environment_banner.py).
+#
+# Por que no topo, antes até da nota de handoff de background: é a moldura de
+# tudo que vem depois. Um agente que descobre no rodapé que está em dev já leu
+# o pedido inteiro achando que era produção.
+BANNER_AMBIENTE_DEV = (
+    "[Ambiente] DESENVOLVIMENTO — esta instância é de DEV. Não faça deploy, "
+    "não publique, não trate esta conversa como memória de produção."
+)
 
 # Tag que marca, no contexto do prompt, que aquele texto veio de uma
 # mensagem de voz transcrita (Whisper/Groq ou AssemblyAI), não digitada.
@@ -137,6 +151,10 @@ class ClaudeRunner:
     cwd: Path
     timeout_seconds: int
     binary: str = "claude"
+    # Ambiente desta instância ("prod" | "dev"), vindo do Config. Exportado no
+    # env do subprocesso pra que subagentes, helpers de bot/bin/ e scripts de
+    # plugin saibam onde estão sem ter que adivinhar. Ver bot/environment.py.
+    environment: str = env_layer.PROD
 
     async def run(
         self,
@@ -157,7 +175,7 @@ class ClaudeRunner:
 
         `chat_id`, `thread_id` e `bot_token` (se fornecidos) são injetados
         no env do subprocess como `KOBE_CHAT_ID`, `KOBE_THREAD_ID` e
-        `KOBE_TELEGRAM_BOT_TOKEN` — usados pelos helpers `bot/bin/kobe-notify`
+        `KOBE_TELEGRAM_BOT_TOKEN` — e `KOBE_ENV` vai junto, sempre — usados pelos helpers `bot/bin/kobe-notify`
         e `bot/bin/kobe-attach` pra plugins emitirem progresso/anexos em
         tempo real, sem precisar passar pela resposta final do agente.
 
@@ -182,6 +200,11 @@ class ClaudeRunner:
         ]
 
         env = dict(os.environ)
+        # Ambiente explícito pro subprocesso. Vai sempre, inclusive valendo
+        # "prod": o valor em produção é exatamente o default que qualquer
+        # consumidor calcularia sozinho, e um sinal explícito vale mais que um
+        # silêncio ambíguo pro subagente que precisa decidir se pode publicar.
+        env[env_layer.ENV_VAR] = self.environment
         if bot_token:
             env["KOBE_TELEGRAM_BOT_TOKEN"] = bot_token
         if chat_id is not None:
@@ -469,6 +492,7 @@ def build_prompt(
     background_handoff: Optional[str] = None,
     quoted_message: Optional[str] = None,
     attachments_section: Optional[str] = None,
+    environment: Optional[str] = None,
 ) -> str:
     """Monta o prompt que vai pro `claude -p`.
 
@@ -494,6 +518,13 @@ def build_prompt(
     now_br = datetime.now(OPERATOR_TZ)
     now_utc = datetime.now(timezone.utc)
     parts: list[str] = []
+    # Aviso de ambiente (Sessão #1, P2): primeiro de tudo quando a instância é
+    # de dev, e ausente em produção. `environment=None` = "descobre sozinho",
+    # porque build_prompt tem dois chamadores (telegram_handler e resume) e um
+    # parâmetro obrigatório seria dois pontos de esquecimento.
+    if env_layer.is_dev(environment):
+        parts.append(BANNER_AMBIENTE_DEV)
+        parts.append("")
     # Nota de handoff de background (Fase C): quando o turno foi roteado pra
     # rodar em segundo plano na ENTRADA (previsão do classificador), a run é
     # um `claude -p` fresco e sem memória da decisão. Esta nota é a única

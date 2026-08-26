@@ -8,6 +8,9 @@ memória persistente (sessions / saved_artifacts) sem invocar o Claude.
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -311,6 +314,7 @@ def build_application(config: Config) -> Application:
     app.bot_data["claude"] = ClaudeRunner(
         cwd=config.kobe_claude_cwd,
         timeout_seconds=config.claude_timeout_seconds,
+        environment=config.environment,
     )
     app.add_handler(CommandHandler("nova", on_command_nova))
     app.add_handler(CommandHandler("contexto", on_command_contexto))
@@ -394,6 +398,32 @@ def build_application(config: Config) -> Application:
     return app
 
 
+def _avisar_paridade_de_env(config: Config) -> None:
+    """Compara o `.env` desta instância com um de referência e AVISA (P6).
+
+    Só roda quando `KOBE_ENV_PARITY_REFERENCE` aponta pra um `.env` de
+    referência — ausente, nada acontece, e é por isso que o gancho é aditivo:
+    sem a variável nova, nem o código de paridade é tocado.
+
+    **Nunca derruba o start, e nunca vê um valor.** O verificador lê só nomes de
+    chave (ver infra/env_parity.py); e um bot que não sobe porque falta uma
+    chave opcional trocaria um problema pequeno por um grande.
+    """
+    referencia = os.getenv("KOBE_ENV_PARITY_REFERENCE")
+    if not referencia:
+        return
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from infra.env_parity import avisar_no_start
+
+        avisar_no_start(Path(referencia), config.kobe_home / ".env", logger)
+    except Exception:  # noqa: BLE001 — diagnóstico não pode impedir o start
+        logger.warning(
+            "paridade de .env: verificador indisponível — seguindo sem o aviso",
+            exc_info=True,
+        )
+
+
 def main() -> None:
     try:
         config = load_config()
@@ -411,10 +441,23 @@ def main() -> None:
     for _noisy_logger in ("httpx", "httpcore", "telegram"):
         logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
     logger.info(
-        "kobe iniciando — usuários autorizados=%d home=%s",
+        "kobe iniciando — ambiente=%s usuários autorizados=%d home=%s",
+        config.environment,
         len(config.allowed_user_ids),
         config.kobe_home,
     )
+    # Lista branca de canal preenchida é estado incomum e de alto impacto: se
+    # ela for setada em produção por engano, o bot fica MUDO. Um bot mudo com
+    # uma linha de WARNING no journal se diagnostica em trinta segundos; um bot
+    # mudo em silêncio total, não. Por isso o aviso é WARNING e não INFO.
+    if config.telegram_allowed_chat_ids:
+        logger.warning(
+            "trava de canal ATIVA — esta instância só atende %d chat(s); "
+            "mensagem de qualquer outro será ignorada em silêncio",
+            len(config.telegram_allowed_chat_ids),
+        )
+
+    _avisar_paridade_de_env(config)
 
     app = build_application(config)
     app.run_polling(allowed_updates=Update.ALL_TYPES)

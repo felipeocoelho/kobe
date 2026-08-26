@@ -20,6 +20,7 @@ from telegram import Audio, Document, Message, PhotoSize, Update, Voice
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+from bot import authz
 from bot.artifacts import save_artifact_from_messages, search_artifacts
 from bot.claude_runner import (
     ClaudeError,
@@ -417,9 +418,14 @@ def _react_transcribed(config: Config, message: Message) -> None:
     )
 
 
-def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
-    user = update.effective_user
-    return user is not None and user.id in allowed_ids
+def _update_authorized(update: Update, config: Config) -> bool:
+    """Usuário autorizado E canal autorizado. Ver bot/authz.py.
+
+    Fica como função local só por legibilidade dos chamadores; a regra mora num
+    lugar só, de propósito — quatro cópias de uma verificação de segurança são
+    quatro chances de a trava de canal falhar ABERTA.
+    """
+    return authz.update_authorized(update, config)
 
 
 def _topic_label(thread_id: Optional[int]) -> str:
@@ -432,7 +438,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     text = (message.text or "").strip()
@@ -585,7 +591,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     transcriber: Transcriber = context.application.bot_data["transcriber"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     media = message.voice or message.audio
@@ -680,7 +686,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     config: Optional[Config] = context.application.bot_data.get("config")
-    if config is not None and not _user_authorized(update, config.allowed_user_ids):
+    if config is not None and not _update_authorized(update, config):
         return
 
     # GARANTIA DE TURNO: até aqui o aviso existia, mas a mensagem se perdia —
@@ -1886,7 +1892,7 @@ async def on_command_nova(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db: Client = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     thread_id = message.message_thread_id
@@ -1962,7 +1968,7 @@ async def on_command_contexto(update: Update, context: ContextTypes.DEFAULT_TYPE
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     thread_id = message.message_thread_id
@@ -2024,7 +2030,7 @@ async def on_command_salvar(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     title = " ".join(context.args).strip() if context.args else ""
@@ -2196,7 +2202,7 @@ async def on_command_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE)
     db: Client = context.application.bot_data["db"]
     claude: ClaudeRunner = context.application.bot_data["claude"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     thread_id = message.message_thread_id
@@ -2274,7 +2280,7 @@ async def on_command_retomar(update: Update, context: ContextTypes.DEFAULT_TYPE)
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     query = " ".join(context.args).strip() if context.args else ""
@@ -2369,6 +2375,13 @@ async def on_forum_topic_created(
     """
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
+    # o bot esteja — em dev, isso é justamente o que não pode acontecer.
+    if not authz.chat_allowed_for(
+        update, context.application.bot_data.get("config")
+    ):
+        return
     if message is None or message.forum_topic_created is None:
         return
     thread_id = message.message_thread_id
@@ -2583,7 +2596,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     photos: tuple[PhotoSize, ...] = message.photo or ()
@@ -2632,7 +2645,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     claude: ClaudeRunner = context.application.bot_data["claude"]
     plugins: list[Plugin] = context.application.bot_data.get("plugins", [])
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     doc: Optional[Document] = message.document
@@ -2813,6 +2826,13 @@ async def on_forum_topic_edited(
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
+    # o bot esteja — em dev, isso é justamente o que não pode acontecer.
+    if not authz.chat_allowed_for(
+        update, context.application.bot_data.get("config")
+    ):
+        return
     if message is None or message.forum_topic_edited is None:
         return
     thread_id = message.message_thread_id
@@ -2890,6 +2910,13 @@ async def on_forum_topic_closed(
     """
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
+    # o bot esteja — em dev, isso é justamente o que não pode acontecer.
+    if not authz.chat_allowed_for(
+        update, context.application.bot_data.get("config")
+    ):
+        return
     if message is None or message.forum_topic_closed is None:
         return
     thread_id = message.message_thread_id
@@ -2915,6 +2942,13 @@ async def on_forum_topic_reopened(
     """Marca tópico como `active` quando o operador reabre no Telegram."""
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # Estes handlers ESCREVEM no banco o nome de tópico de qualquer chat onde
+    # o bot esteja — em dev, isso é justamente o que não pode acontecer.
+    if not authz.chat_allowed_for(
+        update, context.application.bot_data.get("config")
+    ):
+        return
     if message is None or message.forum_topic_reopened is None:
         return
     thread_id = message.message_thread_id

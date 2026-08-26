@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import Update
+
+from bot import authz
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger("kobe.apolo_handlers")
@@ -106,6 +108,14 @@ async def _run_apolo_script(name: str, *args: str, timeout: int = 60) -> tuple[i
 
 
 async def on_command_contatos_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # ATENÇÃO — dívida conhecida: estes comandos NÃO verificam usuário, e nunca
+    # verificaram. Acrescentar isso mudaria o comportamento da produção, o que a
+    # aditividade da Sessão #1 proíbe; o achado está no CHANGELOG e o conserto é
+    # sessão própria. Aqui vai só a dimensão de canal.
+    if not authz.chat_allowed_for(update, context.application.bot_data.get("config")):
+        return
+
     if not context.args:
         await update.effective_message.reply_text(
             "Uso: <code>/contatos_buscar &lt;termo&gt;</code>\n"
@@ -157,6 +167,14 @@ async def on_command_contatos_buscar(update: Update, context: ContextTypes.DEFAU
 
 
 async def on_command_contatos_listar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # ATENÇÃO — dívida conhecida: estes comandos NÃO verificam usuário, e nunca
+    # verificaram. Acrescentar isso mudaria o comportamento da produção, o que a
+    # aditividade da Sessão #1 proíbe; o achado está no CHANGELOG e o conserto é
+    # sessão própria. Aqui vai só a dimensão de canal.
+    if not authz.chat_allowed_for(update, context.application.bot_data.get("config")):
+        return
+
     args = [a.lower() for a in (context.args or [])]
     tipo: Optional[str] = None
     include_hidden = False
@@ -215,6 +233,14 @@ async def on_command_contatos_listar(update: Update, context: ContextTypes.DEFAU
 
 
 async def on_command_contatos_promover(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # ATENÇÃO — dívida conhecida: estes comandos NÃO verificam usuário, e nunca
+    # verificaram. Acrescentar isso mudaria o comportamento da produção, o que a
+    # aditividade da Sessão #1 proíbe; o achado está no CHANGELOG e o conserto é
+    # sessão própria. Aqui vai só a dimensão de canal.
+    if not authz.chat_allowed_for(update, context.application.bot_data.get("config")):
+        return
+
     if not context.args:
         await update.effective_message.reply_text(
             "Uso: <code>/contatos_promover &lt;nome-do-arquivo&gt;</code>\n"
@@ -367,6 +393,14 @@ async def on_document_for_apolo(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def on_command_whatsapp_grupos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Trava de canal (P3): inerte com a whitelist vazia (produção de hoje).
+    # ATENÇÃO — dívida conhecida: estes comandos NÃO verificam usuário, e nunca
+    # verificaram. Acrescentar isso mudaria o comportamento da produção, o que a
+    # aditividade da Sessão #1 proíbe; o achado está no CHANGELOG e o conserto é
+    # sessão própria. Aqui vai só a dimensão de canal.
+    if not authz.chat_allowed_for(update, context.application.bot_data.get("config")):
+        return
+
     args = list(context.args or [])
     filtro: Optional[str] = None
 

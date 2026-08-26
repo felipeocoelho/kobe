@@ -1,0 +1,24 @@
+[Unit]
+Description=Keyko (DESENVOLVIMENTO) — daemon de despertar da instância de dev
+After=network-online.target
+Wants=network-online.target
+# Sem dependência dura do bot de dev: se o bot cai, o Keyko continua observando
+# arquivos e despertando o Claude. Independência é parte da resiliência.
+
+[Service]
+Type=simple
+WorkingDirectory={{KOBE_HOME}}
+# PATH explícito: systemd --user arranca com PATH mínimo que NÃO inclui
+# ~/.local/bin (onde o instalador oficial do Claude Code põe o binário).
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Ver a nota em kobe-dev.service.template: antes do EnvironmentFile, de propósito.
+Environment=KOBE_ENV=dev
+EnvironmentFile={{KOBE_HOME}}/.env
+ExecStart={{KOBE_HOME}}/.venv/bin/python -m bot.keyko
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

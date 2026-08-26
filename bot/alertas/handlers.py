@@ -20,6 +20,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot import authz
 from bot.config import Config
 from bot.alertas import StatusAlerta, storage
 
@@ -36,9 +37,14 @@ _GLYPH_STATUS = {
 }
 
 
-def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
-    user = update.effective_user
-    return user is not None and user.id in allowed_ids
+def _update_authorized(update: Update, config: Config) -> bool:
+    """Usuário autorizado E canal autorizado. Ver bot/authz.py.
+
+    Fica como função local só por legibilidade dos chamadores; a regra mora num
+    lugar só, de propósito — quatro cópias de uma verificação de segurança são
+    quatro chances de a trava de canal falhar ABERTA.
+    """
+    return authz.update_authorized(update, config)
 
 
 def _resumo_agenda(alerta) -> str:
@@ -62,7 +68,7 @@ async def on_command_alerta_lista(
     """Lista alertas deste tópico (vivos), com status e próximo disparo."""
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     chat_id = message.chat_id
@@ -100,7 +106,7 @@ async def on_command_alerta_pausar(
 ) -> None:
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     thread_id = message.message_thread_id
 
@@ -156,7 +162,7 @@ async def on_command_alerta_retomar(
 ) -> None:
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     thread_id = message.message_thread_id
 
@@ -214,7 +220,7 @@ async def on_command_alerta_apagar(
 ) -> None:
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     thread_id = message.message_thread_id
 

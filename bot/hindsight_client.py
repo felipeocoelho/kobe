@@ -52,6 +52,7 @@ from typing import Optional
 
 import httpx
 
+from bot import environment as env_layer
 logger = logging.getLogger("kobe.hindsight")
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8888"
@@ -93,11 +94,28 @@ _SLUG_SANITIZE = re.compile(r"[^a-z0-9_-]+")
 _configured_banks: set[str] = set()
 
 
-def bank_id_for_topic(slug: Optional[str]) -> str:
+def bank_id_for_topic(slug: Optional[str], environment: Optional[str] = None) -> str:
     """Bank por tópico — isolamento, igual ao resto da memória do Kobe (Dev Kobe
-    não puxa Olimpo). Slug saneado pra caber no path da URL."""
+    não puxa Olimpo). Slug saneado pra caber no path da URL.
+
+    Em `dev` o bank ganha o prefixo `kobe-dev-`. **Isto é cinto de segurança, e
+    não o mecanismo de isolamento** — o isolamento de verdade é de servidor: o
+    ambiente de desenvolvimento tem instância própria do Hindsight, em porta e
+    volume próprios (decisão do operador em 24/08/2026, `infra/hindsight/`).
+
+    O prefixo existe para um erro específico e plausível: o `.env` de dev vir
+    com `HINDSIGHT_BASE_URL` ainda apontando para o Hindsight de produção. Sem
+    ele, esse erro de uma linha contamina a memória viva do operador em silêncio
+    — o Hindsight aceitaria a escrita no bank de produção sem reclamar de nada.
+    Com ele, o estrago vira um bank órfão e inofensivo.
+
+    `environment=None` significa "descobre sozinho" (`bot/environment.py`), o
+    que faz o helper `bot/bin/kobe-reflect` herdar o ambiente do env que o
+    ClaudeRunner exporta, sem precisar de mudança nos chamadores.
+    """
     s = _SLUG_SANITIZE.sub("-", (slug or "general").strip().lower()).strip("-")
-    return f"kobe-{s or 'general'}"
+    prefixo = "kobe-dev" if env_layer.is_dev(environment) else "kobe"
+    return f"{prefixo}-{s or 'general'}"
 
 
 def document_id_for_session(session_id) -> str:

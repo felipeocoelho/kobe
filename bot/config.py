@@ -10,6 +10,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from bot import environment as env_layer
 from bot import reactions
 
 
@@ -22,8 +23,16 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Config:
+    # Em que ambiente esta instância roda: "prod" (default) ou "dev". Governa o
+    # aviso de ambiente no prompt do agente, o prefixo do bank da memória
+    # durável e o env exportado pro subprocesso do Claude. Ver bot/environment.py.
+    environment: str
     telegram_bot_token: str
     allowed_user_ids: frozenset[int]
+    # Canais (chats do Telegram) que esta instância atende. VAZIO = atende
+    # qualquer chat, que é o comportamento da produção hoje. Preenchido, tudo
+    # fora da lista é ignorado em silêncio. Ver bot/authz.py.
+    telegram_allowed_chat_ids: frozenset[int]
     supabase_url: str
     supabase_key: str
     groq_api_key: str
@@ -169,6 +178,31 @@ def _parse_user_ids(raw: str) -> frozenset[int]:
     return frozenset(ids)
 
 
+def _parse_chat_ids(raw: Optional[str]) -> frozenset[int]:
+    """Lista branca de chats. Ausente ou vazia devolve conjunto vazio.
+
+    Diferente de `_parse_user_ids`, o conjunto vazio aqui é **legítimo** e é o
+    default: significa "não filtro canal", que é como a produção roda hoje. Só
+    valor não-numérico é erro — porque `TELEGRAM_ALLOWED_CHAT_IDS=-100abc` é
+    quase certamente um id de supergrupo digitado errado, e aceitar isso
+    calado transformaria a trava de canal em trava de nada.
+    """
+    if not raw or not raw.strip():
+        return frozenset()
+    ids: set[int] = set()
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            ids.add(int(chunk))
+        except ValueError as exc:
+            raise ConfigError(
+                f"TELEGRAM_ALLOWED_CHAT_IDS contém valor não-numérico: {chunk!r}"
+            ) from exc
+    return frozenset(ids)
+
+
 def load_config(env_path: Optional[Path] = None) -> Config:
     """Carrega .env (se existir) e valida variáveis obrigatórias."""
     if env_path is not None:
@@ -181,8 +215,12 @@ def load_config(env_path: Optional[Path] = None) -> Config:
     kobe_claude_cwd = Path(claude_cwd_raw).expanduser().resolve()
 
     return Config(
+        environment=_environment_from_env(),
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         allowed_user_ids=_parse_user_ids(_require("TELEGRAM_ALLOWED_USER_IDS")),
+        telegram_allowed_chat_ids=_parse_chat_ids(
+            os.getenv("TELEGRAM_ALLOWED_CHAT_IDS")
+        ),
         supabase_url=_require("SUPABASE_URL"),
         supabase_key=_require("SUPABASE_KEY"),
         groq_api_key=_require("GROQ_API_KEY"),
@@ -268,6 +306,20 @@ def load_config(env_path: Optional[Path] = None) -> Config:
             "TELEGRAM_REACTION_TRANSCRIBED", reactions.DEFAULT_TRANSCRIBED
         ),
     )
+
+
+def _environment_from_env() -> str:
+    """Lê e valida `KOBE_ENV`, reembrulhando o erro como falha de configuração.
+
+    `bot/environment.py` levanta `ValueError` porque não pode importar daqui (a
+    dependência anda no sentido oposto). O start do bot, porém, só sabe tratar
+    `ConfigError` — sem esta tradução, um `KOBE_ENV` errado morreria com um
+    traceback cru em vez da mensagem "Configuração inválida: ...".
+    """
+    try:
+        return env_layer.normalize(os.getenv(env_layer.ENV_VAR))
+    except env_layer.InvalidEnvironment as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _parse_bool(raw: Optional[str]) -> bool:

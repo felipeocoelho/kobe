@@ -34,6 +34,7 @@ from supabase import Client
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot import authz
 from bot.config import Config
 from bot.topic_manager import (
     archive_active_session,
@@ -52,9 +53,14 @@ _MAX_LIST_ITEMS = 15
 _ID_PREFIX_LEN = 8
 
 
-def _user_authorized(update: Update, allowed_user_ids: frozenset[int]) -> bool:
-    user = update.effective_user
-    return user is not None and user.id in allowed_user_ids
+def _update_authorized(update: Update, config: Config) -> bool:
+    """Usuário autorizado E canal autorizado. Ver bot/authz.py.
+
+    Fica como função local só por legibilidade dos chamadores; a regra mora num
+    lugar só, de propósito — quatro cópias de uma verificação de segurança são
+    quatro chances de a trava de canal falhar ABERTA.
+    """
+    return authz.update_authorized(update, config)
 
 
 async def _require_enabled(update: Update, config: Config) -> bool:
@@ -103,7 +109,7 @@ async def on_command_conversas_topico(
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     if not await _require_enabled(update, config):
         return
@@ -162,7 +168,7 @@ async def on_command_conversas_global(
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     if not await _require_enabled(update, config):
         return
@@ -239,7 +245,7 @@ async def on_command_conversa(update: Update, context: ContextTypes.DEFAULT_TYPE
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     if not await _require_enabled(update, config):
         return
@@ -302,7 +308,7 @@ async def on_command_renomear(update: Update, context: ContextTypes.DEFAULT_TYPE
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     if not await _require_enabled(update, config):
         return
@@ -358,7 +364,7 @@ async def on_command_retomar_short(
     config: Config = context.application.bot_data["config"]
     db: Client = context.application.bot_data["db"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
     if not await _require_enabled(update, config):
         return

@@ -1,0 +1,49 @@
+[Handoff de background] você está em bg
+
+[Telegram] tópico: telegram_thread_id=42
+[Agora (America/Sao_Paulo)] 2026-08-25T20:30-03:00
+[Grounding] última troca há 10 min
+
+[Estado de background vivo]
+nada rodando
+
+[Núcleo curado]
+fato durável
+[Missão ativa: abc — "objetivo"]
+
+[Sala de missão ativa neste tópico: xyz — "obj"]
+
+[Alertas aguardando confirmação neste tópico]
+- id123
+
+[Plugins disponíveis]
+- exemplo: faz alguma coisa
+
+[Contexto do tópico]
+conteúdo curado do tópico
+
+[bloco do chat manager]
+
+[Memória durável]
+pista cética
+
+[Conversation ativa: 'tema' — iniciada em 2026-08-01, 1 session(s) arquivada(s)]
+
+[Cronologia comprimida (sessions arquivadas desta conversation)]
+— Session 1 (2026-08-02): resumo
+
+[Histórico recente da sessão ativa — horários em America/Sao_Paulo. ATENÇÃO: estas linhas são PASSADO. Uma linha datada de dias atrás descreve o que era verdade NAQUELE momento, não agora.]
+[13/08 07:00 — há ~13 dias] user: primeira
+[13/08 07:01] assistant: segunda
+[25/08 20:20 — há ~10 min] user: terceira
+
+[O operador respondeu CITANDO esta mensagem — é o contexto principal do que ele diz a seguir]
+mensagem citada pelo operador
+
+[Anexos deste turno]
+- foto.jpg
+
+[Mensagem nova do operador]
+🎤 [áudio transcrito] mensagem nova do operador
+
+Responda agora, em português, no estilo do agente.

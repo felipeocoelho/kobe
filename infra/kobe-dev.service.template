@@ -1,0 +1,27 @@
+[Unit]
+Description=Kobe (DESENVOLVIMENTO) — instância de dev, isolada da produção
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={{KOBE_HOME}}
+# PATH explícito: systemd --user arranca com PATH mínimo que NÃO inclui
+# ~/.local/bin (onde o instalador oficial do Claude Code põe o binário).
+# %h é o $HOME do usuário do serviço, expandido pelo próprio systemd.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Ambiente da instância. Vem ANTES do EnvironmentFile de propósito: no systemd
+# quem vem depois vence, então o .env ainda pode sobrescrever se um dia houver
+# motivo — mas, esquecendo a chave no .env, a instância continua sendo dev.
+# Sem isto, um .env de dev incompleto faria o bot de desenvolvimento se comportar
+# como produção: prompt sem aviso de ambiente e memória durável sem prefixo.
+Environment=KOBE_ENV=dev
+EnvironmentFile={{KOBE_HOME}}/.env
+ExecStart={{KOBE_HOME}}/.venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+# Modelo do ambiente de dev do Hindsight. É `.example`: não carrega segredo
+# nenhum e precisa ir pro repo, senão quem clona não sabe montar a stack de
+# desenvolvimento. O `.env.dev` de verdade continua ignorado pela linha acima.
+!.env.dev.example
 *.env.backup
 
 # Backups de dados — dumps locais do banco, NUNCA versionados.

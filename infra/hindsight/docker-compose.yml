@@ -31,9 +31,18 @@
 # Runbook completo: README.md (mesma pasta).
 # ============================================================================
 
+# ⚠️ NOME DO PROJETO — a linha que impede o pior acidente possível aqui.
+# Sem ela, o Compose deriva o nome do projeto do nome da PASTA. Duas stacks
+# subindo da mesma pasta (prod com `.env`, dev com `--env-file .env.dev`)
+# cairiam no mesmo projeto e nos mesmos nomes de serviço — e um `up` do dev
+# RECRIARIA os containers da produção com a configuração do dev, levando a
+# memória durável junto. O default `hindsight` é exatamente o que o Compose já
+# resolvia sozinho, então a produção não vê diferença nenhuma.
+name: ${HINDSIGHT_PROJECT_NAME:-hindsight}
+
 services:
   hindsight-db:
-    container_name: hindsight-postgres
+    container_name: hindsight-postgres${HINDSIGHT_STACK_SUFFIX:-}
     image: pgvector/pgvector:pg${HINDSIGHT_DB_VERSION:-18}
     restart: unless-stopped
     environment:
@@ -55,15 +64,15 @@ services:
       start_period: 10s
 
   hindsight-app:
-    container_name: hindsight-app
+    container_name: hindsight-app${HINDSIGHT_STACK_SUFFIX:-}
     image: ghcr.io/vectorize-io/hindsight:${HINDSIGHT_VERSION:-0.8.3}
     restart: unless-stopped
     depends_on:
       hindsight-db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8888:8888"   # ⚠️ loopback — API MCP/HTTP
-      - "127.0.0.1:9999:9999"   # ⚠️ loopback — admin UI (acesso via túnel SSH)
+      - "127.0.0.1:${HINDSIGHT_PORT_API:-8888}:8888"    # ⚠️ loopback — API MCP/HTTP
+      - "127.0.0.1:${HINDSIGHT_PORT_ADMIN:-9999}:9999"  # ⚠️ loopback — admin UI (túnel SSH)
     environment:
       # --- Provedor LLM/embedding: OpenAI (reusa a chave do Kobe) ---
       HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_LLM_PROVIDER:-openai}
@@ -84,9 +93,17 @@ services:
 
 networks:
   hindsight-net:
-    name: hindsight-net
+    # Rede por stack: com sufixo próprio, o dev não enxerga o Postgres da prod.
+    # O nome de HOST do banco continua sendo `hindsight-db` (o nome do SERVIÇO,
+    # não o do container) — o Compose registra o alias por serviço, então cada
+    # stack resolve o seu sem precisar de mudança nenhuma na DATABASE_URL.
+    name: hindsight-net${HINDSIGHT_STACK_SUFFIX:-}
     driver: bridge
 
 volumes:
   hindsight-postgres-data:
-    name: hindsight-postgres-data
+    # ⚠️ O nome deste volume É a memória durável. Mudar o default aqui faz o
+    # próximo `up` da produção criar um volume vazio e subir um Hindsight sem
+    # memória nenhuma — sem erro, sem aviso, só esquecimento. O default tem que
+    # continuar sendo, letra por letra, `hindsight-postgres-data`.
+    name: hindsight-postgres-data${HINDSIGHT_STACK_SUFFIX:-}

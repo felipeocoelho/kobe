@@ -31,9 +31,17 @@ def _make_update(thread_id=None):
     return Update(update_id=1, message=msg)
 
 
-def _make_ctx(allowed_ids):
+def _make_ctx(allowed_ids, allowed_chat_ids=()):
+    # `telegram_allowed_chat_ids` entrou no Config com a camada de ambiente
+    # (Sessão #1, P3). O default vazio aqui reproduz a produção: sem lista
+    # branca de canal, a autorização é só por usuário, como sempre foi.
     app = SimpleNamespace(
-        bot_data={"config": SimpleNamespace(allowed_user_ids=frozenset(allowed_ids))}
+        bot_data={
+            "config": SimpleNamespace(
+                allowed_user_ids=frozenset(allowed_ids),
+                telegram_allowed_chat_ids=frozenset(allowed_chat_ids),
+            )
+        }
     )
     return SimpleNamespace(application=app, error=RuntimeError("Server disconnected"))
 

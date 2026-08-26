@@ -23,6 +23,7 @@ from supabase import Client
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot import authz
 from bot.config import Config
 from bot.mission_control import (
     Missao,
@@ -41,9 +42,14 @@ logger = logging.getLogger("kobe.missoes.handlers")
 LISTA_MAX_HISTORICO = 5
 
 
-def _user_authorized(update: Update, allowed_ids: frozenset[int]) -> bool:
-    user = update.effective_user
-    return user is not None and user.id in allowed_ids
+def _update_authorized(update: Update, config: Config) -> bool:
+    """Usuário autorizado E canal autorizado. Ver bot/authz.py.
+
+    Fica como função local só por legibilidade dos chamadores; a regra mora num
+    lugar só, de propósito — quatro cópias de uma verificação de segurança são
+    quatro chances de a trava de canal falhar ABERTA.
+    """
+    return authz.update_authorized(update, config)
 
 
 # --- /missao -----------------------------------------------------------
@@ -52,7 +58,7 @@ async def on_command_missao(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Cria missão nova e dispara orquestrador pra planejar."""
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     descricao = " ".join(context.args).strip() if context.args else ""
@@ -168,7 +174,7 @@ async def on_command_missao_status(
     """Snapshot do painel — mensagem nova, NÃO edita o painel vivo."""
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     chat_id = message.chat_id
@@ -193,7 +199,7 @@ async def on_command_missao_abortar(
     """Mata PIDs das tarefas rodando, marca missão como abortada."""
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     chat_id = message.chat_id
@@ -255,7 +261,7 @@ async def on_command_missao_lista(
     """Lista missões ativas neste tópico + últimas N concluídas/falhadas."""
     config: Config = context.application.bot_data["config"]
     message = update.effective_message
-    if message is None or not _user_authorized(update, config.allowed_user_ids):
+    if message is None or not _update_authorized(update, config):
         return
 
     chat_id = message.chat_id
