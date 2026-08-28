@@ -1,0 +1,26 @@
+# F0.5 — bateria de regressão de comportamento no bot de dev
+#
+# A F0.5 é MISTA (briefing §9.4): o miolo é de serviço — trocar o provider de
+# modelo e o de embedding acontece dentro do container, e o comparativo dos três
+# modelos é uma tabela. Nada disso passa pelo bot. Esta bateria NÃO é a prova da
+# entrega; ela é a REGRESSÃO.
+#
+# Por que ela existe: trocar o modelo de embedding muda a DIMENSÃO do vetor, e o
+# `kobe-reflect` — que o agente roda de dentro de um turno — fala com esse mesmo
+# serviço. Se quebrar, quebra numa conversa.
+#
+# Pré-condição (montada pela sessão, e desfeita depois, conferida por `diff`):
+# no .env de DEV, HINDSIGHT_ENABLED=true. RECALL e RETAIN ficam como estão.
+#
+# O que se espera:
+#   cenário 1 — responder OU dizer "não há registro" são AMBOS verdes (o bank de
+#               dev é raso; briefing §9.2 item 2). Vermelho é exceção, timeout ou
+#               turno morto.
+#   cenário 2 — prova a regra que já vale hoje: o Hindsight nunca derruba um turno.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f05-regressao.txt --thread-id 2
+
+# a memória durável ainda responde depois da troca de provider?
+roda o kobe-reflect e me diz o que a memória tem sobre o Kobe
+# e um turno normal segue normal (o Hindsight não pode derrubar turno)
+me diz que horas são

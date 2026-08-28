@@ -4,6 +4,367 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Highlander v3 — F0.6: "Cade", o envenenamento da memória na entrada (2026-08-28)
+
+**Operador decidiu (e isto é decisão DELE, não recomendação minha):** `claude-haiku-4-5` nas
+duas pontas da memória — gravação/consolidação **e** `reflect`. Palavra dele: *"Vou seguir a
+sua recomendação de modelos, Haiku nos 2 casos (gravação/consolidação e reflect)."* Registrado
+em `user-data/knowledge/kobe/decisoes/2026-08-modelos-da-memoria.md`.
+
+**Operador pediu, no mesmo turno:** investigar um achado dele — *"'Cade' é envenenamento de
+memória (não é o 'cadê', que é uma palavra usual), eu NUNCA falo isso"* — e testar a tese de
+que a memória está sendo envenenada **na entrada**, não só na extração.
+
+**Por quê:** conecta direto com o defeito medido na F0.5-D, onde o Haiku *"fabricou 1
+definição em 21 fatos sobre ruído de transcrição"*. Escolher o melhor extrator não resolve
+lixo de origem — o extrator bom só grava o lixo com mais elegância.
+
+**Foi feito:** relatório
+`user-data/knowledge/kobe/status/2026-08-28-f06-envenenamento-por-transcricao.md`, com o dano
+medido, as três camadas de defesa pesadas na mesma régua e uma recomendação única.
+
+**O fenômeno é real, reincidente e agora tem nome e origem.** Em **31 de 861** mensagens de
+voz (**3,6%**), de 28/05 a 28/08, o Whisper **insere uma frase que o operador não disse**, com
+forma de definição. **"Cade" é "CLAUDE" colapsado** — e quem diagnosticou isso foi o próprio
+operador, em 15/06 (*"Cope Online"* = `CLAUDE.md`). As nove definições capturadas são
+**mutuamente contraditórias**, porque a alucinação **ecoa uma frase do próprio áudio** dentro
+de um molde de definição.
+
+**Dano gravado: ZERO** dos 1.059 fatos do bank de produção. **Mas o mecanismo é
+reprodutível:** num trecho real, o Haiku gravou *"Cade é um código usado para enviar mensagens
+no ambiente de desenvolvimento"* em **2 de 2** tentativas. Não chegou ao bank por sorte de
+amostragem, não por defesa.
+
+**Correção de uma afirmação minha, feita durante a própria apuração:** reportei ter achado um
+fato envenenado em produção porque o predicado batia com a definição alucinada. **Fui ler a
+fonte e o fato é fiel** — a frase era do operador, e a alucinação a copiou. Eu tinha cravado
+sem abrir a mensagem. O erro melhorou o diagnóstico, porque revelou o mecanismo de eco.
+
+**Suspeita principal, com uma evidência direta e não provada:** o próprio
+`user-data/transcription-hints.md` pode estar **primando** o artefato. Um áudio de 11/06
+devolveu o **texto do arquivo de hints como se fosse transcrição**, com "HAL" trocado por
+"Cade" — prompt-bleeding do Whisper. **Provar exige áudio real, e o `dev_inject` só injeta
+texto** (lacuna já declarada na F0).
+
+**As três camadas, medidas:**
+- **(a) transcrição** — a raiz, custo zero, **eficácia não medida** (precisa de áudio);
+- **(b) detector genérico de degeneração** — **medido e NÃO funciona**: 71% de detecção custa
+  **29% de falso positivo**, porque fala real repete mais que alucinação (a repetição máxima
+  nas mensagens limpas é 9; nas alucinadas, 7). **Não recomendo construir.**
+- **(c) diretiva do bank** — **funciona**: A/B com a missão como única variável levou a
+  fabricação de 2/2 para **0/2**. Custa +175 tokens de entrada (~R$ 0,35/mês) e **a saída
+  caiu**, então provavelmente se paga. Efeito colateral medido: consolida fatos (8 → 5).
+
+**O falso positivo do "cadê" é ZERO** — o acento separa as palavras, e em 1.818 mensagens
+nenhuma ocorrência legítima foi confundida.
+
+**Dois defeitos de configuração achados de passagem em `bot/transcribe.py`** (não corrigidos —
+não é escopo desta bateria): `response_format="text"` joga fora `compression_ratio`,
+`avg_logprob` e `no_speech_prob`, que a Groq entrega de graça em `verbose_json` e que são os
+sinais nativos de degeneração do Whisper; e o código trunca os hints em **850 bytes** enquanto
+a Groq documenta o limite do `prompt` em **224 tokens** — unidades diferentes.
+
+**Recomendação:** ligar a **(c)** já (é configuração, reversível numa chamada), tratar a
+**(a)** como a fase seguinte, e **não construir a (b)**. Filtrar o token "Cade" tem mira
+perfeita mas trata o sintoma de um caso — "Colby", "RAPL" e "Cope Online" são o mesmo defeito
+com outra roupa.
+
+**Testes:** 861 mensagens de áudio reais como corpus, 31 alucinadas como gabarito, e A/B de
+2×2 rodadas na camada (c). Suíte do Kobe: **`595 passed, 53 skipped`**.
+
+**Custo: US$ 0,05.** Acumulado das quatro baterias: **US$ 0,877** do teto de US$ 1,00.
+
+**Estado:** **zero POST** na produção do Hindsight (só leituras `GET`); leitura do Postgres de
+produção **somente `SELECT`**, autorizada na missão; embeddings intocados; `.env.dev`
+restaurado com `diff` vazio; nenhuma chave escrita em disco, artefato ou commit.
+
+**Reversão:** nenhuma linha de runtime foi escrita — o que existe é medição e documento.
+
+### Highlander v3 — F0.5-D: Gemini direto × Anthropic, a combinação por operação (2026-08-28)
+
+**Operador pediu:** entrar com o Gemini **direto** (provider nativo, chave dele) em vez de
+passar pela OpenRouter — porque só o Gemini tem Batch API **e** cache explícito, os dois
+descontos que somem no caminho da OpenRouter. E, na sequência, *"testes extensos comparando
+modelos Gemini vs Anthropic para achar a MELHOR COMBINAÇÃO"* entre as duas operações da
+memória, sob o critério **"o máximo de qualidade e o máximo de performance com o mínimo de
+custo"**, com as três dimensões **medidas e tabeladas na mesma régua**.
+
+**Por quê:** gravação e `reflect` têm perfis opostos — uma roda no daemon (latência não
+aparece), a outra roda dentro do turno (o operador espera na frente da tela). O melhor modelo
+para uma pode não ser o da outra.
+
+**Foi feito:** seção 10 do relatório
+`user-data/knowledge/kobe/status/2026-08-28-f05b-latencia-e-custo-por-provedor.md`, com o
+sweep de qualidade em **4 trechos reais** do operador e as três dimensões lado a lado.
+
+**Esta bateria INVERTE a recomendação de gravação da seção 4** — e a inversão é o achado
+principal. Lá o `gemini-2.5-flash-lite` foi indicado porque extraía **mais fatos**. Com 4
+trechos e **leitura do conteúdo, não da contagem**, mais fatos virou fatos piores: ele grava
+conteúdo **efêmero** (que a missão do bank manda ignorar), **narração do fluxo da conversa**,
+duplicatas — e, num trecho, **transformou uma pergunta do operador em decisão** (*"é
+restaurar a produção no ambiente Dev?"* virou *"a estratégia atual envolve restaurar a
+produção…"*). É a dor que originou o Highlander de cabeça para baixo. O `claude-haiku-4-5`
+extrai menos e melhor, preservando condicionais — **mas fabricou 1 definição em 21 fatos**
+em cima de ruído de transcrição, e isso está registrado para não vender modelo.
+
+**Três verificações que o brief pedia, e as três mudaram alguma premissa:**
+- **A chave Gemini é do plano PAGO**, provado objetivamente: ela chama o
+  `gemini-3.1-pro-preview`, que o Google lista como indisponível no gratuito. **Logo a
+  política de "o conteúdo é usado para melhorar produtos" — que é a do gratuito — não se
+  aplica**, e não há trava de privacidade para usar Gemini na memória pessoal.
+- **Cache explícito: ativa na gravação, não ativa no `reflect`.** Medido no `usage`: **98,4%
+  da entrada em cache a partir da 2ª chamada** na extração (entrada 10× mais barata), e
+  **zero** no `reflect` — cujo loop injeta resultado de ferramenta a cada iteração e não tem
+  prefixo estável. O desconto existe exatamente onde está o volume.
+- **Batch NÃO é automático**, ao contrário do que o brief supunha:
+  `HINDSIGHT_API_RETAIN_BATCH_ENABLED` vem **`false`** e **exige retain assíncrono** — os
+  −50% custam a memória entrar minutos depois.
+
+**Recomendação: `claude-haiku-4-5` nas duas pontas, R$ 27,81/mês.** Na gravação, pagar
+**R$ 19/mês a mais** para não gravar dúvida como decisão é o melhor negócio da tabela. No
+`reflect`, latência empata na prática (4,7 s contra 2,2 s, os dois folgados no `timeout` de
+20 s), então decide o mesmo defeito. **Alternativa barata declarada:** tudo em
+`gemini-2.5-flash-lite` custa **R$ 1,38/mês** (R$ 0,78 com Batch) e mede pior nos 4 trechos.
+`gemini-3.1-flash-lite` funde decisões distintas — **newer não é better nesta tarefa**.
+
+**Testes:** 4 trechos reais × 3 modelos no sweep de qualidade, mais N=3 de latência por
+operação. Suíte do Kobe: **`595 passed, 53 skipped`**.
+
+**Gasto: US$ 0,1161 nesta bateria; acumulado US$ 0,8266 (R$ 4,25) do teto de US$ 1,00.** O
+que sobrou **não** foi gasto de propósito: o sweep excluiu Sonnet e `gemini-3.5-flash` porque
+os dois já estavam eliminados (o Sonnet mede pior e custa 2,9× o Haiku; o `3.5-flash` custa
+15× o flash-lite e o `3.1` da mesma família já tinha medido pior que o `2.5`). Gastar o teto
+em candidato eliminado seria comprar informação inútil.
+
+**Estado do ambiente:** **embeddings não foram tocados** (o bank segue vetorizado como
+estava); `.env.dev` restaurado com `diff` vazio; produção do Hindsight no mesmo container
+`a122c528…` com 35 h de uptime e zero POST; **nenhuma chave escrita em disco, artefato ou
+commit** — todas passaram por variável de ambiente na linha do `up`.
+
+**Reversão:** nenhuma linha de runtime foi escrita; o que existe é medição e documento.
+
+### Highlander v3 — F0.5-C: o pool de workers `claude` quentes resolve? (2026-08-28)
+
+**Operador pediu:** depois da F0.5-B, levou a hipótese adiante com uma pergunta de
+arquitetura, na analogia de DBA dele — *"se eu tivesse um determinado número de binários do
+Claude rodando, esperando serem chamados, como funcionários ociosos (…) qual seria o
+resultado?"*. É buffer pool: pagar memória parada para não pagar o custo de estabelecer a
+conexão a cada chamada. **A motivação é financeira e explícita:** ele já paga a assinatura e
+não quer pagar API por cima. O entregável pedido **não é um pool**, é o número que permite
+decidir se vale construir.
+
+**Por quê:** se o tempo estiver no spawn, pool resolve; se estiver na rota, não resolve nada.
+O brief mandava **decompor os 40 s antes de montar qualquer pool** e parar se o overhead fixo
+fosse pequeno.
+
+**Foi feito:** a decomposição, e ela **encerrou a bateria** — nenhum pool foi construído,
+como o próprio brief mandava nesse caso. Mediram-se, ainda assim, o worker quente real, a
+memória e o risco de estado, porque tudo isso roda na assinatura e custa **US$ 0,00**.
+Seção 9 do relatório
+`user-data/knowledge/kobe/status/2026-08-28-f05b-latencia-e-custo-por-provedor.md`.
+
+**A resposta: não vale. O pool funciona e ataca a fatia errada.**
+- **spawn + bootstrap = 1,67 s** (N=3, prompt trivial, no ambiente de isolamento do provider);
+- cada chamada de LLM pela assinatura custa **9 a 11 s** — o Hindsight imprime a própria
+  decomposição, e um `reflect` são **3 a 5 chamadas**, 95–98% da parede;
+- worker quente **medido de verdade** (processo `claude -p --input-format stream-json` vivo,
+  recebendo despachos pelo stdin): economia real de **2,24 s por chamada**, o que levaria o
+  `reflect` de **46,8 s para ~35,6 s** — contra **4,7 s** do mesmo Haiku pela API direta;
+- **o número que fecha a discussão:** um worker **quente** da assinatura (10,7 s numa
+  extração) continua **mais lento que uma chamada fria de API** (7,4 s), e ~4× mais lento que
+  o `gemini-2.5-flash-lite` (2,8 s).
+
+**Correção de atribuição na F0.5-B:** a TL;DR daquela seção dizia que os 40 s eram "o spawn
+do binário a cada chamada". **Errado** — o spawn é 17% disso. O texto foi corrigido no mesmo
+documento, com a nota dizendo o que mudou e por que importa.
+
+**Risco de estado entre chamadas — confirmado, e ao contrário do que o brief supunha, tem
+conserto.** O worker lembrou, na 3ª chamada, um número dito na 2ª — num pool servindo o Kobe
+isso seria um `reflect` de um bank enxergando o do tópico anterior. Mas despachar `/clear`
+entre chamadas **zerou o contexto em 0,026 s**, verificado com a mesma armadilha. O que mata
+a ideia é a aritmética, não o vazamento.
+
+**Memória, medida e não assumida:** worker ocioso **159 MB**, **270 MB** em regime, e **não
+cresce** entre chamadas. Cabem ~3 workers na VPS — mas **o limite real são as salas do Coder**
+(~500 MB cada), não o pool.
+
+**Veredito:** paga a API. O pool economizaria **R$ 3,93/mês** (o custo inteiro do mix
+recomendado) e custaria um shim compatível com o protocolo da OpenAI, um supervisor de
+workers e uma fila — um serviço com estado na frente da memória durável — com 11 segundos
+ainda na mesa.
+
+**Testes:** a própria bateria é a medição; cada número traz N e a dispersão (p50, min–max).
+Suíte do Kobe: **`595 passed, 53 skipped`**.
+
+**Custo: US$ 0,00.** Rodou toda na assinatura; o gasto acumulado segue nos US$ 0,7105 da
+F0.5-B.
+
+**Estado do ambiente:** todos os workers de teste mortos e **confirmados mortos por `ps`**;
+memória disponível terminou em 4.548 MB (contra 4.318 MB no início) e o swap ficou onde
+estava (1.392 MB); nenhum serviço do bot reiniciado, nenhuma sala tocada; `.env.dev`
+restaurado com `diff` vazio; produção do Hindsight no mesmo container `a122c528…`.
+
+**Reversão:** nada a reverter — nenhuma linha de runtime foi escrita. O que existe é medição
+e documento.
+
+### Highlander v3 — F0.5-B: é o modelo ou o caminho? e quanto custa por mês (2026-08-28)
+
+**Operador pediu:** depois de ler o resultado da F0.5, mandou isolar a variável — o `reflect`
+de ~40 s pela assinatura era **o modelo da Anthropic sendo lento** ou **o caminho da
+assinatura**? E, junto, estudar a OpenRouter atrás do melhor custo × qualidade, recomendar
+**por operação**, e projetar o custo **mensal em reais** com volume real e cotação do dia.
+Teto de gasto para a bateria inteira: **US$ 1,00**.
+
+**Por quê:** a F0.5 mudou duas coisas ao mesmo tempo (modelo e caminho) e concluiu sobre as
+duas juntas. Uma conclusão dessas não sustenta decisão de arquitetura.
+
+**Foi feito:**
+- `infra/hindsight/docker-compose.models.yml` ganhou o repasse da **chave do provider**
+  (`HINDSIGHT_API_LLM_API_KEY`, que o compose principal amarrava à `OPENAI_API_KEY`, e por
+  isso impedia apontar para `anthropic`/`openrouter`) e o amarramento **separado** da chave
+  de embedding — ver a armadilha abaixo. A chave nunca é escrita em disco: o Compose lê o
+  ambiente do shell com precedência sobre o `--env-file`.
+- 8 caminhos medidos com **N=3** por combinação, mesmo bank e mesmo trecho da F0.5, nas duas
+  operações (extração e `reflect`), reportados em **p50 (min–max)**.
+- Relatório em
+  `user-data/knowledge/kobe/status/2026-08-28-f05b-latencia-e-custo-por-provedor.md`
+  (+ linha no índice detalhado e índice curto regerado).
+
+**A resposta: é o CAMINHO.** Mesmo `claude-haiku-4-5`, mesmo bank, mesmos embeddings:
+`reflect` em **4,7 s pela API direta** contra **~40 s pela assinatura** — **~8×**. O provider
+`claude-code` faz spawn do binário `claude` e bootstrap do SDK **a cada chamada**, e um
+`reflect` são 4 a 6 chamadas. **Isso desfaz o dilema da F0.5:** usar o mesmo Haiku pela API
+paga cabe folgado no `timeout=20.0` do `kobe-reflect`, sem tocar em código nenhum.
+
+**Achado inesperado:** `google/gemini-2.5-flash-lite` pela OpenRouter extraiu **mais fatos
+que o Sonnet** (6/5/5 contra 4/4/4), foi **o mais rápido de todos** (2,8 s de extração,
+3,4 s de `reflect`) e custa **R$ 2,27/mês**.
+
+**Confiabilidade virou critério eliminatório:** três dos cinco candidatos da OpenRouter
+falharam a extração. `qwen3.5-flash` **nunca** completou — devolve um float no lugar do
+objeto do schema, três tentativas, zero fatos e tokens gastos. `mistral-small` e
+`deepseek-v4-flash` falharam 1 em 3. **Declarar `structured_outputs` no catálogo não é
+honrar o schema**, e para memória durável uma extração que falha é um fato que não é
+gravado, em silêncio.
+
+**⚠️ Armadilha registrada:** a chave de embedding do Hindsight **cai por padrão na chave do
+LLM**. Ao apontar o LLM para outro provider, os embeddings mandam a chave errada para a
+OpenAI, voltam 401 — e o `reflect` **não falha**: responde "não há registro" porque as
+ferramentas de busca engolem o erro. **Latência bonita, resposta oca.** A primeira rodada da
+Anthropic saiu assim e foi **descartada e refeita**; só foi pega porque a resposta do modelo
+denunciou o erro de autenticação. Extração não é afetada (não usa embedding).
+
+**Correção de uma conclusão da F0.5:** lá ficou escrito que "o Haiku errou por inversão" no
+fato mais difícil. **Era N=1 e não se sustenta**: pela API direta, as três corridas
+acertaram. O erro foi de amostragem minha, não característica do modelo.
+
+**Custo, com volume medido e não chutado:** leitura somente de contagem na produção (30 dias,
+todos os tópicos) = **390 mensagens/mês**. Câmbio buscado e citado (Frankfurter/BCE,
+27/08/2026, R$ 5,142). Do mais barato credível (**R$ 2,27/mês**) ao mais caro imaginável
+(Sonnet em tudo, **R$ 80,79/mês**). **Recomendação por operação** — gravação e consolidação
+no `gemini-2.5-flash-lite`, `reflect` no `claude-haiku-4-5` via API: **R$ 3,93/mês**. A
+leitura que importa mais que o ranking: **neste volume, dinheiro não é a restrição.**
+
+**Testes:** as 8 baterias **são** o teste, e cada linha traz `ok/3` de confiabilidade junto
+da latência. Suíte do Kobe: **`595 passed, 53 skipped`**, igual à linha de base.
+
+**Gasto real: US$ 0,7105 (R$ 3,65) — 71% do teto de US$ 1,00.** Dois erros meus, registrados
+porque são de método: projetei US$ 0,19 e gastei 3,7× isso (subestimei o `reflect` em
+tokens de entrada — o real é 10–20 mil, não 5 mil — e tive de refazer as baterias da
+Anthropic depois da armadilha acima); e declarei um ponto de parada em US$ 0,60 que **não
+respeitei**, porque o gasto da Anthropic só é observável depois da última chamada. Ponto de
+parada que depende de número que só existe no fim não é ponto de parada.
+
+**Estado do ambiente:** zero POST na produção do Hindsight (container `a122c528…`, uptime
+contínuo); `.env.dev` restaurado com `diff` vazio; as chaves da Anthropic e da OpenRouter
+**nunca escritas em disco**; nenhum código de runtime do Kobe alterado — o `timeout=20.0` do
+`bot/hindsight_client.py` foi **medido e recomendado, não mexido**.
+
+**Reversão:** commits limpos na branch `coder/85ecc404`; backup carimbado em
+`.local/backups/` (`20260828-001343`).
+
+### Highlander v3 — F0.5: provar a assinatura e escolher os modelos (2026-08-28)
+
+**Operador pediu:** a F0.5 do briefing aprovado (`07-briefing-v2.md`, seção 5) — três
+medições: (1) provar que o Hindsight consegue usar **a assinatura** do operador em vez da
+API paga (`HINDSIGHT_API_LLM_PROVIDER=claude-code`); (2) provar **embeddings locais**
+(modelo multilíngue rodando na própria VPS); (3) **comparativo `mini × Haiku × Sonnet`** na
+extração de fatos, com conversa real do operador e sem sujar o bank de produção.
+
+**Por quê:** o resultado define o orçamento de todas as fases seguintes. O item 1 é o de
+**maior incerteza do plano inteiro** — o Hindsight roda em container e a credencial da
+assinatura vive no host, e ninguém tinha testado se ela atravessa.
+
+**Foi feito:**
+- `tests/roteiros/f05-regressao.txt` — a bateria de **regressão** conversacional da fase
+  (2 cenários da seção 9.4 do briefing), na mesma convenção dos quatro roteiros da F0.
+- `infra/hindsight/docker-compose.models.yml` — **override** de compose que existe só para
+  o ambiente de dev, com `.env.dev.example` documentando cada variável nova. Ele repassa o
+  `HINDSIGHT_API_LLM_MODEL` (que o compose principal não repassava, tornando impossível
+  comparar modelos), parametriza o modelo de embedding local, e monta a assinatura do
+  operador **read-only**. **Não age sozinho**: só entra com um `-f` explícito, então a
+  produção pode receber o arquivo por `git pull` e continuar exatamente como está — foi por
+  isso que o nome auto-carregado `docker-compose.override.yml` foi rejeitado.
+- **As três medições**, com o relatório curto em
+  `user-data/knowledge/kobe/status/2026-08-28-f05-assinatura-embeddings-modelos.md`
+  (+ linha no índice detalhado e índice curto regerado).
+
+**Os três resultados, em uma linha cada:**
+1. **A assinatura atravessa o container — SIM.** O Hindsight extraiu fato real com
+   `HINDSIGHT_API_LLM_PROVIDER=claude-code`, sem API paga. A imagem 0.8.3 **já traz** o
+   `claude_agent_sdk` (e toda a pilha de embedding local); o que falta é só o binário
+   `claude`, montado do host read-only. **Nenhuma imagem derivada foi necessária.**
+   **Mas cobra ~10× em latência:** um `reflect` sai de **~4 s** (`openai`) para **~40 s**
+   (`claude-code`), medido com uma variável só mudando — e o `kobe-reflect` usa
+   `timeout=20.0`, então **ligar a assinatura como está quebra o `kobe-reflect`**.
+2. **Embeddings locais — SIM.** `intfloat/multilingual-e5-small` via ONNX, 384 dimensões,
+   carga em 4,5 s. Prova real: recuperou um fato em português por **paráfrase sem palavra
+   em comum** e por **pergunta em inglês** — o que o default `bge-small-en` não faz.
+   **Mas adotar não é trocar uma variável:** o Hindsight **recusa** mudar a dimensão do
+   vetor com dado gravado (erro explícito na subida, sem migração no lugar), então em
+   produção significa **re-embeddar os ~1,25 mil fatos**.
+3. **`mini × Haiku × Sonnet`** sobre a **mesma fala real do operador** (sha256 registrado):
+   4 / 5 / 5 fatos. No fato mais difícil — uma negação embaralhada pela transcrição —
+   **`mini` acertou, `Haiku` inverteu a decisão, `Sonnet` acertou**.
+
+**Três armadilhas de uid que fazem a assinatura parecer quebrada sem estar** (todas
+consertadas e comentadas ao lado da linha no override): credencial de outro uid é ilegível
+e o erro que aparece é `Not logged in`; um uid sem entrada no `/etc/passwd` estoura
+`getpass.getuser()` dentro do `torch`; e sem `HOME` declarado o Docker o resolve como `/`,
+o `huggingface_hub` tenta criar `/.cache` e o serviço entra em **crash-loop**. Nenhuma das
+três se apresenta como o que é.
+
+**Achado registrado, não consertado (fora de escopo, como o brief pediu):** a pasta
+`infra/hindsight/` da árvore de **dev** não tem `.env.dev`, só o `.example`, enquanto a da
+prod tem o real — a stack de dev do Hindsight **não é reproduzível a partir da árvore de
+dev**. Ela funciona porque o operador a montou à mão, não porque o produto a monta. Mesma
+família da pendência `2026-08-27-indice-curto-usuario-novo.md`.
+
+**Testes: 22 cenários, 21 verdes e 1 vermelho.** Linha de base antes de tocar em qualquer
+coisa e ao final: **`595 passed, 53 skipped`** nas duas pontas. O vermelho é o cenário
+**D2** — o `kobe-reflect` estourando o timeout de 20 s contra um `reflect` de ~40 s — e ele
+**é o achado mais útil da fase**, não um defeito da entrega: foi a bateria de regressão
+fazendo o que existe para fazer. O turno **não morreu**; a regra "o Hindsight nunca derruba
+um turno" continua de pé (cenário D3 verde). Placar completo no relatório.
+
+**Duas coisas que a própria casa pegou:** o `tests/portability_guard.sh` reprovou um caminho
+de máquina que tinha ficado como default no compose novo — consertado tirando o literal e
+tornando a variável obrigatória, não silenciando o teste. E a produção do Hindsight foi
+conferida **antes e depois de cada subida**: mesmo container `a122c528…`, uptime contínuo,
+do começo ao fim. O total de fatos dela subiu de 1.246 para 1.254 na janela, e **essa
+diferença não é desta sessão**: os 8 entraram no bank `kobe-dev-kobe`, gravados pelo bot de
+produção nas conversas do operador. Nenhuma escrita foi emitida para a porta 8888; os outros
+quatro banks ficaram idênticos.
+
+**Estado do ambiente:** `.env.dev` do Hindsight e `.env` do Kobe de dev restaurados dos
+backups carimbados, os dois com `diff` vazio; Hindsight de dev de volta em `openai` +
+`text-embedding-3-small`. Ficam dois resíduos **aditivos e inertes**, à escolha do operador
+remover: o banco vazio `hindsight_f05` no Postgres de dev (criado para provar o item 2 **sem
+apagar nada**) e o volume `hindsight-hf-cache-dev` com o modelo de 470 MB.
+
+**Reversão:** commits limpos na branch `coder/85ecc404`; toda mudança de valor fora do git
+tem backup carimbado em `.local/backups/` (`20260828-001343`).
+
 ### Highlander v3 — F0: placar do plano de testes (2026-08-27)
 
 **Operador pediu:** a diretriz de 27/08 às 22:29 — *"quem roda esse plano é o Kobe, no

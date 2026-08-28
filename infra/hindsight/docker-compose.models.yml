@@ -1,0 +1,138 @@
+# Hindsight — override de MODELOS (LLM e embeddings) para o ambiente de DEV
+# ============================================================================
+# Sobreposição opcional do `docker-compose.yml`. Existe para responder, em
+# desenvolvimento, duas perguntas que o compose principal não deixa fazer:
+#
+#   1. o Hindsight consegue usar a ASSINATURA do operador em vez da API paga?
+#      (HINDSIGHT_API_LLM_PROVIDER=claude-code)
+#   2. o Hindsight consegue rodar EMBEDDINGS LOCAIS na própria VPS?
+#
+# ⚠️ ESTE ARQUIVO NÃO AGE SOZINHO. Ele só entra em cena com um `-f` EXPLÍCITO.
+#    Isso é deliberado: o nome `docker-compose.override.yml` é auto-carregado
+#    pelo Compose, e se um arquivo com aquele nome chegasse na árvore da
+#    produção por um `git pull`, a produção passaria a montar credencial e a
+#    trocar de modelo SOZINHA, sem ninguém pedir. Com este nome, a produção
+#    pode ter o arquivo em disco e continuar exatamente como está — porque ela
+#    nunca passa o `-f`.
+#
+# Sobe a stack de DEV com ele (repare no --env-file: SEM ele o alvo é a PRODUÇÃO):
+#
+#   cd <arvore-de-dev>/infra/hindsight
+#   docker compose --env-file <caminho-do>/.env.dev \
+#                  -f docker-compose.yml -f docker-compose.models.yml up -d
+#
+# Volta ao estado de origem: rode o mesmo comando SEM o segundo `-f`.
+#
+# POR QUE OS CAMINHOS VÊM DE VARIÁVEL, E NUNCA LITERAIS
+# -----------------------------------------------------
+# Todo repositório de produção é tratado como POTENCIALMENTE PÚBLICO. Caminho
+# absoluto do ambiente de um operador (home, nome de usuário, topologia de
+# disco) não entra em arquivo versionado. Os valores concretos vivem no
+# `.env.dev`, que não é versionado. Veja `.env.dev.example` para a lista.
+# ============================================================================
+
+services:
+  hindsight-app:
+    # ── Quem roda o processo ────────────────────────────────────────────────
+    # A imagem roda como uid 1000. A credencial da assinatura pertence ao
+    # usuário do HOST e tem modo 600 — ou seja, é ILEGÍVEL por qualquer outro
+    # uid. Sem esta linha a sonda falha com "Not logged in" e a conclusão seria
+    # "a assinatura não atravessa", pelo motivo errado.
+    # O default 1000 preserva, letra por letra, o comportamento de hoje.
+    user: "${HINDSIGHT_RUN_UID:-1000}:${HINDSIGHT_RUN_GID:-1000}"
+
+    environment:
+      # ── O nome do usuário, que o uid do host não tem ───────────────────────
+      # Consequência direta da linha `user:` acima: o uid do host não existe no
+      # /etc/passwd da imagem, e `getpass.getuser()` do Python (que o torch
+      # chama para montar o diretório de cache) estoura com
+      # `KeyError: getpwuid(): uid not found`. O serviço sobe e nunca responde.
+      # O `getuser()` do Python 3.11 consulta estas variáveis ANTES do
+      # /etc/passwd — então declará-las resolve sem mexer em usuário nenhum.
+      USER: ${HINDSIGHT_RUN_USER:-hindsight}
+      LOGNAME: ${HINDSIGHT_RUN_USER:-hindsight}
+
+      # E o HOME, pelo mesmo motivo e com estrago maior. O Docker deriva o HOME
+      # do /etc/passwd do container; com um uid que não está lá, ele vira `/`.
+      # Aí o huggingface_hub tenta criar `/.cache`, leva Permission denied, e o
+      # serviço entra em CRASH-LOOP — que se parece com "embedding local não
+      # funciona" e não é. Declarar o HOME é o que faz o cache cair no volume.
+      HOME: ${HINDSIGHT_CONTAINER_HOME:?defina HINDSIGHT_CONTAINER_HOME no .env.dev}
+
+      # ── Modelo do LLM ─────────────────────────────────────────────────────
+      # O compose principal repassa o PROVIDER mas não o MODELO, então hoje só
+      # dá para usar o default de cada provider. Sem isto, comparar
+      # `mini × Haiku × Sonnet` seria impossível.
+      #
+      # A forma é `:?` (obrigatória) de propósito, e não um default vazio: um
+      # HINDSIGHT_API_LLM_MODEL="" faria o serviço subir com modelo vazio SEM
+      # erro visível. Falha silenciosa é exatamente o que este projeto está
+      # tentando matar — melhor o `up` recusar na cara.
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_LLM_MODEL:?defina HINDSIGHT_LLM_MODEL no .env.dev (este override exige modelo explícito)}
+
+      # ── A chave do provider escolhido ─────────────────────────────────────
+      # O compose principal amarra a chave do LLM à `OPENAI_API_KEY`, o que
+      # impede apontar para qualquer outro provider pago (`anthropic`,
+      # `openrouter`, …) sem editar o arquivo que a produção também lê.
+      # Aqui ela é uma variável própria, e o default preserva o de hoje.
+      #
+      # ⚠️ NÃO ponha a chave no `.env.dev` se puder evitar. O Compose lê o
+      # ambiente do SHELL com precedência sobre o `--env-file`, então o jeito
+      # limpo é exportá-la só na linha do `up` — a chave nunca encosta em disco:
+      #   set -a; . <arquivo-de-chaves>; set +a
+      #   HINDSIGHT_LLM_API_KEY="$ANTHROPIC_API_KEY" docker compose … up -d
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:-${OPENAI_API_KEY}}
+
+      # ── E a chave dos EMBEDDINGS, amarrada separadamente ───────────────────
+      # Armadilha silenciosa, encontrada rodando: a chave de embedding do
+      # Hindsight **cai por padrão na chave do LLM**. Então, no instante em que
+      # você aponta o LLM para outro provider, os embeddings passam a mandar a
+      # chave errada para a OpenAI e voltam 401 — e o `reflect` NÃO falha: ele
+      # responde "não há registro", porque as ferramentas de busca dele
+      # engoliram o erro. O número de latência sai bonito e a resposta sai vazia.
+      # Amarrar aqui é o que mantém os dois eixos independentes.
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${OPENAI_API_KEY:?defina OPENAI_API_KEY no .env.dev}
+
+      # ── Embeddings locais (provider `onnx`) ───────────────────────────────
+      # O provider em si já é parametrizado pelo compose principal
+      # (HINDSIGHT_EMBEDDINGS_PROVIDER, default `openai`). O que falta é dizer
+      # QUAL modelo local usar. Os defaults abaixo são os do próprio Hindsight.
+      #
+      # `intfloat/multilingual-e5-small` é multilíngue (100+ idiomas), 384
+      # dimensões, ~118M parâmetros. A família E5 EXIGE os prefixos abaixo —
+      # sem eles a qualidade cai sem dar erro.
+      HINDSIGHT_API_EMBEDDINGS_ONNX_MODEL_ID: ${HINDSIGHT_EMBEDDINGS_ONNX_MODEL_ID:-intfloat/multilingual-e5-small}
+      # As aspas simples são obrigatórias: o valor tem `: ` no meio, e sem elas
+      # o YAML lê isso como um mapa aninhado e o `up` nem chega a rodar.
+      # O espaço no fim faz parte do prefixo — não o apare.
+      HINDSIGHT_API_EMBEDDINGS_ONNX_QUERY_PREFIX: '${HINDSIGHT_EMBEDDINGS_ONNX_QUERY_PREFIX:-query: }'
+      HINDSIGHT_API_EMBEDDINGS_ONNX_PASSAGE_PREFIX: '${HINDSIGHT_EMBEDDINGS_ONNX_PASSAGE_PREFIX:-passage: }'
+
+      # Baixar o modelo na primeira subida leva tempo. Sem folga aqui, o
+      # supervisor da imagem mata o container antes de o download terminar e a
+      # stack entra em restart-loop — que se parece com "não funciona".
+      HINDSIGHT_API_STARTUP_WAIT_SECONDS: ${HINDSIGHT_STARTUP_WAIT_SECONDS:-600}
+
+    volumes:
+      # ── A assinatura ──────────────────────────────────────────────────────
+      # O SDK (`claude_agent_sdk`, JÁ presente na imagem) precisa de um binário
+      # `claude` para spawnar, e a imagem não traz nenhum. Montamos o do host.
+      # READ-ONLY nos dois casos, e a credencial é UM ARQUIVO, não a pasta
+      # inteira: montar `~/.claude` levaria CLAUDE.md, plugins e hooks do
+      # operador para dentro do container — exatamente o que o provider isola
+      # de propósito (laço recursivo de retain, issue #1751 do Hindsight).
+      #
+      # O `ro` da credencial também é escolha: impede que o container corrompa
+      # a credencial do operador. Em troca, ele não consegue rotacionar o token
+      # — quando ele expirar, a renovação tem que acontecer no host.
+      - ${CLAUDE_CLI_BIN:?defina CLAUDE_CLI_BIN no .env.dev}:/usr/local/bin/claude:ro
+      - ${CLAUDE_CREDENTIALS_FILE:?defina CLAUDE_CREDENTIALS_FILE no .env.dev}:${HINDSIGHT_CONTAINER_HOME:?defina HINDSIGHT_CONTAINER_HOME no .env.dev}/.claude/.credentials.json:ro
+
+      # ── Cache do modelo de embedding ──────────────────────────────────────
+      # Sem isto o modelo é rebaixado do HuggingFace a CADA restart. Com o
+      # sufixo de stack, o cache do dev nunca é o mesmo da produção.
+      - hindsight-hf-cache:${HINDSIGHT_CONTAINER_HOME:?defina HINDSIGHT_CONTAINER_HOME no .env.dev}/.cache/huggingface
+
+volumes:
+  hindsight-hf-cache:
+    name: hindsight-hf-cache${HINDSIGHT_STACK_SUFFIX:-}
