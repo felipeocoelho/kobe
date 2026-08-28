@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""kobe-kb-shortindex — deriva o ÍNDICE CURTO de um índice detalhado da KB.
+
+Highlander v3, F0.4 (decisão E9: "o índice é separado, não enxugado — um índice
+curto sempre injetado e um detalhado sob demanda. Nada se perde").
+
+O PROBLEMA QUE ISTO RESOLVE
+---------------------------
+O índice da base do tópico `dev-kobe` cresceu pra 86.213 chars num arquivo só.
+Nenhum teto de injeção plausível cabe isso, então ele nunca entrava no prompt —
+e o agente, sem mapa, abria a base em 44 de 280 turnos. A saída não é cortar
+conteúdo (o detalhado continua inteiro): é ter um mapa DO MAPA, pequeno o
+bastante pra entrar sempre, dizendo quais são as seções e onde está o resto.
+
+POR QUE DETERMINÍSTICO, SEM LLM
+-------------------------------
+Um resumo gerado por modelo apodrece: quem edita o detalhado não roda o resumo
+de novo, e em três meses o curto mente sobre o que existe. Aqui o curto é
+FUNÇÃO do detalhado — títulos de seção e contagem de entradas, nada inventado.
+Rodar duas vezes dá byte a byte o mesmo arquivo, então dá pra chamar de dentro
+de um hook, de um cron ou à mão, sem susto.
+
+USO
+---
+    kobe-kb-shortindex <indice-detalhado.md>              # imprime no stdout
+    kobe-kb-shortindex <indice-detalhado.md> -o <saida>   # grava
+    kobe-kb-shortindex <detalhado.md> --teto 4000
+
+A saída aponta pro caminho ABSOLUTO do detalhado — é o que o agente vai passar
+pro `Read` quando precisar do conteúdo inteiro.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+TETO_PADRAO = 4000
+
+_SECAO = re.compile(r"^##\s+(?P<titulo>.+?)\s*$")
+_ENTRADA = re.compile(r"^\s*[-*]\s+")
+
+
+def secoes(texto: str) -> list[tuple[str, int]]:
+    """`[(título da seção, nº de entradas de lista)]`, na ordem do arquivo."""
+    achadas: list[tuple[str, int]] = []
+    atual: str | None = None
+    contagem = 0
+    for linha in texto.splitlines():
+        m = _SECAO.match(linha)
+        if m:
+            if atual is not None:
+                achadas.append((atual, contagem))
+            atual = m.group("titulo")
+            contagem = 0
+        elif atual is not None and _ENTRADA.match(linha):
+            contagem += 1
+    if atual is not None:
+        achadas.append((atual, contagem))
+    return achadas
+
+
+def titulo(texto: str, padrao: str = "Base de conhecimento") -> str:
+    for linha in texto.splitlines():
+        if linha.startswith("# "):
+            return linha[2:].strip()
+    return padrao
+
+
+def montar(detalhado: Path, *, teto: int = TETO_PADRAO) -> str:
+    texto = detalhado.read_text(encoding="utf-8")
+    achadas = secoes(texto)
+    total = sum(n for _, n in achadas)
+
+    linhas = [
+        f"# {titulo(texto)} — índice curto",
+        "",
+        "> Gerado por `kobe-kb-shortindex` a partir do índice detalhado. **Este**",
+        "> arquivo é injetado no prompt a cada turno; o detalhado é lido sob",
+        "> demanda. Não edite este aqui à mão — edite o detalhado e gere de novo.",
+        "",
+        f"**Índice detalhado (abrir com `Read` quando precisar):** `{detalhado.resolve()}`",
+        f"— {len(texto)} chars, {len(achadas)} seções, {total} entradas.",
+        "",
+        "## Como usar",
+        "",
+        "1. A pergunta é sobre uma destas seções? Então a resposta está na base.",
+        "2. Abra o índice detalhado acima com `Read` e ache o arquivo certo.",
+        "3. Abra o arquivo e responda a partir do que leu — não de memória.",
+        "",
+        "## Seções da base",
+        "",
+    ]
+    for nome, n in achadas:
+        linhas.append(f"- **{nome}** — {n} entrada(s)")
+
+    saida = "\n".join(linhas) + "\n"
+    if len(saida) > teto:
+        # Cortar seção é perder mapa. Se não coube, quem tem que saber é quem
+        # roda — não é o tipo de coisa pra resolver calado (é literalmente o
+        # defeito que a F0.4 conserta em outro lugar).
+        print(
+            f"aviso: índice curto ficou com {len(saida)} chars, acima do teto "
+            f"{teto}. Ele está completo — suba o teto ou reduza o número de "
+            "seções do detalhado.",
+            file=sys.stderr,
+        )
+    return saida
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Deriva o índice curto do detalhado.")
+    ap.add_argument("detalhado", type=Path, help="o índice detalhado (.md)")
+    ap.add_argument("-o", "--saida", type=Path, help="onde gravar (default: stdout)")
+    ap.add_argument("--teto", type=int, default=TETO_PADRAO, help="teto de chars")
+    args = ap.parse_args(argv)
+
+    if not args.detalhado.is_file():
+        print(f"não achei: {args.detalhado}", file=sys.stderr)
+        return 2
+
+    texto = montar(args.detalhado, teto=args.teto)
+    if args.saida:
+        args.saida.write_text(texto, encoding="utf-8")
+        print(f"{args.saida} — {len(texto)} chars")
+    else:
+        sys.stdout.write(texto)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

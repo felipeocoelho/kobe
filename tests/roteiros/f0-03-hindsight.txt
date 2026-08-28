@@ -1,0 +1,12 @@
+# F0 — bateria 3: retain COM carimbo de tempo, no bank de dev
+#
+# Pré-condição (montada pela sessão, e desfeita depois): no .env de DEV,
+#   HINDSIGHT_ENABLED=true e HINDSIGHT_RETAIN=true   (RECALL fica false)
+#
+# O que prova: a mensagem atravessa o bot e vira memória no bank
+# `kobe-dev-ambiente-dev` **com o `timestamp` da hora em que foi dita** — o
+# carimbo que, omitido, desliga a recuperação temporal inteira.
+# A verificação NÃO é o log de saída: é consultar a API do Hindsight depois.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f0-03-hindsight.txt --thread-id 2
+anota que o marcador desta bateria da F0 é CARIMBO-F0, e responde só "ok".

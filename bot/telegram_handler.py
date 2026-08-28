@@ -57,7 +57,7 @@ from bot.turn_classifier import ROUTE_BACKGROUND, classify_turn
 from bot.topic_manager import (
     TOPIC_CONTEXT_CHAR_LIMIT,
     archive_active_session,
-    consume_truncated_marker,
+    consume_markers,
     count_messages,
     ensure_active_session,
     ensure_topic,
@@ -75,6 +75,7 @@ from bot.topic_manager import (
     unique_knowledge_path,
 )
 from bot.transcribe import Transcriber, TranscriptionError
+from bot.transcription_normalizer import normalize_transcription
 from bot import hindsight_client
 from bot import uploads
 from bot.uploads import UploadDescriptor
@@ -484,11 +485,49 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+# Anti-ruído do aviso de degradação da KB (F0.4). Chave = slug; valor = a faixa
+# de tamanho já avisada. Estado de PROCESSO, de propósito: no restart o operador
+# é lembrado de novo (é uma pendência real, não um alarme resolvido), mas dentro
+# de um processo ele não leva o mesmo aviso a cada turno.
+_DEGRADACAO_AVISADA: dict[str, int] = {}
+_DEGRADACAO_FAIXA_CHARS = 1000
+
+
+def _deve_avisar_degradacao(slug: Optional[str], degradacao) -> bool:
+    """True na 1ª vez e sempre que a degradação mudar de faixa (~1 KB)."""
+    chave = slug or "(sem slug)"
+    faixa = degradacao.chars_fora // _DEGRADACAO_FAIXA_CHARS
+    if _DEGRADACAO_AVISADA.get(chave) == faixa:
+        return False
+    _DEGRADACAO_AVISADA[chave] = faixa
+    return True
+
+
+# ── Gates da memória durável (F0.3) ───────────────────────────────────────
+# Os dois caminhos do Hindsight têm perfis de risco OPOSTOS e por isso são
+# gates separados, não um só:
+#   - RETAIN (escrita) é silencioso, barato e assíncrono no servidor → fica LIGADO.
+#   - RECALL (leitura injetada em TODO turno) custa 4 a 7 segundos medidos contra
+#     o bank de produção (934 fatos) e entrega ~200 tokens, que é 0,3% do prompt.
+#     É o pior negócio do turno, e piora sozinho: a mesma consulta num bank de 10
+#     fatos leva 0,5 s. → fica DESLIGADO até a F4 pôr o `topic-briefing` no lugar,
+#     que é o mesmo espaço no prompt com latência zero.
+# Extraídos como função pra que "desligar o recall NÃO desliga a gravação" seja
+# uma afirmação testável, e não um comentário.
+def _retain_ativo(config: Config) -> bool:
+    return bool(config.hindsight_enabled and config.hindsight_retain_enabled)
+
+
+def _recall_ativo(config: Config) -> bool:
+    return bool(config.hindsight_enabled and config.hindsight_recall_enabled)
+
+
 async def _download_and_transcribe(
     message: Message,
     media,
     transcriber: Transcriber,
     thread_id: Optional[int],
+    config: Optional[Config] = None,
 ) -> Optional[str]:
     """Baixa e transcreve o áudio FORA de qualquer seção crítica (preparo puro,
     em paralelo). Mantém o "digitando…" vivo durante o preparo. Em falha/vazio,
@@ -574,6 +613,19 @@ async def _download_and_transcribe(
         except Exception:  # noqa: BLE001 — aviso é nice-to-have
             logger.warning("falha enviando aviso de fallback", exc_info=True)
 
+    # Normalização determinística (F0.6 / E11) — AQUI, e só aqui: depois do
+    # Whisper e ANTES de qualquer gravação, que é o que impede o erro de
+    # transcrição de virar fato permanente na memória durável. Só toca áudio;
+    # texto digitado é intenção do operador e não passa por este caminho.
+    # Atrás de flag, default OFF até o operador aprovar a lista do relatório.
+    if config is not None:
+        text = normalize_transcription(
+            config.kobe_home,
+            text,
+            enabled=config.transcription_normalizer_enabled,
+            origem=f"telegram:{message.message_id}",
+        )
+
     return text
 
 
@@ -612,7 +664,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         assembler = _get_assembler(config)
         idx = assembler.reserve(message.chat_id, thread_id)
         try:
-            text = await _download_and_transcribe(message, media, transcriber, thread_id)
+            text = await _download_and_transcribe(
+                message, media, transcriber, thread_id, config
+            )
         except Exception:  # noqa: BLE001 — libera o slot antes de propagar
             await assembler.release(message.chat_id, thread_id, idx)
             raise
@@ -636,7 +690,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # seção crítica, entrada na seção crítica na ordem de chegada. ──
     ticket = _take_ticket(message.chat_id, thread_id)
     try:
-        text = await _download_and_transcribe(message, media, transcriber, thread_id)
+        text = await _download_and_transcribe(
+            message, media, transcriber, thread_id, config
+        )
         if text is None:
             return
         # ✍️ substitui o 👀 (mesmo sinal do caminho novo — a borda legada não
@@ -893,7 +949,35 @@ async def _handle_user_text(
     history, (slug, raw_context) = await asyncio.gather(
         _load_history(), _load_topic_ctx()
     )
-    topic_context, truncated = consume_truncated_marker(raw_context)
+    topic_context, truncated, degradacao = consume_markers(raw_context)
+    # F0.4: a base de conhecimento que não coube deixou de sumir em silêncio.
+    # Anti-ruído: um aviso por tópico por processo, reemitido só quando o
+    # tamanho muda de faixa (~1 KB) — senão vira uma mensagem por turno, que
+    # é pior que o silêncio que estamos consertando.
+    if degradacao and _deve_avisar_degradacao(slug, degradacao):
+        # Logar ANTES de mandar: o aviso é o conserto de um silêncio, então ele
+        # próprio precisa deixar rastro verificável mesmo se o envio falhar.
+        logger.info(
+            "topic_context: avisando degradação da KB slug=%s fora=%d teto=%d arquivos=%s",
+            slug, degradacao.chars_fora, degradacao.teto, ",".join(degradacao.arquivos),
+        )
+        try:
+            await message.reply_text(
+                (
+                    f"⚠️ Base de conhecimento de <code>{slug}</code>: "
+                    f"{len(degradacao.arquivos)} arquivo(s) ficaram FORA do prompt "
+                    f"({degradacao.chars_fora} chars além do teto de "
+                    f"{degradacao.teto}) e só entram se eu abrir com Read: "
+                    f"<code>{', '.join(degradacao.arquivos)}</code>.\n\n"
+                    "Pra voltar a ter contexto sempre à mão, separe um índice "
+                    "curto (o resto continua acessível sob demanda) ou suba "
+                    "<code>TOPIC_KNOWLEDGE_INLINE_LIMIT</code>."
+                ),
+                message_thread_id=thread_id,
+                parse_mode="HTML",
+            )
+        except Exception:  # noqa: BLE001 — aviso é nice-to-have, não derrubar fluxo
+            logger.warning("falha enviando aviso de degradação da KB", exc_info=True)
     if truncated:
         try:
             await message.reply_text(
@@ -932,7 +1016,7 @@ async def _handle_user_text(
     # OPERADOR (ground truth — ele disse), não da resposta gerada (que pode
     # alucinar). Fire-and-forget: async no servidor + best-effort, não bloqueia
     # nem derruba o turno. Fonte rastreável na metadata (tópico + message_id).
-    if config.hindsight_enabled and config.hindsight_retain_enabled:
+    if _retain_ativo(config):
         # F2 (Highlander v2): agrupa por document_id ESTÁVEL (= sessão) com append —
         # a conversa vira UM documento que cresce, não N memórias soltas (conserta o
         # anti-padrão "UUID aleatório duplica documento"). context/tags melhoram a
@@ -951,6 +1035,13 @@ async def _handle_user_text(
                     "message_id": message.message_id,
                     "source": "telegram",
                 },
+                # F0.7: quando o operador FALOU, não quando o Hindsight gravou.
+                # Sem este carimbo a recuperação temporal fica desligada (doc do
+                # Hindsight) — e é ela que separa "decidido em julho" de "pedido
+                # em maio". `message.date` vem do Telegram, com fuso.
+                timestamp=(
+                    message.date.isoformat() if getattr(message, "date", None) else None
+                ),
                 timeout=config.hindsight_timeout_seconds,
             )
         )
@@ -1009,7 +1100,7 @@ async def _handle_user_text(
     # esta mensagem, por tópico. Best-effort (None se off, serviço fora, ou nada
     # relevante) — nunca derruba o turno. Adiciona latência só quando ligado.
     durable_memory: Optional[str] = None
-    if config.hindsight_enabled and config.hindsight_recall_enabled:
+    if _recall_ativo(config):
         _recall = await hindsight_client.recall(
             config.hindsight_base_url,
             hindsight_client.bank_id_for_topic(slug),

@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""kobe-normalize-report — o que o normalizador MUDARIA, sem mudar nada.
+
+Highlander v3, F0.6. Este é o **portão humano** do item 6: o critério de pronto
+da fase diz, com todas as letras, que o normalizador roda contra as mensagens já
+gravadas em **modo relatório**, e que o operador **aprova a lista** antes de ele
+entrar em produção.
+
+Por isso este script é RIGOROSAMENTE somente-leitura: um `SELECT`, um dicionário
+e um relatório. Ele não tem código de `UPDATE`, e não é para ganhar um — quando
+chegar a hora de normalizar histórico (se chegar), isso é decisão do operador e
+merece um script próprio, com backup e reversão, não uma flag escondida aqui.
+
+USO
+---
+    kobe-normalize-report                    # todas as mensagens do banco
+    kobe-normalize-report --so-audio         # só as transcritas de áudio
+    kobe-normalize-report --exemplos 5       # nº de exemplos por regra
+    kobe-normalize-report -o relatorio.md    # grava em vez de imprimir
+
+O banco vem de `DATABASE_URL` — rode a partir da árvore cujo `.env` você quer.
+Em dev isso é o `kobe_dev`; a bateria da F0 rodou exatamente assim.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
+if (
+    _VENV_PY.exists()
+    and sys.executable != str(_VENV_PY)
+    and importlib.util.find_spec("psycopg") is None
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+from bot import transcription_normalizer as tn  # noqa: E402
+
+
+def _database_url() -> str:
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    env = _REPO_ROOT / ".env"
+    if env.is_file():
+        for linha in env.read_text(encoding="utf-8").splitlines():
+            if linha.startswith("DATABASE_URL="):
+                return linha.split("=", 1)[1].strip()
+    print("kobe-normalize-report: DATABASE_URL ausente.", file=sys.stderr)
+    sys.exit(2)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="O que o normalizador mudaria (só leitura).")
+    ap.add_argument("--so-audio", action="store_true", help="só mensagens de áudio")
+    ap.add_argument("--exemplos", type=int, default=3, help="exemplos por regra")
+    ap.add_argument("-o", "--saida", type=Path, help="grava em arquivo")
+    args = ap.parse_args(argv)
+
+    home = Path(os.environ.get("KOBE_HOME", _REPO_ROOT))
+    regras = tn.load_glossary(home)
+    if not regras:
+        print(
+            f"nenhuma regra em {home}/user-data/transcription-glossary.md — "
+            "copie o .example e ajuste antes de rodar o relatório.",
+            file=sys.stderr,
+        )
+        return 2
+
+    import psycopg
+
+    where = "WHERE audio_transcribed" if args.so_audio else ""
+    with psycopg.connect(_database_url()) as conn:
+        linhas = conn.execute(
+            f"SELECT id, role, content, audio_transcribed, created_at "
+            f"FROM messages {where} ORDER BY created_at"
+        ).fetchall()
+
+    por_regra: dict[str, list[tuple]] = defaultdict(list)
+    contagem: Counter = Counter()
+    mensagens_afetadas = 0
+    por_papel: Counter = Counter()
+
+    for _id, role, content, audio, criada in linhas:
+        if not content:
+            continue
+        _, mudancas = tn.normalize(content, regras)
+        if not mudancas:
+            continue
+        mensagens_afetadas += 1
+        por_papel[("áudio" if audio else "texto") + f"/{role}"] += 1
+        for c in mudancas:
+            contagem[f"{c.de} → {c.para}"] += c.n
+            por_regra[f"{c.de} → {c.para}"].append((_id, criada, role, audio, content))
+
+    out: list[str] = []
+    w = out.append
+    w("# Relatório do normalizador de transcrição — modo RELATÓRIO (nada foi alterado)")
+    w("")
+    w(f"- Banco varrido: **{len(linhas)} mensagens**"
+      f"{' (só áudio)' if args.so_audio else ''}")
+    w(f"- Regras no glossário: **{len(regras)}**")
+    w(f"- Mensagens que o normalizador mudaria: **{mensagens_afetadas}**")
+    w(f"- Substituições no total: **{sum(contagem.values())}**")
+    if por_papel:
+        w("- Por origem: " + " · ".join(f"{k} **{v}**" for k, v in sorted(por_papel.items())))
+    w("")
+    w("> **Atenção ao ler:** hoje o normalizador só age em texto vindo de ÁUDIO e"
+      " só de mensagens NOVAS. As linhas de `texto/` e as de `assistant` aparecem"
+      " aqui como diagnóstico do glossário — elas não seriam tocadas em produção."
+      " Dado histórico não é reescrito por este script nem por nenhum outro sem"
+      " decisão explícita do operador.")
+    w("")
+
+    if not contagem:
+        w("Nenhuma mensagem seria alterada.")
+    for regra, n in contagem.most_common():
+        alvos = por_regra[regra]
+        w(f"## `{regra}` — {n} ocorrência(s) em {len(alvos)} mensagem(ns)")
+        w("")
+        for _id, criada, role, audio, content in alvos[: args.exemplos]:
+            marca = "🎤" if audio else "⌨️"
+            trecho = " ".join(content.split())
+            if len(trecho) > 240:
+                trecho = trecho[:240] + "…"
+            w(f"- {marca} `{role}` {criada:%d/%m/%Y %H:%M} — {trecho}")
+        if len(alvos) > args.exemplos:
+            w(f"- … e mais {len(alvos) - args.exemplos} mensagem(ns).")
+        w("")
+
+    texto = "\n".join(out) + "\n"
+    if args.saida:
+        args.saida.write_text(texto, encoding="utf-8")
+        print(f"{args.saida} — {len(texto)} chars")
+    else:
+        sys.stdout.write(texto)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

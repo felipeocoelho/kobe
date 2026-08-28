@@ -70,6 +70,10 @@ class Config:
     # narrar status de sala/job de memória (a dor da "sala esperando" que já acabou).
     # Read-only, best-effort. Off = comportamento de hoje. Ver bot/memory/background_state.py.
     background_state_gate_enabled: bool
+    # Normalizador determinístico de transcrição (Highlander v3, F0.6 / E11).
+    # Default OFF: o critério de pronto da F0 exige que o operador aprove a
+    # lista do `kobe-normalize-report` antes de ele reescrever transcrição.
+    transcription_normalizer_enabled: bool
     # Memória durável via Hindsight (Highlander Frente 2.3): recall na entrada
     # (traz fato durável relevante pro prompt) + retain no fim do turno (destila
     # fato da msg do operador). Serviço REST no host (infra/hindsight/). Off =
@@ -270,6 +274,9 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         grounding_signals_enabled=_parse_bool(os.getenv("GROUNDING_SIGNALS_ENABLED", "true")),
         background_state_gate_enabled=_parse_bool(
             os.getenv("BACKGROUND_STATE_GATE_ENABLED", "true")
+        ),
+        transcription_normalizer_enabled=_parse_bool(
+            os.getenv("TRANSCRIPTION_NORMALIZER_ENABLED")
         ),
         hindsight_enabled=_parse_bool(os.getenv("HINDSIGHT_ENABLED", "true")),
         # F1 (Highlander v2): retain ON (segue construindo a memória em silêncio),

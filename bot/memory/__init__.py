@@ -24,6 +24,8 @@ from bot.memory.aging import (
 from bot.memory.background_state import render_background_state
 from bot.memory.curated_core import (
     CURATED_CORE_CHAR_LIMIT,
+    CURATED_CORE_MEMORY_CHAR_LIMIT,
+    CURATED_CORE_USER_CHAR_LIMIT,
     load_curated_core,
 )
 from bot.memory.grounding import render_grounding_signals
@@ -40,6 +42,8 @@ __all__ = [
     "humanizar_idade",
     "parse_ts",
     "CURATED_CORE_CHAR_LIMIT",
+    "CURATED_CORE_MEMORY_CHAR_LIMIT",
+    "CURATED_CORE_USER_CHAR_LIMIT",
     "IMMEDIATE_HARD_CAP",
     "IMMEDIATE_MIN_COUNT",
     "IMMEDIATE_WINDOW_SECONDS",

@@ -20,7 +20,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from bot.db import KobeDB
 
@@ -34,14 +34,20 @@ GENERAL_THREAD_ID: int = 0
 # reorganizar (mover algo pra saved_artifacts, dividir o KB, etc.).
 TOPIC_CONTEXT_CHAR_LIMIT = 20_000
 
-# SPR P1 #3: até este tamanho (chars) a pasta knowledge/ do tópico vai
-# INLINE no prompt (comportamento histórico). Acima disso, injetamos só um
-# ÍNDICE (caminhos + prévia) e o agente lê os arquivos sob demanda com Read
-# — KB grande inflava o prompt a cada turno e atrasava o primeiro token.
-# `prompt.md` (instruções do tópico) vai SEMPRE inline. Rollback: setar a
-# env bem alta e reiniciar o bot.
+# Orçamento (chars) da pasta knowledge/ do tópico dentro do prompt (SPR P1 #3).
+# O que não couber vira ÍNDICE (caminho + prévia) e o agente lê sob demanda com
+# Read — KB grande inflava o prompt a cada turno e atrasava o primeiro token.
+# `prompt.md` (instruções do tópico) vai SEMPRE inline.
+#
+# 8.000 → 12.000 na F0.4 do Highlander v3: o teto antigo cabia menos que o
+# índice curado de um único tópico, e a decisão E9 é "índice curto sempre
+# injetado". ~3.000 tokens, contra os ~71k de prompt medianos.
+#
+# O orçamento é gasto ARQUIVO A ARQUIVO, em ordem alfabética (ver
+# `load_topic_context`), e não em tudo-ou-nada. Rollback: setar a env bem alta
+# (tudo inline) ou de volta em 8000, e reiniciar o bot.
 TOPIC_KNOWLEDGE_INLINE_LIMIT = int(
-    os.getenv("TOPIC_KNOWLEDGE_INLINE_LIMIT", "8000")
+    os.getenv("TOPIC_KNOWLEDGE_INLINE_LIMIT", "12000")
 )
 
 # Sufixo interno que `load_topic_context` adiciona quando a saída foi
@@ -49,6 +55,12 @@ TOPIC_KNOWLEDGE_INLINE_LIMIT = int(
 # usa pra disparar 1 aviso ao operador. Caracteres NUL não aparecem
 # em conteúdo real de markdown, então não há colisão.
 _TRUNCATED_MARKER = "\x00TRUNCATED\x00"
+
+# Idem, pro caso em que a base de conhecimento não coube inteira e parte dela
+# ficou sob demanda (F0.4). Carrega payload — `chars_fora:teto:nome|nome|…` —
+# porque o aviso ao operador tem que dizer O QUE ficou de fora, não só que algo
+# ficou. Até a F0 isso degradava com um `logger.info` que ninguém lê.
+_DEGRADED_PREFIX = "\x00DEGRADED:"
 
 
 def _normalize_thread_id(thread_id: Optional[int]) -> int:
@@ -273,49 +285,82 @@ def load_topic_context(
             if content:
                 kfiles.append((f, content))
 
+    # Orçamento POR ARQUIVO, na ordem alfabética (Highlander v3, F0.4 / E9).
+    #
+    # Antes era tudo-ou-nada: se a SOMA passasse do teto, a pasta inteira virava
+    # ponteiro. Um arquivo grande derrubava todos os pequenos junto — e é
+    # exatamente o caso do tópico `dev-kobe`, cujo índice cresceu pra 86.213
+    # chars sozinho. Resultado medido: a base curada entrou em 44 de 280 turnos.
+    #
+    # Agora cada arquivo entra enquanto couber, na ordem que já é a convenção
+    # documentada (`00-`, `01-`, …). É isso que faz um `00-indice-curto.md` de
+    # 3 KB ser injetado SEMPRE, por construção da ordem, enquanto o detalhado
+    # fica sob demanda. Determinístico e sem convenção nova de nome.
     total_knowledge = sum(len(c) for _, c in kfiles)
-    if total_knowledge <= knowledge_inline_limit:
-        for f, content in kfiles:
-            chunks.append(f"## {slug}/knowledge/{f.name}\n\n{content}")
-    elif kfiles:
+    inline: list[tuple[Path, str]] = []
+    sob_demanda: list[tuple[Path, str]] = []
+    orcamento = knowledge_inline_limit
+    for f, content in kfiles:
+        if len(content) <= orcamento:
+            inline.append((f, content))
+            orcamento -= len(content)
+        else:
+            sob_demanda.append((f, content))
+
+    for f, content in inline:
+        chunks.append(f"## {slug}/knowledge/{f.name}\n\n{content}")
+
+    if sob_demanda:
+        fora = sum(len(c) for _, c in sob_demanda)
         idx = [
-            f"## Base de conhecimento de '{slug}' — extensa "
-            f"({total_knowledge} chars), carregada sob demanda",
+            f"## Base de conhecimento de '{slug}' — {len(sob_demanda)} arquivo(s) "
+            f"sob demanda ({fora} chars fora do prompt)",
             "",
             "Os arquivos abaixo NÃO estão inline pra não inflar o prompt a "
             "cada turno. Use a ferramenta `Read` no caminho absoluto SÓ quando "
             "a mensagem do operador exigir aquele conteúdo:",
             "",
         ]
-        for f, content in kfiles:
-            idx.append(f"- `{f}` — {_first_line_preview(content)}")
+        for f, content in sob_demanda:
+            idx.append(f"- `{f}` ({len(content)} chars) — {_first_line_preview(content)}")
         chunks.append("\n".join(idx))
         logger.info(
-            "topic_context: '%s' knowledge=%d chars > limite %d — modo índice "
-            "(%d arquivo(s) sob demanda)",
-            slug, total_knowledge, knowledge_inline_limit, len(kfiles),
+            "topic_context: '%s' knowledge=%d chars, teto %d — %d inline, "
+            "%d sob demanda (%d chars fora)",
+            slug, total_knowledge, knowledge_inline_limit,
+            len(inline), len(sob_demanda), fora,
         )
 
     if not chunks:
         return None
 
     full = "\n\n---\n\n".join(chunks)
-    if len(full) <= TOPIC_CONTEXT_CHAR_LIMIT:
-        return full
 
-    original_len = len(full)
-    truncated = full[:TOPIC_CONTEXT_CHAR_LIMIT]
-    cut = truncated.rfind("\n")
-    if cut > 0:
-        truncated = truncated[:cut]
-    truncated += "\n\n[...truncado em TOPIC_CONTEXT_CHAR_LIMIT chars...]"
-    logger.warning(
-        "topic_context: tópico '%s' estourou limite (%d > %d chars) — truncado",
-        slug,
-        original_len,
-        TOPIC_CONTEXT_CHAR_LIMIT,
-    )
-    return truncated + _TRUNCATED_MARKER
+    # Marcadores internos vão no FIM, depois da truncagem — se fossem parte do
+    # texto, a própria truncagem poderia cortá-los e o aviso sumiria calado,
+    # que é o defeito que a F0.4 existe pra consertar.
+    sufixo = ""
+    if sob_demanda:
+        nomes = "|".join(f.name for f, _ in sob_demanda)
+        fora = sum(len(c) for _, c in sob_demanda)
+        sufixo += f"{_DEGRADED_PREFIX}{fora}:{knowledge_inline_limit}:{nomes}\x00"
+
+    if len(full) > TOPIC_CONTEXT_CHAR_LIMIT:
+        original_len = len(full)
+        truncated = full[:TOPIC_CONTEXT_CHAR_LIMIT]
+        cut = truncated.rfind("\n")
+        if cut > 0:
+            truncated = truncated[:cut]
+        full = truncated + "\n\n[...truncado em TOPIC_CONTEXT_CHAR_LIMIT chars...]"
+        logger.warning(
+            "topic_context: tópico '%s' estourou limite (%d > %d chars) — truncado",
+            slug,
+            original_len,
+            TOPIC_CONTEXT_CHAR_LIMIT,
+        )
+        sufixo += _TRUNCATED_MARKER
+
+    return full + sufixo
 
 
 def list_unwelcomed_topics(db: KobeDB) -> list[dict]:
@@ -414,15 +459,59 @@ def unique_upload_path(kobe_home: Path, slug: str, basename: str) -> Path:
         i += 1
 
 
-def consume_truncated_marker(context: Optional[str]) -> tuple[Optional[str], bool]:
-    """Retorna `(contexto_limpo, foi_truncado)`. Tira o marcador interno
-    antes de injetar no prompt.
+class KnowledgeDegraded(NamedTuple):
+    """O que ficou fora do prompt, pra o aviso poder ser específico."""
+
+    chars_fora: int
+    teto: int
+    arquivos: tuple[str, ...]
+
+
+def consume_markers(
+    context: Optional[str],
+) -> tuple[Optional[str], bool, Optional[KnowledgeDegraded]]:
+    """Retorna `(contexto_limpo, foi_truncado, degradacao)`.
+
+    Tira TODOS os marcadores internos do fim antes de injetar no prompt, em
+    qualquer ordem — quem escreve não deve depender de quem lê saber a ordem.
     """
     if context is None:
-        return None, False
-    if context.endswith(_TRUNCATED_MARKER):
-        return context[: -len(_TRUNCATED_MARKER)].rstrip(), True
-    return context, False
+        return None, False, None
+
+    truncado = False
+    degradacao: Optional[KnowledgeDegraded] = None
+    mudou = True
+    while mudou:
+        mudou = False
+        if context.endswith(_TRUNCATED_MARKER):
+            context = context[: -len(_TRUNCATED_MARKER)]
+            truncado = True
+            mudou = True
+            continue
+        if context.endswith("\x00"):
+            inicio = context.rfind(_DEGRADED_PREFIX)
+            if inicio >= 0:
+                payload = context[inicio + len(_DEGRADED_PREFIX) : -1]
+                context = context[:inicio]
+                mudou = True
+                try:
+                    fora, teto, nomes = payload.split(":", 2)
+                    degradacao = KnowledgeDegraded(
+                        int(fora), int(teto), tuple(n for n in nomes.split("|") if n)
+                    )
+                except ValueError:  # payload corrompido não derruba o turno
+                    logger.warning("topic_context: marcador de degradação ilegível")
+    return context.rstrip(), truncado, degradacao
+
+
+def consume_truncated_marker(context: Optional[str]) -> tuple[Optional[str], bool]:
+    """Compatibilidade: `(contexto_limpo, foi_truncado)`, ignorando a degradação.
+
+    Usado por quem só precisa do texto limpo (`bot/resume.py`) — mas ainda assim
+    **tem** que passar por aqui, senão o marcador vazaria pro prompt.
+    """
+    texto, truncado, _ = consume_markers(context)
+    return texto, truncado
 
 
 def _now_iso() -> str:

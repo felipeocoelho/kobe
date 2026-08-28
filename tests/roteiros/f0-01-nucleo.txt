@@ -1,0 +1,14 @@
+# F0 — bateria 1: o núcleo curado (MEMORY.md) está mesmo entrando no prompt
+#
+# Pré-condição (montada pela sessão, e desfeita depois): uma linha CANÁRIO em
+# user-data/identity/MEMORY.md — uma string que não existe em nenhum outro
+# lugar do disco nem do banco. Se ela sai na resposta, ela entrou no prompt.
+# É a única prova honesta de injeção: perguntar "você lembra de X?" e acreditar
+# no "lembro" testaria a educação do modelo, não o código.
+#
+# A linha 2 é a mesma dos dois lados do experimento (com e sem MEMORY.md), pra
+# o delta de `prompt_len` no log `claude_run` medir o arquivo, e não a pergunta.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f0-01-nucleo.txt --thread-id 2
+sem abrir arquivo nenhum e sem procurar: o que o teu núcleo curado diz sobre CANARIO-F0-7Q4X? responde em uma linha.
+@6 responde só "ok".

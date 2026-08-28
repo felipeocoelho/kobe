@@ -4,6 +4,286 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Highlander v3 — F0: placar do plano de testes (2026-08-27)
+
+**Operador pediu:** a diretriz de 27/08 às 22:29 — *"quem roda esse plano é o Kobe, no
+ambiente de desenvolvimento; a mensagem 'tá pronto' passa a significar **tá pronto e já
+testei**"* —, com teste de comportamento **ponta-a-ponta pelo bot**, via `infra/dev_inject.py`,
+e o plano de testes nascendo como **arquivo de roteiro**.
+
+**Por quê:** as três camadas de dev (código, banco `kobe_dev`, e agora o bot
+`kobe-dev.service`/`@hal_dev_bot`) tornaram possível provar comportamento sem depender do
+operador digitar. Sem isso, metade da F0 seria "passou no pytest" — que não é a mesma coisa
+que "funciona conversando".
+
+**Foi feito:** quatro roteiros versionados em `tests/roteiros/` (`f0-01-nucleo`,
+`f0-02-kb`, `f0-03-hindsight`, `f0-04-regressao`) — são o artefato executável, e as fases
+seguintes reusam. **42 cenários executados: 41 verdes, 0 vermelhos, 1 com ressalva; 1 não
+executado.** Destes, **13 rodaram pelo bot**. Relatório completo com a evidência de cada um
+em `.local/f0-testes/RESULTADO.md`.
+
+**Linha de base medida ANTES de tocar em qualquer coisa:** `555 passed, 53 skipped`, mais
+uma bateria `f0-04` pelo bot. **Ao final: `595 passed, 53 skipped`** — 40 testes novos,
+nenhuma regressão.
+
+**As três provas que valem ser lidas:**
+- **A7/A8** — canário no `MEMORY.md`: mesma pergunta, sem o arquivo o bot disse *"não
+  aparece em lugar nenhum do meu núcleo curado"*; com o arquivo citou a linha e **notou a
+  própria contradição** — *"a resposta que te dei há um minuto era falsa"*. `prompt_len`
+  6.696 → 8.792.
+- **B7/B8** — o bot listou as 12 seções da base com `tool_calls=0` (*"direto do índice curto
+  que já vem no meu prompt"*) e, mandado abrir o detalhado, contou **13 entradas** — o mesmo
+  número que o gerador determinístico tinha contado. Modelo e código concordando sobre a
+  mesma fonte.
+- **F7** — perguntado sobre o passado, o agente **foi buscar sozinho**: o log do Hindsight de
+  dev registra `reflect` às 02:16:03–02:16:08, dentro da janela do turno, com a consulta
+  *"bateria de testes F0 Highlander v3"*. É o item 2 funcionando, verificado no servidor e
+  não na resposta.
+
+**Duas lacunas declaradas (nomeadas no plano antes de executar, não depois):**
+- **L1** — a magnitude dos 4–7 s **não** é reproduzível em dev: o bank de dev tem 1
+  documento e a chamada custa 0,33 s de mediana ali; os 4–7 s vêm dos 934 fatos de produção.
+  Dev prova a direção, não o tamanho.
+- **L3** — o normalizador não tem prova ponta-a-ponta: o `dev_inject` injeta texto e o
+  normalizador só toca áudio. Não foi fechada baixando o critério.
+
+**Estado do ambiente de dev:** tudo que foi mexido pra testar foi restaurado e conferido —
+`.env` (`diff` idêntico ao backup), a KB do tópico, e o `MEMORY.md` (sem o canário e sem o
+fato que o próprio agente gravou durante a bateria, que era artefato de teste).
+
+**Reversão de tudo:** `git revert` do merge `coder/4d1d3791`; SHA pré-merge
+`66fff37cbc0ce78fd1d7342cf2bb68e3747aea8f`.
+
+### fix: o `kobe-reflect` estava quebrado no caminho em que o agente o chama (2026-08-27)
+
+**Operador pediu:** nada — este apareceu **rodando o plano de testes da F0** (cenário F6),
+e o conserto entrou porque o item 2 da F0 é justamente *documentar o `kobe-reflect` pro
+agente usar*. Documentar uma ferramenta quebrada seria pior que não documentar.
+
+**Por quê:** o helper re-executa no venv do projeto quando as dependências faltam no
+interpretador atual, mas o guard conferia **só o `psycopg`**. Nesta VPS o python do sistema
+**tem** psycopg e **não tem** httpx — então o guard concluía que estava tudo bem, não
+re-executava, e o script morria duas linhas depois com
+`ModuleNotFoundError: No module named 'httpx'`. Como o agente chama o helper por `Bash`
+(mesmo python do sistema), ele falhava exatamente no caminho de uso real. Isso ajuda a
+explicar os **7 usos em 280 turnos**: quem tentou, tomou traceback.
+
+**Foi feito:** o guard passou a conferir **todas** as dependências (`psycopg`, `httpx`,
+`dotenv`) — se qualquer uma faltar, re-executa no venv. Os outros helpers com o mesmo
+padrão (`kobe-recall-since`, `kobe-await-response`, `_kobe_topic.py`) foram conferidos e
+**não** são afetados: nenhum importa httpx.
+
+**Testes:** F6 do plano da F0, **verde depois do conserto** (vermelho antes, com o
+traceback acima). Rodado contra o Hindsight de dev, devolveu resposta **citada** —
+inclusive recuperando a memória que a bateria E6 tinha gravado minutos antes, o que fecha
+o par retain → reflect ponta a ponta.
+
+**Reversão:** `git revert` deste commit (volta o guard antigo, e o bug junto).
+
+### Highlander v3 — F0.2, F0.3 e F0.5: o que estava documentado errado (2026-08-27)
+
+**Operador pediu:** itens 2, 3 e 5 da F0 — documentar o `kobe-reflect` no `CLAUDE.md`,
+desligar a consulta automática de memória, e corrigir a frase do `~/.claude/CLAUDE.md` que
+afirma que o índice da base é carregado todo turno.
+
+**Por quê:** os três são o mesmo problema em três lugares — **a documentação descrevia um
+sistema que não é o que roda.** O `kobe-reflect` existe, funciona, é o caminho citado da
+memória durável, e foi usado em **7 de 280 turnos (1,8%)** porque nada mandava usar. O
+manual global afirmava que o índice da base entrava em todo turno — falso desde que ele
+passou dos 8.000 chars. E o comentário do `.env.example` justificava o recall desligado
+pela confabulação, sem mencionar o custo medido, que é o argumento mais forte.
+
+**Foi feito:**
+- **F0.2** — seção nova no `CLAUDE.md`: o que o `kobe-reflect` é, quando usar, e **como ler
+  a saída** — em especial que resposta vazia significa *"não há registro"*, e não licença
+  pra responder de memória. Está dito também o que ele **não** é (não busca a conversa
+  bruta; isso é o `kobe-remember` da F2), pra a doc não prometer o que não existe.
+- **F0.3** — nenhuma mudança de comportamento: o default no código já era `false` e o
+  `.env` de dev também. O `.env.example` passou a carregar o **número medido** (4–7 s por
+  turno pra 0,3% do prompt, e piorando ~30 fatos por dia). Os dois gates viraram funções
+  (`_retain_ativo` / `_recall_ativo`) pra que *"desligar a leitura não desliga a gravação"*
+  seja afirmação **testável**, não comentário.
+- **F0.5** — `~/.claude/CLAUDE.md` corrigido. **Backup carimbado antes de encostar**:
+  `.local/backups/CLAUDE.md.global.20260827-231019` (SHA-256 conferido contra o original).
+  A frase falsa saiu; entrou a descrição do mecanismo real (orçamento por arquivo, curto
+  sempre injetado, detalhado sob demanda, aviso quando degrada).
+
+**Testes:** bloco C, `tests/test_hindsight_recall_gate.py` — **5 verdes**. C4 é o que trava
+o critério do briefing (*"a gravação continua"*). C2 prova nos dois sentidos: sem recall o
+prompt não tem a seção de memória durável, e com recall tem — senão o teste passaria mesmo
+se alguém removesse a funcionalidade inteira. A fixture monta um `.env` mínimo **explícito**
+porque `load_config(None)` sobe procurando `.env` na árvore e mediria a máquina de quem
+roda, não o default do código. **F0.5 é verificado por inspeção** (lacuna L2, declarada no
+plano): `~/.claude/CLAUDE.md` é o manual do Claude Code, não do Kobe — nenhuma mensagem no
+bot exercita aquela frase. Evidência: `grep` da frase antiga não devolve nada, e o `diff`
+contra o backup mostra exatamente a linha trocada.
+
+**Reversão:** `git revert` (F0.2/F0.3); para a F0.5, `cp` do backup carimbado de volta.
+O passo que **de fato** devolve os 4–7 s é manual e **não foi executado** — está declarado
+como P1: `HINDSIGHT_RECALL=false` no `.env` de produção + `systemctl --user restart kobe`.
+
+### Highlander v3 — F0.6: normalizador determinístico de transcrição (2026-08-27)
+
+**Operador pediu:** item 6 da F0 — normalizador de transcrição com glossário próprio,
+aplicado antes de gravar a mensagem. Com portão humano: a lista do que ele corrigiria
+passa pelo operador **antes** de entrar em produção.
+
+**Por quê:** a única proteção contra erro de transcrição era o `prompt` do Whisper, lido
+de `user-data/transcription-hints.md` e limitado a **850 bytes** (verificado em
+`bot/transcribe.py:67`), já com 616 usados. Esse arquivo **já lista** "Kobi/Colby/Cobi →
+Kobe" e mesmo assim a memória durável tem *"os plugins do Koby ficarão em home, Filipe e
+Kobi"*. Dica é probabilística: empurra o modelo, não garante. E erro de transcrição, uma
+vez gravado, vira **fato permanente** — volta meses depois como se fosse verdade.
+
+**Foi feito:**
+- `bot/transcription_normalizer.py` (novo): glossário `errado -> certo` em
+  `user-data/transcription-glossary.md`, **sem limite de tamanho**, com `.example`
+  versionado. Casamento por limite de palavra, insensível a caixa e acento, saída na
+  grafia declarada. Aviso quando o glossário tem ciclo (que quebraria a idempotência).
+- Aplicado **só ao texto vindo de áudio**, depois do Whisper e antes de gravar. Texto
+  digitado é intenção do operador e não passa por ali — e há teste estrutural travando
+  isso (o normalizador tem **um** ponto de chamada, dentro de `_download_and_transcribe`).
+- Trilha de auditoria em `user-data/transcription-normalizer/<AAAA-MM>.jsonl` com o texto
+  **original** e as regras que bateram. Nada se perde (§4.7 do briefing).
+- Flag `TRANSCRIPTION_NORMALIZER_ENABLED`, **default OFF**.
+- `bot/bin/kobe-normalize-report` (novo): modo relatório, **rigorosamente somente-leitura**
+  — não existe caminho de `UPDATE` neste script, e não é pra existir.
+
+**Bug achado ao rodar contra dado real, e consertado:** a prosa do próprio template explica
+o formato usando uma seta (*"a regra `Kobi -> Kobe` pega…"*) e o parser transformou **a
+frase inteira** em regra — ela apareceu na 1ª versão do relatório com 191 ocorrências
+fantasma. Regra agora só vale sob o título `## Regras`, e `#` isolado é comentário (não
+fecha a seção). Virou teste. Não aparecia em fixture nenhuma; apareceu na varredura real.
+
+**Testes:** bloco D, `tests/test_transcription_normalizer.py` — **14 verdes**, cobrindo o
+que ele NÃO pode tocar ("Kobierski", "cobiça", "Raulzito"), caixa/acento, idempotência,
+flag off, glossário ausente e a trilha de auditoria. **D11 (o portão humano) executado**:
+relatório contra as **3.521 mensagens** de `kobe_dev` — 395 substituições em 160 mensagens
+(146 de áudio/user, que são as únicas que ele tocaria; 11 de resposta do agente e 3 de
+texto digitado entram só como diagnóstico). Lista entregue ao operador por anexo.
+**D12 (áudio ponta-a-ponta) NÃO executado** — é a lacuna L3, declarada no plano: o
+`dev_inject` injeta texto e o normalizador só toca áudio. Aguarda decisão do operador.
+
+**Reversão:** flag off (não precisa de deploy); ou `git revert`. Nenhum dado histórico foi
+alterado por esta mudança, em nenhum ambiente.
+
+### Highlander v3 — F0.7: carimbo de tempo no retain e `observation` na leitura (2026-08-27)
+
+**Operador pediu:** item 7 da F0 — duas linhas no cliente do Hindsight: mandar o carimbo
+de tempo no retain e incluir o tipo `observation` na leitura sob demanda.
+
+**Por quê:** são dois anti-padrões que a **documentação do próprio Hindsight** nomeia e que
+o Kobe cometia. (1) *"Missing `timestamp` on retain → disables temporal retrieval
+strategies"* — sem eixo de tempo, "o que a gente decidiu em julho?" não tem como ordenar
+nada, que é exatamente a dor que abriu a missão. (2) o default de `types` do Hindsight é só
+`world`+`experience`, e o cliente replicava isso — deixando **507 dos 934 fatos** do bank do
+operador invisíveis. `observation` é a camada consolidada, deduplicada e com contagem de
+evidência: a mais útil justamente pra retomar assunto velho.
+
+**Foi feito:**
+- `bot/hindsight_client.retain()` ganhou o parâmetro `timestamp` (opcional, ISO 8601,
+  retrocompatível — sem ele a chave nem vai no payload).
+- `bot/telegram_handler.py` passa `message.date` — **quando o operador falou**, não quando
+  a gravação aconteceu.
+- `recall()` passa a pedir os três tipos por default; `types` explícito continua mandando.
+- Campos confirmados no `/openapi.json` da instância 0.8.3 que está rodando, não de memória.
+
+**Testes:** bloco E, `tests/test_hindsight_f0.py` — **5 verdes**, sendo E4/E5 contra o
+**Hindsight de dev de verdade** (`:8890`, bank descartável por execução), que é o que prova
+que o campo é **aceito** e não só enviado: um `422` silencioso viraria memória não gravada.
+**E6 (ponta-a-ponta pelo bot), verde e com a evidência do lado do servidor** — uma mensagem
+injetada com `dev_inject` virou documento no bank `kobe-dev-ambiente-dev` com
+`retain_params.event_date = 2026-08-28T01:59:39+00:00` (o carimbo que mandamos) e as duas
+memórias extraídas saíram com `mentioned_at` no mesmo instante: **o eixo temporal existe**,
+onde antes não existia. E o documento nasceu com `nodes_by_fact_type: world 0, experience 1,
+**observation 1**` — um fato que, sem a segunda linha desta mudança, seria invisível à
+leitura. Suíte: **576 passed, 53 skipped** (base 555).
+
+**Reversão:** `git revert` deste commit. As duas mudanças são independentes e reversíveis
+uma sem a outra.
+
+### Highlander v3 — F0.4: a base de conhecimento parou de sumir em silêncio (2026-08-27)
+
+**Operador pediu:** item 4 da F0 — separar o índice da base em curto (sempre injetado) +
+detalhado (sob demanda), subir o limite de injeção e **avisar quando degradar**, em vez de
+degradar em silêncio.
+
+**Por quê:** a pasta `knowledge/` do tópico era **tudo-ou-nada**. Se a SOMA passasse do
+teto (8.000 chars), a pasta inteira virava lista de ponteiros e sumia do prompt — com um
+`logger.info` que ninguém lê. No tópico `dev-kobe` isso é permanente: o índice cresceu pra
+86.213 chars **num arquivo só**, então um arquivo grande derrubava todos os pequenos junto.
+Resultado medido no briefing: a base curada foi aberta em **44 de 280 turnos (16%)**.
+
+**Foi feito:**
+- `bot/topic_manager.py`: o orçamento passou a ser gasto **arquivo a arquivo**, em ordem
+  alfabética (a convenção `00-`, `01-`, … que a base já usa). Um `00-indice-curto.md` de
+  3 KB entra **sempre**, por construção da ordem; o resto vai pro índice sob demanda, agora
+  com o tamanho de cada arquivo declarado.
+- Teto **8.000 → 12.000** (`TOPIC_KNOWLEDGE_INLINE_LIMIT`, env, rollback numa linha).
+- Novo marcador interno de **degradação**, com payload (chars fora, teto, nomes), consumido
+  pelo handler — que agora **avisa no Telegram** dizendo *quais* arquivos ficaram fora.
+  Anti-ruído: um aviso por tópico por processo, reemitido só quando muda de faixa (~1 KB).
+  `consume_truncated_marker` continua existindo (o `bot/resume.py` usa) sobre o novo
+  `consume_markers`.
+- `bot/bin/kobe-kb-shortindex` (novo): gerador **determinístico, sem LLM**, que deriva o
+  índice curto do detalhado — títulos de seção, contagem de entradas e o caminho absoluto
+  pro `Read`. Resumo por modelo apodrece quando alguém edita o detalhado e não regenera;
+  este é função do arquivo, então rodar 2× dá byte a byte o mesmo.
+
+**Testes:** bloco B, `tests/test_topic_knowledge_budget.py` — **9 verdes** em pytest, mais
+**3 cenários ponta-a-ponta pelo bot de dev** (`dev_inject`, tópico AMBIENTE DEV), com a
+fixture real: o curto gerado (1.302 chars) + uma cópia do índice de 86.475 chars.
+- **B7 verde** — perguntando as seções *"sem abrir nenhum arquivo"*, o bot respondeu as
+  **12 seções** com `tool_calls=0`: o curto estava inline. Palavra dele: *"Direto do índice
+  curto que já vem no meu prompt (não abri nada)"*.
+- **B8 verde** — mandando abrir o detalhado, `tool_calls=2` e a resposta certa: **13
+  entradas** em "Componentes do bot", exatamente o número que o gerador tinha contado.
+  Um modelo lendo a fonte confirmou a contagem do gerador.
+- **B9 verde** — 2 turnos seguidos com a base degradada produziram **1** aviso, não 2.
+- Suíte: **571 passed, 53 skipped** (linha de base 555). Sem regressão.
+
+**Achado que fica pro operador (não consertado — é dado de produção):** o índice real tem
+**66 das 153 entradas penduradas depois** do título "Regra de manutenção", sem seção
+própria. O índice curto reporta isso fielmente, mas na hora de aplicar em produção (P3)
+vale re-seccionar essas 66.
+
+**Reversão:** `git revert` deste commit; ou `TOPIC_KNOWLEDGE_INLINE_LIMIT=8000` no `.env`
+(volta o teto, mas mantém o orçamento por arquivo e o aviso).
+
+### Highlander v3 — F0.1: tetos separados pra USER.md e MEMORY.md (2026-08-27)
+
+**Operador pediu:** executar a F0 do Highlander v3; o item 1 é criar o `MEMORY.md` e
+**separar os tetos** do núcleo curado.
+
+**Por quê:** o núcleo curado tinha um teto único de 6.000 chars e o `USER.md` entrava
+inteiro, deixando pro `MEMORY.md` **a sobra**. Com o `USER.md` real do operador (3.367
+chars), a sobra era **2.633** — e o `MEMORY.md` é justamente a camada que precisa
+acumular anos de convivência (frente (d) do briefing: "o agente conhecer o operador").
+Pior: o arquivo **nunca tinha sido criado**, então a camada estava ligada, funcionando e
+vazia desde o primeiro dia. E o empurrão de consolidação media o agregado, então um
+`USER.md` grande cobrava o agente a consolidar uma memória durável que podia estar vazia.
+
+**Foi feito:**
+- `bot/memory/curated_core.py`: dois orçamentos independentes,
+  `CURATED_CORE_USER_LIMIT` (4.000) e `CURATED_CORE_MEMORY_LIMIT` (6.000), cada arquivo
+  truncado contra o **próprio** teto. `CURATED_CORE_CHAR_LIMIT` continua existindo como
+  soma (é reexportado por `bot.memory`).
+- O sinal de consolidação (~80%) passou a medir o `MEMORY.md` contra o teto **dele**.
+- `user-data/identity/MEMORY.md` criado no dev VPS — andaime com o contrato de escrita
+  (uma linha por fato, **com origem**), sem nenhum fato inventado sobre o operador.
+  Preencher é trabalho da F5/LUCIEN.
+- `.env.example` documenta as duas chaves e o rollback (4000/2000 devolve o de antes).
+
+**Testes:** bloco A do plano de testes da F0, `tests/test_curated_core_budgets.py` — 7
+cenários, **7 verdes**. A3 é o que prova o conserto: `USER.md` estourado não espreme mais
+o `MEMORY.md`. A6 (real, contra o dev VPS): o bloco montado tem 5.063 chars e contém
+`## MEMORY.md — fatos duráveis do agente` — o critério de pronto "existe **e** é
+injetado". Suíte inteira: **562 passed, 53 skipped** (linha de base antes de mexer: 555
+passed, 53 skipped). Sem regressão.
+
+**Reversão:** `git revert` deste commit; ou, sem deploy, `CURATED_CORE_USER_LIMIT=4000` +
+`CURATED_CORE_MEMORY_LIMIT=2000` no `.env`. Apagar o `MEMORY.md` volta ao estado de antes.
+
 ### Bateria funcional C3 executada — 13 verdes, 1 vermelho (2026-08-26)
 
 **Operador pediu:** rodar a Camada 3 (cenários F1–F14) do Novo Ambiente Postgres contra o

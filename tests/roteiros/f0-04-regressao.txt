@@ -1,0 +1,12 @@
+# F0 — bateria 4: regressão de comportamento no bot de dev
+#
+# Rodar ANTES de qualquer mudança (linha de base) e DEPOIS do merge. O que ela
+# prova não é uma feature nova — é que o Kobe continua o Kobe: comando de
+# memória responde, plugins aparecem, a hora vem do relógio, e cada mensagem
+# gera UMA resposta (se o kobe-dev.service duplicasse o turno, apareceria aqui).
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f0-04-regressao.txt --thread-id 2
+/contexto
+@5 lista os plugins instalados, só os nomes
+@5 que horas são agora?
+@5 responde só "ok".

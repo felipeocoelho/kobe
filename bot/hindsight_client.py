@@ -188,6 +188,7 @@ async def retain(
     tags: Optional[list[str]] = None,
     update_mode: str = "append",
     metadata: Optional[dict] = None,
+    timestamp: Optional[str] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> bool:
     """Destila um fato durável (async no servidor). True se aceito, False em
@@ -195,11 +196,20 @@ async def retain(
 
     `document_id` estável + `update_mode="append"` agrupam a conversa num documento
     que cresce (vs N memórias soltas). `context`/`tags` melhoram extração e isolamento.
-    `metadata` carrega a fonte (rastreabilidade)."""
+    `metadata` carrega a fonte (rastreabilidade).
+
+    `timestamp` (ISO 8601) é **quando o conteúdo aconteceu** — a hora em que o
+    operador falou, não a hora da gravação. Omitir não era neutro: a doc do
+    Hindsight diz que sem ele a recuperação temporal é **desligada por completo**,
+    e o schema confirma (`MemoryItem.timestamp`, "omitido = agora"). Era um dos
+    anti-padrões que a F0 conserta — sem ele, "o que a gente decidiu em julho?"
+    não tem eixo de tempo pra ordenar nada."""
     content = (content or "").strip()
     if not content:
         return False
     item: dict = {"content": content}
+    if timestamp:
+        item["timestamp"] = timestamp
     if document_id:
         item["document_id"] = document_id
         item["update_mode"] = update_mode
@@ -237,14 +247,18 @@ async def recall(
 ) -> list[dict]:
     """Traz até `limit` fatos duráveis crus relevantes (caminho barato). [] em falha.
 
-    `types` default = ['world','experience'] (fato do mundo + experiência; observações
-    de fora). `include.source_facts` liga a rastreabilidade (document_id/chunk_id)."""
+    `types` default = os **três** tipos, `observation` incluída (F0.7). O default do
+    próprio Hindsight é só `world`+`experience`, e o Kobe replicava isso — deixando
+    invisíveis **507 dos 934 fatos** do bank do operador. `observation` é a camada
+    consolidada (crença apoiada em várias memórias, com contagem de evidência), que
+    é justamente a mais útil quando se retoma assunto velho: ela já vem deduplicada.
+    `include.source_facts` liga a rastreabilidade (document_id/chunk_id)."""
     query = (query or "").strip()
     if not query:
         return []
     body: dict = {
         "query": query,
-        "types": types or ["world", "experience"],
+        "types": types or ["world", "experience", "observation"],
         "budget": budget,
         # Hindsight 0.8.3: liga a inclusão com {} (objeto vazio), não bool — a
         # rastreabilidade (document_id/chunk_id) já vem em cada RecallResult.

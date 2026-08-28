@@ -1,0 +1,39 @@
+# Glossário de normalização de transcrição
+
+> **Template editável.** Copie para `user-data/transcription-glossary.md` e ajuste.
+> Aplicado APENAS a texto vindo de áudio, depois do Whisper e **antes de gravar**
+> a mensagem (Highlander v3, F0.6 / E11). Texto digitado nunca é tocado.
+>
+> Diferente do `transcription-hints.md` — que é uma **dica** ao Whisper, limitada
+> a 850 bytes e probabilística —, este arquivo é um **dicionário determinístico**,
+> sem limite de tamanho. Nome próprio mal transcrito é problema de dicionário.
+>
+> Ligue com `TRANSCRIPTION_NORMALIZER_ENABLED=true`. Antes de ligar, rode
+> `bot/bin/kobe-normalize-report` e leia a lista do que ele mudaria.
+
+## Formato
+
+Uma regra por linha, `errado -> certo`. Linha vazia, `#` e `>` são ignorados —
+títulos e prosa podem conviver aqui, o arquivo continua legível como documento.
+
+O casamento é por **limite de palavra**, insensível a caixa e a acento: a regra
+`Kobi -> Kobe` pega "kobi", "KOBI" e "cóbi"… mas **não** pega "Kobierski". A
+grafia que sai é exatamente a que você escreveu do lado direito.
+
+**Cuidado com ciclos:** não escreva `a -> b` e `b -> a`. O carregador avisa, mas
+uma regra que se desfaz na passada seguinte quebra a idempotência.
+
+## Regras
+
+# O nome do framework
+Kobi -> Kobe
+Cobi -> Kobe
+Colby -> Kobe
+Koby -> Kobe
+
+# A ferramenta da Anthropic
+Cloud Code -> Claude Code
+Cloudy -> Claude
+
+# Exemplo de nome próprio que o Whisper erra com frequência
+# (troque pelos seus — este arquivo é seu dicionário, não o meu)

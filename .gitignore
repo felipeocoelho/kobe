@@ -46,6 +46,9 @@ user-data/identity/*
 user-data/persona/*
 !user-data/identity/*.example
 !user-data/persona/*.example
+# Templates de raiz: exceção NOMINAL, um a um. A blanket acima continua valendo
+# pra tudo o que não estiver listado aqui — que é o ponto dela.
+!user-data/transcription-glossary.md.example
 
 # Logs
 *.log

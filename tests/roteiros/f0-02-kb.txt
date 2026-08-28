@@ -1,0 +1,15 @@
+# F0 — bateria 2: índice curto injetado, detalhado sob demanda, aviso de degradação
+#
+# Pré-condição (montada pela sessão, e desfeita depois):
+#   user-data/topics/ambiente-dev/knowledge/00-indice-curto.md      (~1,3 KB, gerado)
+#   user-data/topics/ambiente-dev/knowledge/10-indice-detalhado.md  (~86 KB, cópia real)
+#
+# O que cada linha prova:
+#   1 — o curto está INLINE (ele responde sem abrir arquivo) + o ⚠️ de degradação chega
+#   2 — o detalhado está acessível SOB DEMANDA (ele abre com Read e acha o número)
+#   3 — anti-ruído: o ⚠️ não se repete a cada turno
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f0-02-kb.txt --thread-id 2
+sem abrir nenhum arquivo: quais são as seções da base de conhecimento deste tópico? só a lista.
+@8 agora abre o índice detalhado e me diz quantas entradas tem a seção "Componentes do bot".
+@8 responde só "ok".

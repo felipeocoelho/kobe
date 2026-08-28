@@ -31,10 +31,19 @@ if str(_REPO_ROOT) not in sys.path:
 # Re-exec no venv do projeto se as deps não estiverem no interpretador atual
 # (mesmo padrão do kobe-recall — o shebang resolve pro Python do sistema).
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
+# Conferir TODAS as dependências, não uma delas (conserto de 2026-08-27, F0.2).
+# O guard antigo olhava só `psycopg`: numa máquina onde o python do sistema tem
+# psycopg mas NÃO tem httpx — que é o caso desta VPS —, ele decidia que estava
+# tudo bem, não re-exec-utava no venv, e o script morria duas linhas abaixo com
+# `ModuleNotFoundError: No module named 'httpx'`. Achado ao rodar o cenário F6
+# do plano de testes da F0: o helper estava quebrado no caminho em que o agente
+# de fato o chama. Uma dependência a menos na lista = o mesmo bug de volta.
 if (
     _VENV_PY.exists()
     and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("psycopg") is None
+    and any(
+        importlib.util.find_spec(dep) is None for dep in ("psycopg", "httpx", "dotenv")
+    )
 ):
     os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
