@@ -66,10 +66,32 @@ DISPOSITION_LITERALISM = 5  # 1=flexível … 5=literal
 DISPOSITION_EMPATHY = 3     # neutro — não é um eixo relevante pra fato durável
 
 # Missões do bank (steers a extração / a resposta do reflect).
+#
+# O 2º parágrafo do RETAIN_MISSION é a REGRA ANTI-RUÍDO da F0.6 — a única das três
+# camadas de defesa que foi medida funcionando ponta a ponta (2/2 → 0/2 no caso
+# reprodutível do "Cade"). O defeito que ela trata: em 3,6% dos áudios o Whisper
+# INSERE uma frase que o operador não disse, sempre com forma de definição ("O que
+# é o Cade? O Cade é…"), ecoando uma frase do próprio áudio dentro de um molde. Um
+# extrator bom não salva disso — ele só grava o lixo com mais elegância.
+#
+# Custo medido: +175 tokens de ENTRADA por chamada (~R$ 0,35/mês); a saída CAIU
+# (1.604 → 1.080), então tende a se pagar. Efeito colateral medido e ACEITO pelo
+# operador: ela comprime (8 → 5 fatos na amostra) — não se compensa isso com outra
+# regra. Reversível: é texto de config, um PATCH desfaz.
+# Relatório: user-data/knowledge/kobe/status/2026-08-28-f06-envenenamento-por-transcricao.md
 RETAIN_MISSION = (
     "Extraia fatos duráveis e estáveis que o OPERADOR declarou sobre si, suas "
     "preferências, decisões, projetos e o mundo dele. Ignore conteúdo efêmero, "
     "saudações e ruído de transcrição. Nunca invente: registre só o que foi dito."
+    "\n\n"
+    "REJEITE trecho com FORMA DE DEFINIÇÃO de um termo que não é desenvolvido no "
+    "resto da fala: \"X é …\", \"O que é o X? O X é …\", \"X significa …\". Quando um "
+    "termo aparece definido uma única vez e o resto da fala não o usa, não o "
+    "desenvolve e não depende dele, isso é ruído de transcrição — o transcritor "
+    "alucinou uma definição que o operador não disse. Não grave. O mesmo vale para "
+    "definição que contradiz o resto da fala ou que introduz um termo que não "
+    "aparece em nenhum outro lugar do texto. Na dúvida entre gravar e descartar, "
+    "DESCARTE: memória durável errada é pior que memória incompleta."
 )
 REFLECT_MISSION = (
     "Responda em português brasileiro. Responda SOMENTE a partir das memórias "

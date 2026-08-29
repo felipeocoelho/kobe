@@ -4,6 +4,165 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Highlander v3 — F0.6-B: a transcrição para de jogar fora os próprios sinais (2026-08-29)
+
+**Operador pediu:** as recomendações da F0.6, item (a) — *"CONSERTAR a instrumentação. É a
+raiz."* — e, na aprovação, *"Plano aprovado"*.
+
+**Por quê:** três defeitos de **configuração**, não de lógica, todos achados na investigação.
+O Whisper já calcula os sinais que denunciam a própria degeneração e a gente os descartava na
+porta; a temperatura ficava solta; e o guard do prompt de hints media **bytes** onde a Groq
+limita **tokens** — ou seja, existia um buraco por onde um prompt acima do limite passava.
+
+**Foi feito** (`bot/transcribe.py`):
+- `response_format="text"` → **`"verbose_json"`**. Custo: **zero** — mesma chamada, mesmo
+  preço, texto idêntico. O que muda é que a resposta passa a trazer `segments` com
+  `avg_logprob`, `compression_ratio` e `no_speech_prob`, e uma linha `whisper_signals` de log
+  passa a registrar os agregados por transcrição.
+- **`temperature=0`** (recomendação da própria Groq). O decoder do Whisper continua subindo a
+  temperatura sozinho ao bater os thresholds internos — o que se fixa é o ponto de partida.
+- **Guard de hints agora respeita os DOIS tetos**, o que vier primeiro: 850 bytes (contagem
+  exata) **e ~224 tokens** (contagem estimada). O teto de tokens simplesmente não existia.
+- **O corte passa a cair em fronteira de item/palavra.** Não é enfeite: o arquivo de hints é
+  lista de vocabulário, e cortá-la no meio de um nome injeta um fragmento inexistente
+  justamente no campo que biasa o reconhecimento — o mesmo vetor de prompt-bleeding que a
+  F0.6 investiga (um áudio de 11/06 voltou com o texto do arquivo de hints DENTRO da
+  transcrição).
+- `bot/transcription_normalizer.py`: uma linha de docstring que afirmava só o teto de bytes.
+
+**A fronteira desta entrega, que é o principal:** ela **SÓ COLHE**. Nenhuma linha decide coisa
+alguma com base nos três sinais. Julgar exige conhecer a faixa normal deles nos áudios do
+operador, e essa faixa só existe depois de coleta em produção — decidir é a fase seguinte.
+**O detector genérico de degeneração continua NÃO construído**, como o relatório recomendou
+(71% de detecção a 29% de falso positivo) e o plano marcou.
+
+**Como se conta token sem tokenizer — e por que não se conta:** não há tokenizer no ambiente,
+e o do Whisper é um BPE próprio; puxar dependência que ainda baixaria vocabulário pela rede
+DENTRO do caminho quente da transcrição seria pior que o problema. A contagem é uma
+**estimativa pessimista** (`chars/2`, contra 3–4 chars/token reais em pt-BR): erra sempre pro
+lado seguro — corta cedo demais, nunca estoura o teto — e **avisa em WARNING** quando corta,
+porque um corte baseado em palpite tem que ser visível.
+
+**Testes:** `tests/test_f06_defesas.py`, **19 verdes**, mais a regressão. Sem rede e **US$ 0,00**
+— o cliente da Groq é um fake que devolve uma resposta `verbose_json` de mentira.
+- **T1**: `verbose_json` e `temperature=0` chegam mesmo na chamada (não ficaram na docstring).
+- **T2**: o texto sai idêntico ao de antes e os três sinais viram log agregado, com o segmento
+  degenerado puxando `avg_logprob_min` e `compression_ratio_max`. Inclui o caso em que
+  `segments` só existe no `model_dump()` (extras do pydantic).
+- **T2b** (5 variações): sem `segments`, com lista vazia, sem os campos, resposta em `dict`, e
+  resposta ainda em `str` (formato antigo) — **nenhuma derruba a transcrição**. É a propriedade
+  que importa em produção: se a Groq mudar o payload, perde-se o log, não o áudio do operador.
+- **T2c**: o log **não vaza conteúdo**. Só números saem — o que o operador fala não vai pro
+  `journalctl` pra render telemetria.
+- **T3** (7 casos): o arquivo real de hints passa intacto; o teto de tokens morde antes do de
+  bytes num texto ASCII de 718 bytes (o buraco que existia); o teto de bytes segue valendo com
+  acento; o corte nunca cai no meio da palavra; o WARNING sai; e o prompt **efetivamente
+  enviado** já vai truncado.
+- **Regressão verde:** `test_transcribe_latency.py` (inclui a assertiva de que duas
+  transcrições rodam concorrentes — a latência do turno não regrediu), mais
+  `test_transcription_normalizer.py`, `test_hindsight_f0.py`, `test_hindsight_bank_environment.py`,
+  `test_hindsight_recall_gate.py` e `test_dev_inject.py`: **66 verdes**. `bot.telegram_handler`
+  importa, e o arquivo de hints REAL do operador (237 bytes hoje) atravessa o guard novo **sem
+  truncar um byte**.
+
+**O que NÃO foi testado, e é honesto dizer:**
+- **A perna áudio→texto não é testável aqui** — `dev_inject` não injeta áudio (lacuna 9.2).
+  Fica dependendo de áudio real em produção: (1) que a Groq devolve `segments` populados para
+  `whisper-large-v3` neste plano de conta; (2) que `temperature=0` não muda o texto que sai;
+  (3) **qualquer** julgamento sobre os valores dos sinais.
+- **O roteiro conversacional do `dev_inject` foi deliberadamente NÃO rodado.** O `kobe-dev`
+  roda a partir da árvore de dev, não desta worktree — o roteiro exercitaria código que não
+  contém estas mudanças, gastando cota de assinatura para provar nada. A regressão do turno
+  está coberta pelo import do handler e pelas suítes acima; o roteiro cabe **depois do merge**,
+  se o operador quiser.
+
+**Reversão:** commit limpo na branch `coder/17f51797`. `git revert` volta `response_format`,
+`temperature` e o guard de uma vez; nenhuma das três muda estado fora do processo, então não há
+nada a desfazer além do código.
+
+### Highlander v3 — F0.6-A: a regra anti-ruído entra no bank (2026-08-29)
+
+**Operador pediu:** *"Sobre as defesas da F0.6, eu vou seguir com todas as recomendações que me
+foram dadas."* — e, na aprovação do plano desta sessão, *"Plano aprovado"*.
+
+**Por quê:** das três camadas pesadas na investigação da F0.6, a diretiva do bank é a **única
+medida funcionando ponta a ponta** (2/2 → 0/2 no caso reprodutível do "Cade"). O extrator
+sozinho não salva: escolher o melhor modelo só faz o lixo ser gravado com mais elegância.
+
+**Foi feito:**
+- `RETAIN_MISSION` (`bot/hindsight_client.py`) ganhou um 2º parágrafo: rejeitar trecho com
+  **forma de definição de um termo que não é desenvolvido no resto da fala**, fechando com
+  *"na dúvida entre gravar e descartar, DESCARTE: memória durável errada é pior que memória
+  incompleta"*. 588 caracteres, ~163 tokens estimados.
+- Comentário de bloco acima da constante registrando custo, efeito colateral aceito e o
+  caminho de volta — pra ninguém "limpar" a regra daqui a três meses sem saber o que ela era.
+
+**Ressalva honesta, e ela importa:** a **redação literal** que foi medida (+175 tokens de
+entrada, 2/2 → 0/2) **não ficou registrada em lugar nenhum** — nem no relatório, nem no brief.
+Os documentos descrevem a regra e citam só a frase de fechamento. O texto que entrou é uma
+reconstrução fiel à descrição, do mesmo tamanho, **aprovada verbatim pelo operador no plano**.
+Equivalência com o que foi medido não é demonstrável; semelhança é.
+
+**Efeito colateral conhecido e ACEITO (não é bug):** a regra comprime — 8 → 5 fatos na amostra
+medida, com duas fusões legítimas e uma perda parcial. Decisão do operador. Não foi compensada
+com nenhuma outra regra, de propósito.
+
+**Testes:** `tests/test_f06_defesas.py`, 3 verdes, no ambiente de dev.
+- **T4a** (unitário, sem rede): a constante carrega as duas partes — a missão original e a
+  regra nova. Trava contra alguém derrubar a regra numa reescrita.
+- **T4** (contra o Hindsight de **dev**, `:8890`, bank descartável): **respondida a pergunta
+  que o brief mandava conferir — o bank EXISTENTE recebe a missão nova no restart.** A
+  encenação é a real: cria o bank, configura com uma missão velha, limpa `_configured_banks`
+  (que é o que o restart faz), chama `_ensure_bank` e **lê o config de volta do servidor**. A
+  missão nova está lá, com a regra dentro, e as disposições céticas seguem de pé. Não era
+  óbvio: se tivesse ficado a velha, os banks vivos jamais receberiam a defesa.
+- **T4c**: trava que recusa rodar a suíte apontada para a produção do Hindsight.
+- **Produção (`:8888`) não foi tocada** — zero POST, zero PATCH, zero leitura. **US$ 0,00** de
+  API: nenhuma chamada paga a provedor nesta entrega.
+- **O que NÃO foi testado, e não dá pra testar aqui:** a *qualidade* da extração sob a regra
+  nova. O Hindsight de dev está vazio e julgar isso exigiria chamada paga de extração. A
+  eficácia (2/2 → 0/2) é dado da investigação anterior, não coisa reprovada nesta sessão.
+
+**Reversão:** commit limpo na branch `coder/17f51797` — `git revert` volta a missão anterior.
+Como é texto de config aplicado por `PATCH` idempotente, o bank vivo volta ao estado antigo no
+restart seguinte, sem migration e sem perda de memória.
+### Hindsight: o LLM da memória durável passa a ser Anthropic `claude-haiku-4-5` (2026-08-29)
+
+**Operador decidiu:** *"pode ligar o Haiku em produção via API da Anthropic já fornecida (não
+use OpenRouter) para ser usado como nosso 'modelo mini padrão'"* — aplicando em runtime a
+recomendação medida na **F0.5-D** (`claude-haiku-4-5` nas duas pontas, R$ 27,81/mês).
+
+**O que impedia:** o `docker-compose.yml` amarrava a chave do LLM literalmente à
+`OPENAI_API_KEY`. Não havia como apontar o LLM para outro provider sem que os **embeddings**
+fossem junto — e essa é a armadilha silenciosa que a F0.5 já tinha encontrado rodando: a chave
+de embedding do Hindsight **cai por padrão na chave do LLM**, então o embedding passaria a
+mandar a chave errada para a OpenAI, tomaria 401, e o `reflect` **não falharia** — responderia
+*"não há registro"*, porque as ferramentas de busca dele engolem o erro. Resposta vazia com
+latência bonita.
+
+**Foi feito:** o compose de produção ganhou os três eixos independentes que o override de dev
+(`docker-compose.models.yml`) já tinha provado:
+
+- `HINDSIGHT_LLM_API_KEY` — chave do LLM, com default na `OPENAI_API_KEY`;
+- `HINDSIGHT_LLM_MODEL` — modelo explícito (vazio cai no default do provider, que o Hindsight
+  resolve com `or`, então string vazia é segura);
+- `HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY` — chave dos embeddings, amarrada **separadamente**
+  e sempre à OpenAI.
+
+**Nada muda para quem não define as variáveis novas:** os defaults renderizam, byte a byte, a
+configuração anterior — verificado com `docker compose config` nos dois cenários.
+
+**O que NÃO mudou, de propósito: os embeddings.** Seguem em `text-embedding-3-small` da
+OpenAI. Trocar embedding com o bank já povoado não é configuração, é migração — os vetores
+antigos ficam com outra dimensão e param de ser encontrados. A F0.5 mediu o embedding local
+como viável; ligá-lo é decisão separada, com re-indexação.
+
+**Escopo:** apenas o Hindsight de **produção**. O de dev continua em `openai`.
+
+**Reversão:** `HINDSIGHT_LLM_PROVIDER=openai` no `.env` + recriar o container (~2 min). O
+`.env` anterior está carimbado em `.local/backups/`.
+
+
 ### Highlander v3 — F0.6: "Cade", o envenenamento da memória na entrada (2026-08-28)
 
 **Operador decidiu (e isto é decisão DELE, não recomendação minha):** `claude-haiku-4-5` nas

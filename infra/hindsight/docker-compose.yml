@@ -11,7 +11,9 @@
 #   - Postgres dedicado, imagem pgvector/pgvector:pg18 (default upstream).
 #   - Hindsight pinado em 0.8.3 (tag da imagem; o release no GitHub é v0.8.3,
 #     mas a imagem Docker NÃO usa o 'v') — nunca :latest.
-#   - Provedor LLM/embedding = OpenAI (reusa a OPENAI_API_KEY do Kobe).
+#   - Embeddings = OpenAI text-embedding-3-small (usa a OPENAI_API_KEY do Kobe).
+#   - Provedor do LLM = configurável (HINDSIGHT_LLM_PROVIDER, default openai);
+#     desde 29/08/2026 a produção roda `anthropic` + `claude-haiku-4-5`.
 #   - Portas em LOOPBACK (127.0.0.1) — como a Evolution. Acesso externo só via
 #     túnel SSH (igual pgAdmin).
 #
@@ -74,17 +76,31 @@ services:
       - "127.0.0.1:${HINDSIGHT_PORT_API:-8888}:8888"    # ⚠️ loopback — API MCP/HTTP
       - "127.0.0.1:${HINDSIGHT_PORT_ADMIN:-9999}:9999"  # ⚠️ loopback — admin UI (túnel SSH)
     environment:
-      # --- Provedor LLM/embedding: OpenAI (reusa a chave do Kobe) ---
+      # --- Provedor do LLM ---
+      # Default `openai` — quem não define nada continua exatamente como antes.
       HINDSIGHT_API_LLM_PROVIDER: ${HINDSIGHT_LLM_PROVIDER:-openai}
-      HINDSIGHT_API_LLM_API_KEY: ${OPENAI_API_KEY:?defina OPENAI_API_KEY no .env}
-      # Modelo: deixar o default do Hindsight (mini-tier OpenAI) decidir, salvo
-      # override explícito. Subir o reflect só se a reconciliação ficar fraca.
-      # HINDSIGHT_API_LLM_MODEL: gpt-4o-mini
+      # Modelo: vazio cai no default do PROVIDER escolhido (o Hindsight resolve
+      # `os.getenv(...) or default_do_provider`, então string vazia é segura).
+      # Declare o modelo quando quiser fixá-lo e não depender do default da
+      # imagem — que pode mudar numa versão futura sem aviso.
+      HINDSIGHT_API_LLM_MODEL: ${HINDSIGHT_LLM_MODEL:-}
+      # A chave do LLM tem variável PRÓPRIA. Antes ela era amarrada à
+      # OPENAI_API_KEY, o que impedia apontar o LLM para qualquer outro provider
+      # (anthropic, gemini, …) sem também trocar a chave dos embeddings. O
+      # default preserva, letra por letra, o comportamento de antes.
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_LLM_API_KEY:-${OPENAI_API_KEY}}
       # --- Embeddings: OpenAI text-embedding-3-small (decisão v4 §6) ---
       # Sem isto, o Hindsight cai no embedding LOCAL (onnx, BAAI/bge-small, 384d).
-      # Provider=openai reusa a mesma chave do LLM (HINDSIGHT_API_LLM_API_KEY).
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: ${HINDSIGHT_EMBEDDINGS_PROVIDER:-openai}
       HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: text-embedding-3-small
+      # ⚠️ A chave dos embeddings, amarrada SEPARADAMENTE — armadilha silenciosa.
+      # Por padrão o Hindsight faz a chave de embedding CAIR na chave do LLM.
+      # Então, no instante em que o LLM aponta para outro provider, os embeddings
+      # passam a mandar a chave errada para a OpenAI e voltam 401 — e o `reflect`
+      # NÃO falha: ele responde "não há registro", porque as ferramentas de busca
+      # engolem o erro. Resposta vazia com latência bonita. Amarrar aqui é o que
+      # mantém os dois eixos independentes.
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${OPENAI_API_KEY:?defina OPENAI_API_KEY no .env}
       # --- Storage: Postgres dedicado externo (pgvector) ---
       HINDSIGHT_API_DATABASE_URL: postgresql://${HINDSIGHT_DB_USER:-hindsight_user}:${HINDSIGHT_DB_PASSWORD:?defina HINDSIGHT_DB_PASSWORD no .env}@hindsight-db:5432/${HINDSIGHT_DB_NAME:-hindsight_db}
       HINDSIGHT_API_VECTOR_EXTENSION: pgvector

@@ -6,7 +6,8 @@ dicionário, não de modelo.**
 O QUE ESTAVA QUEBRADO
 ---------------------
 A única proteção contra erro de transcrição era o `prompt` do Whisper, lido de
-`user-data/transcription-hints.md` e limitado a **850 bytes** (`bot/transcribe.py`),
+`user-data/transcription-hints.md` e limitado a **850 bytes e ~224 tokens** — o que
+vier primeiro (`bot/transcribe.py`),
 já com 616 usados. Esse arquivo **já lista** "Kobi/Colby/Cobi → Kobe" — e mesmo
 assim a memória durável do operador tem, hoje, fatos como *"os plugins do Koby
 ficarão em home, Filipe e Kobi"*. Dica é probabilística; ela empurra o modelo,
