@@ -13,6 +13,22 @@ disse Y?") — a resposta vem fundamentada ou diz que não há registro.
 Escopo = tópico atual (KOBE_CHAT_ID/KOBE_THREAD_ID injetados pelo bot) → bank
 `kobe-<slug>`. Dev Kobe não puxa Olimpo. Saída em texto no stdout. Best-effort: se o
 serviço Hindsight estiver fora, avisa e sai sem derrubar nada.
+
+SAÍDA — três desfechos, três textos, e a distinção é o ponto (conserto de 29/08/2026)
+--------------------------------------------------------------------------------------
+Até este conserto havia DOIS desfechos possíveis no código e UM texto na tela: tanto
+"o acervo não tem isso" quanto "o cliente desistiu de esperar" imprimiam a mesma frase
+("sem registro durável"). Como o agente que lê esta saída é instruído a tratar vazio
+como ausência de registro, um `ReadTimeout` virava a afirmação "não há registro sobre
+isso" — falso negativo silencioso, medido: o servidor concluiu em 28,1 s com resposta
+boa e fontes citadas, o cliente cortou aos 20 s. Agora:
+
+  exit 0 + a seção citada   → veio resposta fundamentada
+  exit 0 + "LEGÍTIMO"       → o serviço respondeu e o acervo não cobre a pergunta
+  exit 3 + "FALHA DO ..."   → timeout / serviço fora / HTTP != 2xx: NÃO se sabe se há
+                              registro, porque a pergunta não chegou a ser respondida
+
+O teto de espera é `HINDSIGHT_REFLECT_TIMEOUT` (segundos; default 90).
 """
 
 from __future__ import annotations
@@ -47,8 +63,44 @@ if (
 ):
     os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
+# Dir dos helpers no sys.path pra importar `_kobe_topic` (leitura do `.env`).
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+
+from _kobe_topic import read_dotenv  # noqa: E402
 from bot import hindsight_client  # noqa: E402
 from bot.topic_manager import get_topic_slug  # noqa: E402
+
+
+def _timeout() -> float:
+    """Teto de espera do reflect, em segundos.
+
+    `read_dotenv` olha `os.environ` primeiro e cai no `.env` do projeto depois —
+    o helper roda tanto como subprocess do bot (env injetada) quanto na mão.
+    Valor malformado NÃO derruba o helper: avisa e usa o default. Uma env torta
+    não pode ser o motivo de a memória durável ficar inacessível."""
+    raw = (read_dotenv({"HINDSIGHT_REFLECT_TIMEOUT"}).get(
+        "HINDSIGHT_REFLECT_TIMEOUT") or "").strip()
+    if not raw:
+        return hindsight_client.REFLECT_TIMEOUT_DEFAULT
+    try:
+        valor = float(raw)
+    except ValueError:
+        print(
+            f"kobe-reflect: HINDSIGHT_REFLECT_TIMEOUT={raw!r} não é número; "
+            f"usando {hindsight_client.REFLECT_TIMEOUT_DEFAULT:g}s.",
+            file=sys.stderr,
+        )
+        return hindsight_client.REFLECT_TIMEOUT_DEFAULT
+    if valor <= 0:
+        print(
+            f"kobe-reflect: HINDSIGHT_REFLECT_TIMEOUT={raw!r} não é positivo; "
+            f"usando {hindsight_client.REFLECT_TIMEOUT_DEFAULT:g}s.",
+            file=sys.stderr,
+        )
+        return hindsight_client.REFLECT_TIMEOUT_DEFAULT
+    return valor
 
 
 def _db():
@@ -90,6 +142,35 @@ def _resolve_slug() -> str | None:
             db.close()
 
 
+def _texto_de_falha(status: str, detail: str, base_url: str) -> str:
+    """A frase que o agente lê quando o instrumento falhou.
+
+    Escrita em tom imperativo e com o "NÃO é sem registro" em caixa alta de
+    propósito: quem lê isto é um LLM que o CLAUDE.md ensinou a tratar saída vazia
+    como ausência de registro. A frase precisa vencer esse reflexo — se ela for
+    branda, o falso negativo volta pela porta do comportamento, mesmo com o
+    código certo."""
+    cabeca = f'(FALHA DO INSTRUMENTO — isto NÃO é "sem registro". {detail}.'
+    if status == "timeout":
+        rabo = (
+            "NÃO conclua que não há registro: a pergunta não chegou a ser "
+            "respondida, e o acervo pode muito bem ter a resposta. Tente de novo "
+            "(a 2ª chamada costuma ser bem mais rápida que a fria) ou suba "
+            "HINDSIGHT_REFLECT_TIMEOUT."
+        )
+    elif status == "servico_fora":
+        rabo = (
+            "NÃO conclua que não há registro: a consulta nem chegou ao acervo. "
+            f"Confira se o serviço Hindsight está de pé em {base_url}."
+        )
+    else:
+        rabo = (
+            "NÃO conclua que não há registro: a consulta falhou antes de ter "
+            "resposta."
+        )
+    return f"{cabeca}\n{rabo})"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Reflect citado da memória durável")
     ap.add_argument("query", nargs="*", help="a pergunta")
@@ -103,11 +184,27 @@ def main() -> int:
     bank = hindsight_client.bank_id_for_topic(slug)
     base_url = os.environ.get("HINDSIGHT_BASE_URL", hindsight_client.DEFAULT_BASE_URL)
 
-    reflection = asyncio.run(hindsight_client.reflect(base_url, bank, query))
-    section = hindsight_client.render_reflect_section(reflection)
+    timeout = _timeout()
+    outcome = asyncio.run(
+        hindsight_client.reflect(base_url, bank, query, timeout=timeout)
+    )
+
+    if not outcome.ok:
+        # O serviço não chegou a responder. Dizer "sem registro" aqui seria a
+        # mentira que este helper existe pra não contar.
+        print(f"kobe-reflect: {outcome.detail}", file=sys.stderr)
+        print(_texto_de_falha(outcome.status, outcome.detail, base_url))
+        return 3
+
+    section = hindsight_client.render_reflect_section(outcome)
     if not section:
-        print("(sem registro durável que responda isso — ou o serviço está fora. "
-              "Não há base; não afirme de memória.)")
+        # 2xx sem texto: a consulta RODOU até o fim e o acervo não cobre. Este é
+        # o único "não há registro" que se pode afirmar.
+        print(
+            '(O Hindsight RESPONDEU, e o acervo não tem registro que cubra isso. '
+            'Este é um "não há registro" LEGÍTIMO — a consulta rodou até o fim. '
+            "Não há base; não afirme de memória.)"
+        )
         return 0
     print(section)
     return 0

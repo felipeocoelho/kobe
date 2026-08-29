@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import httpx
 
@@ -58,6 +58,18 @@ logger = logging.getLogger("kobe.hindsight")
 DEFAULT_BASE_URL = "http://127.0.0.1:8888"
 DEFAULT_TIMEOUT = 10.0
 RECALL_LIMIT_DEFAULT = 5
+
+# Teto de espera do `reflect`, separado do `DEFAULT_TIMEOUT` porque a operação é de
+# outra ordem de grandeza: o reflect é um LOOP de agente no servidor (3–5 chamadas de
+# LLM + 2–3 ferramentas), não um GET. Medido em 29/08/2026 contra o `claude-haiku-4-5`:
+# 28,1 s na chamada fria, 16,9 s na quente — contra um teto que era de 20,0 s. A fria
+# estourou, o cliente disse "sem registro", e o servidor tinha respondido bem. Este
+# número é ~3,2× a pior medição real: a folga cobre um retry interno de provider
+# (um 529 da Anthropic põe 28 s perto de 45 s) e o crescimento do acervo, que empurra
+# o reflect pra cima a cada fase do Highlander. Não custa latência a nenhum turno —
+# `reflect()` não tem call site fora do `bot/bin/kobe-reflect` (conferido) e o
+# `HINDSIGHT_RECALL` está desligado. Sobrescrevível por `HINDSIGHT_REFLECT_TIMEOUT`.
+REFLECT_TIMEOUT_DEFAULT = 90.0
 
 # Disposições do bank (v2 F2) — cético + literal por CONSTRUÇÃO. É o "HAL, diga a
 # verdade sempre" codificado na ferramenta, não na boa-vontade do modelo.
@@ -301,35 +313,93 @@ async def recall(
         return []
 
 
+class ReflectOutcome(NamedTuple):
+    """O resultado do `reflect` COM a razão, quando não deu certo.
+
+    Existe por causa de um falso negativo silencioso medido em 29/08/2026: o
+    `reflect` devolvia `None` tanto quando o acervo não tinha resposta quanto
+    quando o cliente desistiu por tempo — e o helper imprimia a MESMA frase
+    ("sem registro durável") nos dois casos. O agente que lê essa saída é
+    instruído a tratar vazio como ausência de registro, então uma falha de
+    infraestrutura virava a afirmação "não há registro sobre isso". Instrumento
+    que mente. Um `Optional[dict]` não tem como carregar essa distinção; por
+    isso o tipo de retorno mudou.
+
+    - `status`  — `ok` | `timeout` | `servico_fora` | `http_error` | `erro` |
+                  `sem_pergunta`. Só `ok` significa "o servidor respondeu".
+    - `data`    — o corpo `{text, based_on}` quando `ok`; `None` no resto.
+    - `detail`  — frase curta, pronta pra humano. Importa porque
+                  `str(httpx.ReadTimeout)` é **string vazia** — foi assim que o
+                  bug apareceu no log: `reflect falhou (best-effort): ` e nada.
+
+    Atenção ao ler: `ok` NÃO quer dizer "veio resposta". Quer dizer "o servidor
+    respondeu"; o corpo ainda pode não ter texto, e ESSE é o "não há registro"
+    legítimo. A distinção entre os dois é o ponto todo.
+    """
+
+    status: str
+    data: Optional[dict]
+    detail: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
 async def reflect(
     base_url: str,
     bank_id: str,
     query: str,
     *,
     tags: Optional[list[str]] = None,
-    timeout: float = 20.0,
-) -> Optional[dict]:
-    """Resposta sintetizada + CITADA (caminho confiável, 1–10s). Devolve o dict
-    `{text, based_on}` ou None em falha. `include.facts=True` traz as citações
-    (`based_on.memories`). O bank é cético por config + directive de Fundamentação."""
+    timeout: float = REFLECT_TIMEOUT_DEFAULT,
+) -> ReflectOutcome:
+    """Resposta sintetizada + CITADA (caminho confiável). Devolve um
+    `ReflectOutcome` — nunca levanta. `include.facts` traz as citações
+    (`based_on.memories`). O bank é cético por config + directive de Fundamentação.
+
+    **Best-effort preservado:** todo caminho de erro vira um outcome; esta função
+    não pode derrubar um turno do Kobe. O que mudou em relação à versão anterior
+    não é a robustez — é que a razão da falha deixou de ser jogada fora."""
     query = (query or "").strip()
     if not query:
-        return None
+        return ReflectOutcome("sem_pergunta", None, "pergunta vazia")
     # Hindsight 0.8.3: liga as citações com {} (objeto vazio), não bool — vem em
     # based_on.memories.
     body: dict = {"query": query, "include": {"facts": {}}}
     if tags:
         body["tags"] = list(tags)
+    url = f"{base_url}/v1/default/banks/{bank_id}/reflect"
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{base_url}/v1/default/banks/{bank_id}/reflect", json=body
-            )
+            resp = await client.post(url, json=body)
             resp.raise_for_status()
-            return resp.json() or None
+            return ReflectOutcome("ok", resp.json() or {}, "")
+    # A ORDEM abaixo é significativa: `ConnectTimeout` é subclasse de
+    # `TimeoutException`, então "não achei o serviço" tem que ser pescado ANTES
+    # de "o serviço demorou" — senão um Hindsight fora do ar é reportado como
+    # lentidão, e o operador vai procurar performance onde o problema é o container.
+    except httpx.HTTPStatusError as exc:
+        detail = f"o Hindsight respondeu HTTP {exc.response.status_code}"
+        logger.warning("hindsight reflect falhou (best-effort): %s", detail)
+        return ReflectOutcome("http_error", None, detail)
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        detail = f"não consegui falar com o Hindsight em {base_url} ({type(exc).__name__})"
+        logger.warning("hindsight reflect falhou (best-effort): %s", detail)
+        return ReflectOutcome("servico_fora", None, detail)
+    except httpx.TimeoutException as exc:
+        # O texto é construído aqui de propósito: `str(exc)` vem VAZIO nas
+        # exceções de tempo do httpx, e foi essa string vazia que escondeu o bug.
+        detail = (
+            f"o Hindsight não respondeu em {timeout:g}s "
+            f"(teto do cliente, {type(exc).__name__})"
+        )
+        logger.warning("hindsight reflect falhou (best-effort): %s", detail)
+        return ReflectOutcome("timeout", None, detail)
     except Exception as exc:  # noqa: BLE001 — reflect nunca derruba o turno
-        logger.warning("hindsight reflect falhou (best-effort): %s", exc)
-        return None
+        detail = f"{type(exc).__name__}: {exc}"
+        logger.warning("hindsight reflect falhou (best-effort): %s", detail)
+        return ReflectOutcome("erro", None, detail)
 
 
 def render_recall_section(results: list[dict]) -> Optional[str]:
@@ -355,9 +425,19 @@ def render_recall_section(results: list[dict]) -> Optional[str]:
     return "\n".join(parts) if len(parts) > 1 else None
 
 
-def render_reflect_section(reflection: Optional[dict]) -> Optional[str]:
+def render_reflect_section(
+    reflection: Optional[ReflectOutcome | dict],
+) -> Optional[str]:
     """Monta o bloco `[Memória durável — resposta citada]` a partir do reflect.
-    None se vazio. Inclui a resposta sintetizada + um rastro das citações."""
+    None se vazio. Inclui a resposta sintetizada + um rastro das citações.
+
+    Aceita o `ReflectOutcome` novo **ou** o dict cru de antes — quem já passava o
+    corpo direto continua funcionando. `None` aqui significa só "não há texto pra
+    renderizar"; **não** diz por quê. Quem precisa da razão lê o `status` do
+    outcome, e é obrigação de quem chama distinguir "o acervo não cobre" de "o
+    serviço falhou" antes de dizer qualquer coisa ao operador."""
+    if isinstance(reflection, ReflectOutcome):
+        reflection = reflection.data
     if not reflection:
         return None
     text = (reflection.get("text") or "").strip()

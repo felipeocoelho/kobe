@@ -268,7 +268,8 @@ Escopo = o tópico atual (as envs `KOBE_CHAT_ID`/`KOBE_THREAD_ID` resolvem o ban
 **Como ler a saída — e isto é o que importa:**
 
 - **Veio com citação** → é pista **fundamentada**. Continua valendo a regra de Fundamentação: pista não é verdade. Se der pra conferir contra a fonte viva (o arquivo, o commit, a mensagem), confira.
-- **Veio vazio** (*"sem registro durável que responda isso"*) → **a resposta certa é dizer que não há registro.** Não é licença para responder de memória. Um "não achei" honesto vale mais que um resumo plausível inventado — e é exatamente aqui que o erro acontece.
+- **Veio "não há registro"** (o texto diz isso, ou vem a frase *"não há registro LEGÍTIMO"*, e o comando sai com **exit 0**) → **a resposta certa é dizer que não há registro.** Não é licença para responder de memória. Um "não achei" honesto vale mais que um resumo plausível inventado — e é exatamente aqui que o erro acontece.
+- **Veio `(FALHA DO INSTRUMENTO …)`** (e o comando sai com **exit 3**) → **você não sabe se há registro ou não.** A consulta não chegou a ser respondida: timeout, serviço fora, ou HTTP de erro — o texto diz qual. **Não** relate isso como "não há registro"; diga ao operador que a consulta à memória durável falhou, e por quê. Se foi timeout, tentar de novo costuma resolver (a 2ª chamada é bem mais rápida que a fria). Este terceiro caso existe porque, até 29/08/2026, ele era indistinguível do anterior — o cliente desistia aos 20 s de um servidor que respondia bem aos 28 s, e a memória "dizia" que não havia registro.
 
 **O que ele NÃO é:** busca sobre a conversa bruta. Ele lê o **destilado** do Hindsight, não as mensagens literais. Busca por assunto sobre o histórico (com as falas, citadas, datadas) é o `kobe-remember`, que ainda não existe — chega na F2 do Highlander v3. Até lá, `kobe-reflect` é o que há, e o que ele não cobre você **diz que não cobre**.
 

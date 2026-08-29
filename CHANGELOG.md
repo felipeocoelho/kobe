@@ -4,6 +4,85 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix: o `kobe-reflect` dizia "sem registro" quando o servidor tinha respondido bem (2026-08-29)
+
+**Operador pediu:** consertar o falso negativo silencioso do `bot/bin/kobe-reflect`, com
+escopo fechado em dois itens — subir o teto de espera e **distinguir "o serviço demorou/
+falhou" de "não há registro"** na saída do helper. Palavra dele na aprovação: *"pode
+executar as duas partes exatamente como propostas"*.
+
+**Por quê:** o helper mentia. Um `httpx.ReadTimeout` era engolido por um `except Exception`
+genérico, `reflect()` devolvia `None`, e o `None` era impresso como *"(sem registro durável
+que responda isso…)"* — a mesma frase de um acervo legitimamente vazio. Como o `CLAUDE.md`
+instrui o agente a tratar vazio como ausência de registro, uma falha de infraestrutura virava
+a **afirmação** de que não havia registro. Medido em 29/08/2026: o servidor concluiu em
+**28,1 s** (`Complete: 993 chars, 4 iterations, 3 tool calls`) com resposta boa e fontes
+citadas, e o cliente cortou aos **20,0 s**. Agravante: `str(httpx.ReadTimeout)` é **string
+vazia**, então o log do incidente saiu como `reflect falhou (best-effort): ` e mais nada — o
+erro não deixava nem rastro do que tinha sido. Isto é exatamente o modo de falha que o
+Highlander v3 existe para matar, e o `reflect` é o **instrumento de aferição** das fases
+seguintes (o critério de pronto da F2 é "pergunta produz resposta com citação"): instrumento
+que reporta falso negativo contamina o veredito de tudo o que vier depois.
+
+**Foi feito:**
+- **`bot/hindsight_client.py`** — `reflect()` deixa de devolver `Optional[dict]` e passa a
+  devolver um **`ReflectOutcome`** (`status`, `data`, `detail`). O `except` único vira quatro,
+  **em ordem significativa**: `HTTPStatusError` → `http_error`; `ConnectError`/`ConnectTimeout`
+  → `servico_fora`; `TimeoutException` → `timeout`; `Exception` → `erro`. A ordem importa
+  porque `ConnectTimeout` **é subclasse** de `TimeoutException` — invertida, um Hindsight fora
+  do ar seria reportado como lentidão. O `detail` do timeout é montado no código (com os
+  segundos), justamente porque `str(exc)` vem vazio.
+- **Teto de espera 20,0 s → `REFLECT_TIMEOUT_DEFAULT = 90.0`**, sobrescrevível por
+  `HINDSIGHT_REFLECT_TIMEOUT`. 90 é ~3,2× a pior medição real: a folga cobre um retry interno
+  de provider (um 529 da Anthropic põe 28 s perto de 45 s) e o acervo crescendo a cada fase.
+  **Custa latência a zero turno** — confirmado por `grep`: `reflect()` não tem call site em
+  `bot/`, `keyko/` ou script nenhum fora do helper, e `HINDSIGHT_RECALL=false` em produção.
+- **`render_reflect_section()`** aceita o outcome **ou** o dict cru de antes (retrocompat).
+- **`bot/bin/kobe-reflect`** — lê o teto do env (valor torto degrada pro default e avisa, em
+  vez de morrer) e passa a ter **três** saídas onde havia uma: seção citada (exit 0); *"não há
+  registro LEGÍTIMO"* quando o serviço respondeu e o acervo não cobre (exit 0); e
+  `(FALHA DO INSTRUMENTO — isto NÃO é "sem registro"…)` (**exit 3**) em timeout/serviço fora/
+  HTTP de erro. O texto de falha é imperativo de propósito: quem o lê é um LLM treinado a
+  tratar vazio como ausência, e uma frase branda deixaria o falso negativo voltar pela porta
+  do comportamento.
+- **`CLAUDE.md`** — a seção "Como ler a saída" tinha dois casos e passa a ter três. Sem isso o
+  agente leria a saída nova pela regra velha, e o conserto não chegaria ao comportamento.
+- **`.env.example`** — `HINDSIGHT_REFLECT_TIMEOUT=90` documentado, com o porquê do número e a
+  distinção em relação ao `HINDSIGHT_TIMEOUT_SECONDS` (que é do retain/recall).
+
+**A garantia que NÃO mudou:** `reflect()` continua sendo best-effort e **nunca levanta** —
+todo caminho de erro vira um outcome. O que mudou não é a robustez; é que a razão da falha
+deixou de ser jogada fora. Tem teste dedicado para isso.
+
+**Testes (ambiente de desenvolvimento):**
+- **18 testes novos** em `tests/test_reflect_outcome.py` (timeout, connect-error, o
+  `ConnectTimeout` que prova a ordem dos `except`, HTTP 503, JSON quebrado, exceção
+  arbitrária que não escapa, 2xx com e sem texto, retrocompat do render com dict cru, e o
+  parsing do env com cinco valores tortos). **Suíte inteira: 632 passed, 53 skipped** — nada
+  regrediu.
+- **A/B contra o comportamento real**, com a árvore em `HEAD` extraída via `git archive` e um
+  servidor de teste que aceita a conexão e nunca responde — que é o cenário do incidente
+  (servidor trabalhando, cliente desistindo), reproduzido de forma determinística. Mesmo
+  estímulo, mesmo teto de 20 s, os dois códigos:
+  - **antes:** `reflect falhou (best-effort): ` (vazio) + *"(sem registro durável que responda
+    isso…)"*, **exit 0**;
+  - **depois:** *"o Hindsight não respondeu em 20s (teto do cliente, ReadTimeout)"* +
+    `(FALHA DO INSTRUMENTO — isto NÃO é "sem registro"…)`, **exit 3**.
+- **Integração contra o Hindsight de dev (`:8890`)**: caminho bom → resposta citada em 2,8 s
+  com `Fontes:`; pergunta não coberta → *"Não há registro disso."* (exit 0); serviço fora
+  (porta 1) → `servico_fora` (exit 3); teto de 0,05 s → `timeout` (exit 3).
+- **Achado dos testes, que vale registrar:** na prática o Hindsight responde *em prosa*
+  ("Não há registro disso.") quando o acervo não cobre — ele **não** devolve corpo vazio.
+  Ou seja, a frase *"sem registro durável"* do código antigo, na prática, era quase sempre
+  uma **falha disfarçada de acervo vazio**, e não o acervo vazio. O bug era pior do que o
+  relato original supunha.
+- **Não testado aqui (runbook para a produção):** a chamada fria real de ~28 s contra o
+  Hindsight de produção com o teto novo. É um comando —
+  `bot/bin/kobe-reflect "<pergunta>"` num bank frio — e é validação de operador.
+
+**Reversão:** `git revert` dos commits desta entrada. O teto sozinho é reversível **sem
+deploy**: basta `HINDSIGHT_REFLECT_TIMEOUT=20` no `.env`.
+
 ### Highlander v3 — F0.6-B: a transcrição para de jogar fora os próprios sinais (2026-08-29)
 
 **Operador pediu:** as recomendações da F0.6, item (a) — *"CONSERTAR a instrumentação. É a
