@@ -4,6 +4,884 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### test(f2): a bateria executada — 8 cenários, 8 verdes, e 10 defeitos achados no caminho (2026-08-30)
+
+**Operador pediu:** o §3.4 do briefing — *"toda sessão Coder escreve um plano de
+testes que ela mesma executa"* — e o §9.4, que declara esta bateria a
+**bateria-vitrine**: aqui o teste **é** a entrega.
+
+**Foi feito:** a bateria rodou **quatro vezes**. As três primeiras foram
+iterações de desenvolvimento — **cada uma achou defeito** —, e rodar de novo com
+o código mudado no meio não vale como registro. A 4ª é o registro de aceite.
+
+**A execução de aceite (30/08, 10:37–10:45), 8 cenários:**
+
+| # | Cenário | Resultado |
+|---|---|---|
+| 0 | `/nova` | 🟢 |
+| 1 | arquitetura de borda | 🟢 `#3059`, `#3104`, `#3421` — e **honesto** que a decisão está no arquivo, não em `messages`: sala de missão não vira histórico |
+| 2 | `compat_gate` | 🟢 `#3433`…`#3436`, com as palavras literais do operador e a cadeia causal |
+| 3 | rsync | 🟢 `#1828`, `#2074`, `#2075` |
+| 4 | paráfrase (git × produção) | 🟢 aponta 12/06 |
+| 5 | viagem ao Japão | 🟢 `MENÇÃO LITERAL` → *"não há registro"*, sem costurar |
+| **6** | **maratona de São Silvestre — A RÉGUA** | 🟢🟢 **`SEM REGISTRO` por dois caminhos** |
+| 7 | regressão | 🟢 **7,0 s** (contra 6,5 s antes da fase) |
+
+**Critério de pronto do §5-F2, medido:** `kobe-remember "arquitetura de borda"`,
+processo frio, 10 rodadas — **p50 1,46 s · p95 1,50 s · máx 1,56 s**. O critério
+era 3 s.
+
+**O valor principal da fase não foi o verde: foram os 10 defeitos que ela
+achou** — nenhum vindo de revisão de código, vários apontados **pelo próprio
+agente no meio do turno**. Os quatro mais graves:
+
+1. `kobe-remember "rsync"` devolvia **`SEM REGISTRO`** para um termo em 116
+   mensagens — e esse é o carimbo que o `CLAUDE.md` manda tratar como
+   **afirmável**.
+2. O carimbo `MENÇÃO LITERAL SEM APOIO` **afirmava "nada responde"** sobre um
+   conjunto que respondia.
+3. Pergunta repetida **canibalizava as próprias vagas** (0,825 do eco contra
+   0,614 do melhor resultado real).
+4. Um conserto meu quase matou a régua: `integr` (79 mensagens) é **mais raro**
+   que `rsync` (116), então nenhum limiar de raridade separava os casos.
+
+Cada um tem entrada própria acima, com o número que o provou.
+
+**Duas coisas que eu afirmei e estavam erradas, corrigidas no registro em vez de
+apagadas:** que `/nova` zera a janela de memória (é por `topic_id`, não por
+sessão — o agente foi ao código e me mostrou), e o limiar de eco em 0,90,
+escolhido com um lado só medido.
+
+**Artefato:** relatório completo em
+`user-data/knowledge/kobe/status/2026-08-30-f2-busca-sobre-a-conversa.md`.
+
+**Reversão:** nada a reverter — este commit é registro.
+
+### fix(bateria): correção — `/nova` NÃO zera a janela de memória (2026-08-30)
+
+**Operador pediu:** nada. Isto corrige uma afirmação minha, já commitada.
+
+**O que eu escrevi, e está errado.** Na entrada *"sessão limpa antes de rodar"*
+eu afirmei que `/nova` *"arquiva a sessão e zera essa janela"*, e concluí que
+com isso a bateria ficava **repetível**.
+
+**Quem me corrigiu foi o agente**, na 4ª execução: ele foi ao código e mostrou
+que `bot/memory/working_set.py` filtra a janela imediata por **`topic_id`**, não
+por sessão — `get_immediate_messages(db, topic_id)`, teto de 60 mensagens.
+Conferido no arquivo: ele está certo.
+
+**O que `/nova` faz, então:** arquiva a **sessão** e faz o agente saber que
+começou uma nova. A janela imediata continua enxergando as últimas mensagens do
+**tópico**, inclusive as execuções anteriores da bateria. Ele segue dizendo *"de
+novo"* e *"o conteúdo é o mesmo de 10:21"* — que foi exatamente o que se
+observou.
+
+**O que isolaria de verdade:** cada execução num **tópico próprio** do grupo de
+dev (`--thread-id` diferente). Isso depende de o operador criar o tópico no
+Telegram, então fica **registrado como recomendação**, não como passo
+automático. O roteiro passou a dizer isso, com o aviso no lugar da afirmação
+errada.
+
+**E a ressalva do outro lado, para não corrigir demais:** agente quente não é
+irreal — em uso normal ele está sempre quente. O que a bateria precisa evitar é
+ele ter a resposta da **mesma pergunta** minutos antes.
+
+Suíte: **823 passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### fix(bateria): a régua queima a FORMA da pergunta, não só o termo (2026-08-30)
+
+**Operador pediu:** nada. Descoberto ao preparar a execução de aceite.
+
+**Por quê:** o roteiro já avisava que o cenário anti-invenção queima o termo que
+usa. Descobri que é **pior**: ele queima a **forma** da pergunta.
+
+Depois de três execuções com *"o que a gente decidiu sobre integração com o
+`<marca>`?"*, uma pergunta nova com marca **inédita** (`Databricks`, zero
+ocorrências no acervo) passou a **ACHAR** — e o topo era a pergunta anterior
+sobre `Zendesk`, com similaridade **0,661**, acima do piso de 0,57. Trocar só a
+marca não basta: a próxima pergunta tem que ter **outra forma e outro domínio**.
+
+**E há um segundo requisito, que só apareceu tentando:** para o desfecho ser o
+`SEM REGISTRO` forte, a pergunta precisa conter uma palavra que **nunca**
+apareceu no acervo. *"o que a gente combinou sobre o plano de saúde da empresa?"*
+dá `MENÇÃO LITERAL` — "combinou", "empresa" e "saúde" existem soltas —, que é uma
+recusa mais fraca. *"a maratona de São Silvestre"* dá `SEM REGISTRO`.
+
+**Foi feito:** o roteiro documenta os dois requisitos, manda conferir a
+**pergunta inteira** (não o termo) antes de rodar, e registra o que já foi gasto
+— inclusive a forma. A pergunta da régua passou a ser *"me lembra o que a gente
+combinou sobre a maratona de São Silvestre"*.
+
+**E um aviso novo no desfecho `ACHOU`, que é geral e não da bateria:** um trecho
+marcado como `operador` pode ser uma **pergunta** que ele fez, não uma decisão —
+e uma pergunta parecida com a de agora é vizinho próximo **por construção**. O
+comando manda ler antes de citar como se fosse resposta.
+
+Suíte: **823 passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### fix(remember): pergunta repetida canibalizava as próprias vagas; citação em UTC; trecho vazio (2026-08-30)
+
+**Operador pediu:** nada. Os três saíram da **3ª execução** da bateria, os dois
+primeiros apontados pelo agente no meio do turno.
+
+---
+
+**(1) A pergunta repetida se reencontrava — e ganhava.** É o caso **estrutural**
+que a janela de eco de 90 s não cobre: uma pergunta já feita antes — dez minutos
+ou dez meses — está gravada em `messages`, e a semelhança de uma pergunta com
+ela mesma é ~1. Medido no turno: as duas repetições da paráfrase vieram em **1º e
+2º lugar, com 0,825**, contra **0,614** do melhor resultado de verdade. Sobraram
+**3 vagas úteis de 8**. Palavras do agente: *"a busca recuperou a si mesma, duas
+vezes, no topo"*.
+
+**Conserto:** candidatos acima de `TETO_ECO_COS` são descartados — são a
+pergunta, não uma resposta a ela. E o descarte acontece **antes** do cálculo do
+topo, senão o eco decide o veredito.
+
+**O teto tem os dois lados medidos, e a primeira versão dele não tinha:**
+
+```
+melhor resultado VERDADEIRO em todo o acervo (16 perguntas) ...  0,693
+--------------------------------- 0,75 ---------------------------------
+eco observado (a mesma pergunta se reencontrando) .............  0,825
+```
+
+Escrevi **0,90** primeiro, "com margem de sobra" sobre o 0,693 — e **sem olhar o
+número do outro lado**. Não teria pego o caso real. Um limiar com um lado só
+medido é chute com aparência de critério; o teste guarda os dois números.
+
+---
+
+**(2) A citação saía em UTC.** A ponte fixa `TimeZone=UTC` na conexão de
+propósito, então o carimbo chega em UTC — e a citação *"#3059 · 13/07 18:23"*
+**não batia com o que o operador viu na tela** (15:23 em Brasília). Numa
+ferramenta cujo produto é ser conferível, isso não é detalhe. Passa a converter
+para `America/Sao_Paulo` na exibição; o dado guardado não muda. Data torta
+degrada para o texto cru em vez de derrubar a resposta no meio.
+
+---
+
+**(3) Citação em branco.** Um acerto literal numa mensagem que o indexador ainda
+não tinha quebrado saía com o trecho **vazio** — ocupando a vaga de um resultado
+e não dizendo nada. Agora cai no conteúdo cru da mensagem.
+
+---
+
+**Testes:** 4 novos. Suíte: **823 passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### fix(remember): o carimbo afirmava mais do que sabia — e a bateria o pegou fazendo isso (2026-08-30)
+
+**Operador pediu:** nada. Achado pelo agente na **3ª execução** da bateria, e
+é o defeito mais sério do dia — porque é a própria fase cometendo o pecado que
+ela existe pra combater.
+
+**O que aconteceu.** O desfecho se chamava `MENÇÃO LITERAL SEM APOIO` e o texto
+dele dizia, com todas as letras: *"a palavra aparece no histórico, mas **NADA no
+acervo responde à pergunta**"*. Na consulta *"portão permanente, ordem física das
+colunas, carga posicional"*, ele imprimiu exatamente isso **enquanto trazia
+`#3436`, `#3438` e `#3443` na lista** — que são precisamente as mensagens que
+respondem.
+
+Palavras do agente no turno: *"o carimbo declarou 'nada aqui responde' em cima de
+um conjunto que respondia"*. E ele corrigiu o que tinha me dito oito minutos
+antes: *"às 10:20 eu te disse que esse carimbo estava honesto. Estava errado
+dizer isso."*
+
+**Por que é grave, e não cosmético.** O que a ferramenta **sabe** é: *a palavra
+aparece, e a busca por sentido não passou do piso*. O que ela estava
+**afirmando** é: *nada aqui responde*. A segunda frase não decorre da primeira —
+é exatamente o tipo de salto que o `CLAUDE.md` proíbe o agente de dar, escrito
+por mim dentro da ferramenta que deveria impedi-lo.
+
+**Foi feito:**
+- O desfecho passa a se chamar **`MENÇÃO LITERAL`** — some o "sem apoio", que
+  era a parte que soava a veredito sobre relevância.
+- O texto diz o que se sabe: *"não consigo confirmar que estes trechos respondem
+  — e **também não consigo afirmar que não respondem**. **LEIA e julgue.**"*,
+  com as duas condutas explícitas (fora de contexto → diga e não costure;
+  responde → cite pelo `#número` e data).
+- **Os candidatos por sentido abaixo do piso deixam de ser escondidos** neste
+  desfecho. Era a filtragem "só os literais" que produzia a cegueira: o comando
+  descartava justamente a evidência que contradiria o próprio carimbo. Cada
+  trecho sai com a nota ao lado.
+- `CLAUDE.md` atualizado, com a nota histórica citando a frase velha de
+  propósito — para que ninguém a reintroduza achando que está encurtando.
+
+**Testes:** 3 novos (o texto não afirma ausência de resposta; manda ler e julgar;
+a linha de instrução do `CLAUDE.md` não volta a afirmar). O teste do
+`CLAUDE.md` confere a **linha de instrução**, não o arquivo — a nota histórica
+cita a frase velha e não pode derrubar o teste. Suíte: **819 passando**.
+
+**Reversão:** revert do commit.
+
+### docs(claude): a janela de eco e a dica da frase, ditas para quem usa (2026-08-30)
+
+**Operador pediu:** nada. Fecha duas lacunas entre o que a ferramenta **faz** e o
+que o `CLAUDE.md` **conta**.
+
+**Por quê:** as duas afetam diretamente a conduta do agente, e ele não tinha como
+adivinhá-las.
+
+1. **A janela de eco.** O comando ignora os últimos 90 segundos por padrão. Sem
+   isso escrito, o agente não sabe que existe `--agora` — e a pergunta *"o que a
+   gente falou agora há pouco?"* voltaria vazia, o que ele leria como ausência.
+2. **A dica da frase.** Busca por termo isolado é a mais fraca das três pernas.
+   Já aconteceu de `compat_gate` voltar "menção literal" com trechos
+   irrelevantes e a conversa **aparecer inteira** ao reformular como *"camada de
+   teste de compatibilidade de dados"*. O comando passou a avisar disso na
+   saída; agora o `CLAUDE.md` manda **seguir o aviso antes de concluir
+   ausência**.
+
+Suíte: **817 passando**.
+
+**Reversão:** revert do commit. Só documentação.
+
+### fix(bateria): sessão limpa antes de rodar, e a dica que o próprio agente descobriu (2026-08-30)
+
+**Operador pediu:** nada. Os dois vieram da **2ª execução** da bateria.
+
+**(1) A bateria estava medindo a memória do agente, não a ferramenta.** Na 2ª
+execução, a primeira pergunta recebeu: *"essa é a mesma pergunta que você me fez
+às 10:06 — respondi às 10:08. Não vou refazer a busca."* Isso é o comportamento
+**certo** de quem conversa e o comportamento **errado** para uma bateria: a
+partir dali ela deixa de exercitar o `kobe-remember` e passa a exercitar a janela
+imediata de memória.
+
+**Conserto:** `/nova` como passo 0 do roteiro. Arquiva a sessão e zera a janela.
+Custa um turno de nada e torna a bateria **repetível** — que é a propriedade que
+faltava.
+
+**(2) A dica que o agente descobriu sozinho, agora dita pela ferramenta.**
+Buscando `compat_gate` como termo cru, o resultado foi `MENÇÃO LITERAL SEM
+APOIO` com trechos irrelevantes. O agente **insistiu com frases** ("camada de
+teste de compatibilidade de dados") e a conversa apareceu inteira — a discussão
+de 26/08 sobre o portão, citada em `#3435`, `#3436`, `#3438` e `#3443`. Ele
+relatou isso como *"a primeira mentiu por omissão"*.
+
+Não é mentira: é **limitação de recall**, e ela tem explicação. Busca por um
+termo isolado é a mais fraca das três pernas — a de sentido precisa de contexto
+para achar paráfrase, e um termo solto embeda mal. O que estava errado era a
+ferramenta **não dizer isso**, deixando a descoberta por conta de quem a usa.
+
+Agora os dois desfechos fracos (`SEM REGISTRO` e `MENÇÃO LITERAL SEM APOIO`)
+terminam com a orientação: *se o assunto pode ter sido dito com outras palavras,
+tente de novo com uma frase descrevendo a ideia*. Transforma o achado ad-hoc de
+um turno em comportamento da ferramenta.
+
+Suíte: **817 passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### fix(calibragem): a medição do piso estava medindo o próprio eco (2026-08-30)
+
+**Operador pediu:** nada. Apareceu ao rodar a assertiva **B6** do plano de
+testes, logo depois da bateria.
+
+**Por quê:** `bot/search/calibrar.py` acusou **folga −0,386** e imprimiu o alarme
+*"as faixas se sobrepõem — o modelo parou de separar neste acervo"*. Era
+**falso**, e o número denunciava: três perguntas do grupo "com resposta"
+pontuaram **0,992 / 1,000 / 1,000**. Similaridade 1,000 não é semelhança — é a
+pergunta encontrando **a si mesma**, palavra por palavra.
+
+A causa é a mesma família dos consertos anteriores, e agora ficou claro que é
+uma **lei do sistema**, não um caso isolado: rodar a bateria e rodar a
+calibragem **escreve as perguntas em `messages`**. Elas viram histórico, o
+indexador as embedda, e a sonda seguinte as encontra. **O acervo é a conversa, e
+toda sonda que se roda entra nele.**
+
+**Foi feito:** a calibragem ignora, por padrão, tudo que foi dito na **última
+hora**. É largo o bastante para excluir a sessão de medição inteira (bateria +
+calibragem) e curto o bastante para não descartar acervo de verdade. Com isso a
+folga voltou a **+0,061** — exatamente o valor da bancada original, o que
+confirma que o alarme era eco e não degradação.
+
+O que este conserto evita não é um número feio: é **desligar uma trava boa por
+causa de uma medição errada**. Um alarme falso de *"o modelo parou de separar"*
+levaria a mexer no piso — ou a abandoná-lo.
+
+**Testes:** 1 novo, exigindo que a calibragem aplique a janela. Suíte: **817
+passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### fix(busca): dois defeitos que a BATERIA achou — e o mais grave era o carimbo mentindo (2026-08-30)
+
+**Operador pediu:** nada. Os dois vieram da bateria conversacional da F2, que é
+onde o teste é a entrega. O primeiro foi apontado **pelo próprio agente**, no
+meio do turno, e ele ofereceu abrir uma sala Coder para investigar.
+
+---
+
+**Defeito 1 — `kobe-remember "rsync"` devolvia `SEM REGISTRO`. É falso: `rsync`
+está em 116 mensagens.**
+
+E o que torna isto o mais grave dos dois: `SEM REGISTRO` é justamente o carimbo
+que o `CLAUDE.md` manda tratar como **afirmável** (*"a busca rodou até o fim,
+pode dizer que não há"*). **O selo mais forte da ferramenta estava mentindo** —
+o oposto exato do que a fase existe pra construir.
+
+**A causa, e ela é de desenho, não de digitação.** A perna de palavra foi feita
+para **não votar** sobre existência, com medição boa: sobre 16 perguntas ela dá
+falso positivo em "Japão", "piano" e "maratona". Só que **todas as 16 eram
+frases**. Quando a busca é um **termo cru**, o termo *é* a pergunta: uma frase de
+uma palavra embeda mal, o sentido fica abaixo do piso, e não sobra ninguém para
+votar. O caso nunca apareceu porque eu nunca o medi.
+
+**Conserto:** toda palavra da pergunta que for rara no acervo entra também na
+**busca literal** — sem modo especial para consulta curta. O corte de raridade é
+o mesmo da perna de palavra, e é ele que impede "a gente" (24%) e "sobre" (23%)
+de virarem busca literal casando com tudo.
+
+---
+
+**Defeito 2 — a régua da fase quase virou vítima do conserto do defeito 1.**
+
+Com a perna literal ampliada, *"o que a gente decidiu sobre integração com o
+**Salesforce**?"* passou de `SEM REGISTRO` para `MENÇÃO LITERAL SEM APOIO` —
+porque `integração` existe no acervo. E aqui o número derrubou a saída óbvia:
+**`integr` está em 79 mensagens e `rsync` em 116**. A palavra genérica é **mais
+rara** que o termo técnico. **Nenhum limiar de raridade separa os dois casos.**
+
+O que separa é outra coisa: `Salesforce` **não existe**. Daí a regra, que é a
+mesma em uma frase: **se alguma coisa específica que o operador nomeou não está
+no histórico, não dá pra afirmar que o assunto existe.** A perna literal só vota
+quando **todo** token nomeado teve acerto.
+
+O veto só torna essa perna mais conservadora — a de sentido continua votando
+sozinha. Conferido: *"o que a gente decidiu sobre rsync e Zendesk?"* (um termo
+presente, um inédito) segue respondendo `ACHOU` pelo caminho do sentido.
+
+---
+
+**Defeito 3 — a pergunta encontrava a si mesma.**
+
+O bot grava a mensagem do operador em `messages` **antes** de rodar o turno.
+Visto ao vivo: no cenário do `compat_gate`, a única "menção" que a busca achou
+era a mensagem que o operador tinha acabado de mandar. O agente daquele turno
+percebeu sozinho — *"o único trecho é a tua própria mensagem de agora, que
+obviamente não conta"* — mas **depender de ele perceber** é exatamente o tipo de
+garantia que este projeto não aceita.
+
+**Conserto:** janela de eco de 90 s. Uma mensagem precisa ter 90 segundos para
+contar como *passado*. `--agora` desliga. E o que a janela escondeu é
+**contado e dito** na saída — esconder em silêncio seria o mesmo defeito, de
+outro lado.
+
+---
+
+**Um achado sobre a própria bateria, que virou aviso no roteiro:** o cenário da
+régua **queima o próprio termo**. Ao rodar, a pergunta entra em `messages`; da
+segunda execução em diante a palavra existe no histórico e o resultado correto
+deixa de ser `SEM REGISTRO`. "Salesforce" e "compat_gate" foram gastos na 1ª
+execução. O roteiro agora diz isso, manda conferir que o termo é virgem antes de
+rodar (`kobe-remember "<termo>"` tem que recusar), e lista o que já foi gasto.
+
+**Testes:** 9 novos em `tests/test_search_query.py` — o termo cru virando busca
+literal, a palavra banal não virando, o veto por token ausente, o veto **não**
+bloqueando quando o sentido passa, a janela de eco (liga, desliga e conta).
+Suíte: **816 passando**, 101 pulados.
+
+**Conferido contra o acervo real de dev**, 12 consultas: `rsync` cru agora acha;
+`Zendesk` (termo virgem) recusa; `Kubernetes`, `maratona` e `financiamento do
+carro` recusam; `borda`, `rsync` em frase e a paráfrase citam.
+
+**Reversão:** revert do commit. Sem chave nova, sem mudança de schema.
+
+### fix(roteiros): todo roteiro versionado volta a ser executável — e um teste que garante isso (2026-08-30)
+
+**Operador pediu:** nada. Isto apareceu ao escrever a bateria da F2.
+
+**Por quê:** `tests/roteiros/f1-dispatch.txt` — a metade conversacional da F1,
+versionada e citada no changelog daquela fase — **não parseava**. Ele foi escrito
+na sintaxe do briefing, que põe a espera **depois** da mensagem (`mensagem` numa
+linha, `@25` na seguinte), enquanto `infra/dev_inject.py` a espera **antes**,
+prefixando (`@25 mensagem`). São a mesma pausa vista de lados diferentes, e o
+arquivo estava numa convenção e a ferramenta na outra.
+
+O sintoma é do pior tipo: o roteiro fica no repositório parecendo pronto e só
+falha na hora em que alguém precisa dele — provavelmente sob pressão,
+provavelmente meses depois, provavelmente sem o contexto de quem o escreveu. O
+meu tinha o mesmo defeito, e foi assim que eu descobri o dele.
+
+**Foi feito:**
+- Os dois roteiros convertidos para a sintaxe da ferramenta. A conversão é fiel:
+  cada `@N` solto passa a prefixar a **próxima** mensagem. Um `@N` no fim do
+  arquivo não tem próxima mensagem para prefixar e some — ele já não fazia nada.
+- **`tests/test_roteiros_parseiam.py`** — para **cada** arquivo de
+  `tests/roteiros/`, um teste que exige que ele seja lido pelo `dev_inject`. Sem
+  banco, sem rede, sem bot: só lê arquivo, então roda em qualquer máquina e em
+  todo `pytest`. Há também um teste de vacuidade (se a pasta esvaziar, o
+  parametrizado passaria sem exercitar nada) e um que reprova espera antes da
+  **primeira** mensagem — não há turno anterior para aguardar, então é tempo
+  morto, e num roteiro caro isso conta.
+
+Fecha a **classe**, não o caso: o próximo roteiro escrito na convenção errada
+fica vermelho no mesmo `pytest` em que for escrito. Roteiro é ferramenta de
+operador, e ferramenta de operador que não abre é pior que ferramenta ausente.
+
+**Testes:** 15 novos (2 arquivos × 7 roteiros + 1 de vacuidade). Suíte: **807
+passando**, 101 pulados.
+
+**Reversão:** revert do commit.
+
+### docs(claude): a regra dura — não responder sobre o passado sem rodar o comando (2026-08-30)
+
+**Operador pediu:** o terceiro entregável do §5-F2 do briefing, textual — *"regra
+dura no `CLAUDE.md`: não responder sobre passado sem rodar o comando"*.
+
+**Por quê:** sem a regra, o `kobe-remember` é um utilitário que ninguém chama, e
+a dor original continua igual. A F2 entrega **duas** coisas: o comando e a
+obrigação de usá-lo. A segunda é a que muda o comportamento.
+
+**Foi feito:** seção nova no `CLAUDE.md`, logo depois da do `kobe-reflect`.
+
+- **A regra**, com o motivo colado nela: toda pergunta sobre o passado exige
+  rodar o comando **antes** de responder, e isso **não depende de achar que já
+  sabe** — achar que já sabe é exatamente o estado mental em que a confabulação
+  acontece.
+- **A consequência**: resposta sobre o passado **sem citação é violação, mesmo
+  que o conteúdo esteja certo**. Sem `#número` e data, nem o agente nem o
+  operador conseguem distinguir o que foi lido do que foi lembrado — e essa
+  indistinção *é* o problema.
+- **Os quatro desfechos, com a conduta de cada um** numa tabela: citar; dizer
+  "não tenho registro"; dizer "achei a palavra mas nada responde" **sem costurar
+  as menções**; e — o que mais importa — tratar `FALHA DO INSTRUMENTO` como
+  *"não sei se há registro"*, nunca como ausência.
+- **O quinto caso, o mais traiçoeiro:** `SEM REGISTRO PARCIAL`, quando a busca
+  por sentido (a única árbitra) estava fora.
+- **Uma tabela `kobe-remember` × `kobe-reflect`**, porque os dois se completam e
+  não se substituem — um devolve o destilado, o outro devolve a fala. Com a
+  regra de desempate: **quando discordarem, a fala literal manda**, e o
+  desacordo em si merece ser dito ao operador.
+
+**Uma correção de doc que era mentira ativa:** o `CLAUDE.md` afirmava que o
+`kobe-remember` *"ainda não existe — chega na F2"*. Deixar isso ali seria pior
+que não ter doc nenhuma: ensinaria o agente a **não tentar**.
+
+**Testes:** `tests/test_claude_md_regra_remember.py`, **8 testes**. Eles não
+julgam a redação — guardam os invariantes: que a regra existe, que a frase
+"mesmo que o conteúdo esteja certo" continua lá (sem ela a regra vira "acerte",
+e acertar de memória é o que não dá pra distinguir de confabular), que os quatro
+desfechos estão descritos, e que a separação entre "não há" e "não deu pra
+saber" não foi enxugada por alguém encurtando a seção. Essa distinção já foi
+perdida uma vez neste sistema.
+
+Suíte: **792 passando**, 101 pulados.
+
+**Reversão:** revert do commit. Só documentação.
+
+### feat(remember): `kobe-remember` v1 — a fala literal, citada e conferível (2026-08-30)
+
+**Operador pediu:** *"`kobe-remember "<assunto>"` devolve as falas literais, do
+operador e do agente, citadas com data e número da mensagem"*, em menos de 3
+segundos.
+
+**Por quê:** o `kobe-reflect` devolve o **destilado** do Hindsight — fatos
+consolidados, sintetizados. Ele não cobre *"quais foram as palavras dele?"*,
+*"eu já tinha pedido isso?"*, *"mostra onde a gente falou disso"*. Os dois se
+completam e não se substituem, e isso está escrito no cabeçalho do comando para
+que ninguém troque um pelo outro.
+
+**Foi feito:** `bot/bin/kobe-remember`, com **quatro** desfechos e um texto
+próprio para cada um.
+
+| saída | o que o agente pode afirmar |
+|---|---|
+| `exit 0` + trechos | achou — cite pelo `#número` e pela data |
+| `exit 0` + `MENÇÃO LITERAL SEM APOIO` | a palavra aparece; **nada responde** — não costure |
+| `exit 0` + `SEM REGISTRO` | procurou e não há — **pode** dizer "não tenho registro" |
+| `exit 3` + `FALHA DO INSTRUMENTO` | **não se sabe** — nunca relate como ausência |
+
+**O quarto desfecho é a razão do comando existir do jeito que ele é.** Foi
+exatamente aqui que o `kobe-reflect` errou por meses: dois desfechos diferentes
+no código e **um texto só na tela**, e um timeout virava a afirmação *"não há
+registro sobre isso"*. Há teste asseverando o texto de cada caso, não só o
+código de saída — porque quem lê esta saída é um agente, e o que ele faz depois
+depende inteiramente das palavras que encontrar ali.
+
+**Um quinto estado, que é o mais traiçoeiro:** `SEM REGISTRO` **com a busca por
+sentido fora**. A busca por sentido é a única árbitra de existência; sem ela, um
+"não achei" não é ausência confirmada. O comando marca esse caso como
+**`SEM REGISTRO PARCIAL`** e manda dizer isso ao operador. Apresentá-lo como
+ausência seria a mesma mentira do `FALHA`, só que mais difícil de notar.
+
+**Outros detalhes com motivo:**
+- **Atravessa os tópicos, rotulando** (decisão **E5**). Provado ao vivo: uma
+  pergunta sobre "Japão" feita do tópico Dev Kobe trouxe mensagens do tópico
+  **Pessoal**, identificadas como tais.
+- **`--ver <n>`** abre a vizinhança de uma mensagem. É o que fecha o ciclo de
+  conferência: o operador lê a citação, pede o número, e vê o contexto em volta.
+- **Avisa quando o índice está atrasado** (mensagem gravada há dois minutos pode
+  ainda não estar na busca por sentido) em vez de devolver menos e deixar
+  parecer ausência.
+- **`--desde` / `--ate`** aplicam o recorte de data nas **três** pernas, montado
+  num lugar só: um recorte que valesse para duas e não para a terceira daria um
+  resultado misturando períodos, e ninguém perceberia — cada linha continua
+  verdadeira sozinha.
+
+**Um conserto de honestidade achado rodando o comando de verdade.** A saída
+dizia *"descartei (comuns demais no acervo): salesforc"* — e `salesforc` não é
+comum, é **inexistente**. Dizer que "Salesforce é comum demais no acervo" é o
+oposto exato da verdade, e é o tipo de frase que faz o operador desconfiar de
+todo o resto. Agora são duas linhas distintas: **"nunca apareceu no histórico"**
+(que é quase a resposta à pergunta) e **"ignorei — comuns demais para
+discriminar"**.
+
+**Testes:** `tests/test_kobe_remember.py`, **13 testes**, sobre o TEXTO de cada
+desfecho e não só sobre o código de saída. Suíte: **784 passando**, 101 pulados.
+
+**Critério de pronto do briefing — cumprido e medido.** `kobe-remember
+"arquitetura de borda"` em processo frio, 10 rodadas contra o acervo real de dev:
+**p50 1,58 s · p95 1,82 s · máx 1,85 s**. O critério era 3 s.
+
+**Reversão:** revert do commit. O comando só lê.
+
+### feat(busca): as três pernas, a fusão e o piso anti-invenção (2026-08-30)
+
+**Operador pediu:** que a busca *"por palavra e por sentido, combinadas"* ache
+nome próprio, sigla e caminho de arquivo **e** paráfrase — e que, quando não
+houver registro, o sistema **diga que não há** em vez de inventar. O último item
+é o que reprova a fase inteira se falhar.
+
+**Por quê:** a dor original é responder sobre o passado de memória. Um índice que
+sempre devolve alguma coisa não conserta isso — só troca achismo por achismo com
+citação. O produto principal desta peça é o **veredito**, não a lista.
+
+**Foi feito:** `bot/search/query.py` e `bot/search/calibrar.py`.
+
+**As três pernas, e o que cada uma resolve:**
+- **literal** (`ILIKE` sobre o índice trigrama) — identificadores e nomes
+  próprios. Existe porque o dicionário `portuguese` **destrói** identificador:
+  `kobe-recall-since` vira `kobe-recall-sinc` + `recall` + `sinc`, e `sinc` casa
+  com "sincronizar".
+- **palavra** (`search_tsv`, pontuada por raridade/IDF) — **ordena e não vota**.
+- **sentido** (`pgvector`, varredura exata) — a única que acha paráfrase, e a
+  **única árbitra** de existência.
+
+**A decisão de desenho que veio de medição, e não de gosto.** Sobre 16 perguntas
+(8 com resposta no acervo, 8 sobre assuntos que nunca existiram), a massa de IDF
+da perna de palavra ficou assim:
+
+```
+com resposta : [0,00  0,00  7,09  7,34  8,92  10,61  11,80  14,55]
+sem resposta : [3,06  5,91  7,16  7,56  7,60   8,89   8,90   8,95]
+```
+
+Duas perguntas legítimas tiraram **zero** e quatro perguntas sobre assuntos
+inexistentes tiraram **entre 7,5 e 9** — porque "Japão", "piano" e "maratona"
+existem no acervo, soltos, fora de contexto. **Raridade não é relevância.** Um
+desenho em OU entre as três pernas deixaria passar exatamente a classe
+"Salesforce". Daí a regra:
+
+```
+existe = (sentido acima do piso) OU (a perna literal achou o identificador)
+```
+
+**Os quatro desfechos**, e o quarto é o que impede o erro que este sistema já
+cometeu duas vezes:
+
+| desfecho | quando |
+|---|---|
+| `ACHOU` | o sentido passou do piso |
+| `MENCAO_LITERAL_SEM_APOIO` | o token aparece, mas o sentido não passou |
+| `SEM_REGISTRO` | procurou e não há |
+| `FALHA` | **não deu pra saber** — banco fora, embedding fora |
+
+**Sobre o `MENCAO_LITERAL_SEM_APOIO`:** a perna literal responde *"a palavra
+aparece"*, não *"existe decisão sobre isso"*. Medido no acervo: `Salesforce`,
+`Kubernetes` e `maratona` dão **zero**; `Japão` dá **7** e `piano` dá **2**,
+soltas. O rótulo obriga o agente a dizer *"achei a palavra X em N mensagens, mas
+nada que responda"* — nunca a costurar as menções numa resposta.
+
+**Dois defeitos meus, achados testando contra o acervo real:**
+
+1. Quando **todos** os radicais da pergunta eram banais, o fallback "use os N
+   mais raros" reintroduzia exatamente o ruído que o corte tinha removido: em
+   *"o que a gente falou sobre o working_set.py"* os três menos comuns são
+   `sobre` (23%), `a gente` (24%) e `falou` (14%). Agora a perna de palavra
+   simplesmente **fica de fora** dessa pergunta — quem a carrega é a literal e a
+   de sentido, e nenhuma das duas depende dela.
+2. A repesca dos "N mais raros" (que existe para salvar "arquitetura", em 5,2%,
+   de um corte em 5%) **não tinha teto próprio**, então numa pergunta curta ela
+   trazia os banais de volta pela porta dos fundos. Ganhou `FATOR_REPESCA = 2`:
+   repesca até o dobro do corte, o que salva "arquitetura" e continua barrando
+   "a gente".
+
+**`bot/search/calibrar.py` — o piso não é literal no código, e há como remedi-lo.**
+A folga entre "achou" e "não achou" é de **0,061**, e é honesto dizer que ela
+envelhece conforme o acervo cresce. O comando roda as 16 perguntas contra o
+acervo do dia e imprime a folga; folga negativa não se resolve espremendo o
+número — é sinal de que o modelo parou de separar. As oito perguntas de controle
+são deliberadamente **plausíveis** para este operador (dieta, viagem, aluguel,
+maratona): um controle feito de absurdos daria uma folga bonita e falsa.
+
+**Testes:** `tests/test_search_query.py`, **26 testes**, com ponte de mentira
+roteirizada por perna. A maior parte não testa "achar" — testa **não achar**, e
+as três formas de errar nisso: achar o que não existe, dizer que não existe
+quando o instrumento falhou, e costurar menção solta em resposta. Há teste
+explícito para *"a perna de palavra SOZINHA não faz existir"* (o caso
+piano/Japão) e para *"banco fora é FALHA e não SEM_REGISTRO"*.
+
+Suíte: **771 passando**, 101 pulados.
+
+**Verificado contra o acervo real de dev (3.558 mensagens, 7.706 trechos),
+sete cenários, sete corretos:**
+
+| pergunta | veredito | |
+|---|---|---|
+| arquitetura de borda | `ACHOU` — #3059 e #3104, de julho | ✅ |
+| `compat_gate` | `SEM_REGISTRO` — o termo não existe em dev | ✅ |
+| rsync | `ACHOU` — #2146, o incidente de 12–13/06 | ✅ |
+| paráfrase sobre git/produção | `ACHOU` — #2047, #2074, #2081, de 12/06 | ✅ |
+| **Salesforce** | **`SEM_REGISTRO`** | ✅ |
+| viagem para o Japão | `MENCAO_LITERAL_SEM_APOIO` | ✅ |
+| `working_set.py` | `ACHOU` — #3312 e #3310, pela perna literal | ✅ |
+
+**Uma limitação conhecida, nomeada:** a perna literal é **sensível a acento** —
+`Japao` digitado sem acento não acha `Japão` gravado com. Não morde no caso que
+motiva a perna (identificador é ASCII: `compat_gate`, `working_set.py`), e a
+busca por sentido cobre a pergunta de qualquer forma. Fechar isso exigiria a
+extensão `unaccent`, que não está instalada; fica registrado, não escondido.
+
+**Reversão:** revert do commit. Sem chave nova — `query.py` só lê.
+
+### feat(busca): o quebrador de trechos, o embedder e o indexador — tudo ATRÁS (2026-08-30)
+
+**Operador pediu:** a carga do índice da F2 sobre o histórico inteiro, sem que a
+conversa fique mais lenta — *"performance e qualidade vêm antes de orçamento"*.
+
+**Por quê:** o vetor de um trecho exige uma chamada externa. Colocar isso no
+caminho do turno faria toda mensagem do operador esperar por uma API antes de
+ser gravada. A decisão **E3** do briefing já dizia como: *"nada tem 'fechar a
+sala' como gatilho; tudo é contínuo, dirigido por relógio ou acúmulo"*.
+
+**Foi feito:** o pacote `bot/search/`, com a divisão que garante a promessa —
+**a gravação de uma mensagem nunca espera por embedding**.
+
+- **`chunker.py`** — quebra em janelas de 900 caracteres, preferindo parágrafo.
+  Existe porque 30% das mensagens passam de 1.500 caracteres e todo modelo de
+  embedding corta a entrada **descartando o resto em silêncio**. O teste central
+  é "não perde texto": se ele quebrasse, a metade de baixo de uma mensagem longa
+  não estaria no índice e a busca responderia *"não tenho registro"* sobre algo
+  gravado — sem erro nenhum na tela.
+- **`embedder.py`** — a **única** peça que fala com o modelo. Concentrar aqui é
+  o que torna "o mesmo modelo dos dois lados" propriedade do código: vetor de um
+  modelo comparado com vetor de outro não erra por pouco, erra por completo, e
+  erra calado. Confere a dimensão contra `VECTOR(1536)` e **falha alto** se
+  divergir.
+- **`indexer.py`** — quebra, embedda e recalcula a estatística de radicais. Todo
+  estado vive no banco (`embedding IS NULL` **é** a fila), então reiniciar não
+  perde nem duplica. Ganhou CLI (`status`, `carga`, `tick`, `df`).
+- **`source.py`** — a fonte do Keyko, no molde já provado do coletor da F1: faz
+  o trabalho **dentro do tick** e devolve lista vazia de despertares. **Custo de
+  cota: zero** — nenhum `claude -p` é acordado. Cadência de 60 s, com piso de
+  10 s para um valor torto no `.env` não virar laço apertado.
+- **`SEARCH_INDEX_ENABLED`**, default **false**, documentada no `.env.example`
+  junto com os pisos e o modelo.
+
+**O contrato de falha, que é o coração desta entrega.** Toda falha do embedder
+vira **`EmbeddingIndisponivel`** — exceção com nome próprio — e o indexador a
+deixa subir em vez de gravar metade. **Nunca** se devolve lista vazia por erro:
+vazio significa "não havia o que embeddar", e só isso. Este sistema já cometeu o
+falso negativo silencioso duas vezes (a F0.5-B, com os embeddings tomando 401 e o
+`reflect` respondendo "não há registro"; e o `kobe-reflect` de 29/08, com o
+timeout indistinguível de acervo vazio). Não vou repetir.
+
+**Um detalhe que não é detalhe:** a fonte recebe uma **fábrica** de ponte, não a
+ponte pronta. O Keyko sobe antes de qualquer turno e pode ficar horas ocioso, e
+uma conexão aberta desde a inicialização é exatamente o socket morto que já fez
+mensagem do operador sumir três vezes em 30 dias.
+
+**Testes:** `tests/test_search_indexer.py`, **31 testes** — o quebrador (não
+perde texto, prefere parágrafo, fatia com sobreposição, respeita o teto), o
+contrato de falha do embedder (com cliente de mentira: falha vira exceção,
+dimensão errada falha alto, lote respeitado, precisão do literal do `pgvector`),
+a chave (desligada, a ponte **não é nem lida** — provado com uma ponte que
+registra toda chamada), o tick que não derruba o daemon, e a fonte que nunca
+devolve despertar.
+
+Suíte: **745 passando**, 101 pulados. `tests/portability_guard.sh` verde.
+
+**Carga inicial em dev, executada:** 3.558 mensagens → **7.706 trechos, todos
+com vetor, em 53,9 s** (US$ 0,026 de API). A estatística de radicais ficou com
+**16.541** entradas. Números do acervo, por mensagem: "a gente" em 24%, "sobre"
+em 23%, "conversa" em 16% — contra "rsync" em 3,3% e "borda" em 2,1%. É essa
+distância que a busca usa pra saber o que é sinal.
+
+**Reversão:** revert do commit; ou, sem tocar em código, `SEARCH_INDEX_ENABLED=false`
+— o indexador para, `message_chunks` fica inerte, nada é apagado.
+
+### feat(schema): migration 007 — o índice de busca sobre a conversa (2026-08-30)
+
+**Operador pediu:** a F2 do Highlander v3 — *"índice de busca sobre `messages`,
+por palavra e por sentido, combinadas"*, com o comando `kobe-remember` devolvendo
+**as falas literais citadas com data e número da mensagem**. Esta entrada é só a
+estrutura de banco; o código de busca vem em seguida.
+
+**Por quê:** hoje toda pergunta sobre o passado é respondida de memória, e é daí
+que sai o achismo. O que faltava não era um modelo melhor: era um **índice** sobre
+o que foi realmente dito, e um número que o operador possa conferir.
+
+**Foi feito:** `infra/migrations/007_message_search.sql`, estritamente aditiva.
+
+- **`messages.seq`** — o número que se cita. A chave é UUID e não serve pra
+  conferir nada. Preenchida em ordem cronológica no histórico e por sequência
+  daí pra frente, com `DEFAULT nextval(...)`: **nenhuma linha de código do bot
+  mudou** pra isso. Se dependesse do código, um caminho de INSERT esquecido
+  gravaria NULL e a citação perderia o número.
+- **`messages.search_tsv`** — coluna **gerada** (`GENERATED ALWAYS AS … STORED`)
+  com `to_tsvector('portuguese', content)`, mais índice GIN. Gerada é o ponto: o
+  Postgres a mantém sozinho e nenhum caminho de código pode esquecer de
+  atualizá-la.
+- **Índice GIN trigrama sobre `content`** — a perna **literal**. Ela existe
+  porque o dicionário `portuguese` faz *stemming*, e stemming em identificador é
+  destruição: medido, `kobe-recall-since` vira `kobe-recall-sinc` + `recall` +
+  `sinc`, e a busca devolveu resultados **sobre imagem no WhatsApp**. Com o
+  índice trigrama, `compat_gate`, `working_set.py` e `HINDSIGHT_RECALL` saem em
+  2 a 11 ms, sem varredura.
+- **`message_chunks`** — a perna por **sentido**, `VECTOR(1536)`
+  (`text-embedding-3-small`, decisão do operador). É por **trecho** e não por
+  mensagem porque 30% das mensagens do acervo passam de 1.500 caracteres (p99 =
+  6.322) e todo modelo de embedding corta a entrada **descartando o resto em
+  silêncio** — a metade de baixo de 1 em cada 3 mensagens ficaria fora do índice
+  sem ninguém perceber. Índice **parcial** em `WHERE embedding IS NULL`: a
+  pergunta do indexador é "o que falta?", e o custo dela passa a ser
+  proporcional ao que falta, não ao acervo.
+- **`search_lexeme_df`** — em quantas mensagens cada radical aparece. Sem essa
+  estatística a busca por palavra **não distingue "achei" de "não achei"**:
+  medido, *"o que a gente decidiu sobre integração com o Salesforce?"* — assunto
+  que nunca existiu — devolvia 30 resultados com nota equivalente à de uma
+  pergunta legítima, porque "decidiu", "a gente" e "sobre" estão em todo lugar.
+  `ts_rank` é nota **local**: mede o casamento dentro do documento e não sabe que
+  o termo é banal no acervo.
+
+**Duas decisões com número, não com gosto:**
+
+- **Sem índice aproximado de vizinhança (HNSW).** No acervo de hoje a varredura
+  **exata** leva 67 ms e o HNSW, 2,8 ms — e os dois devolvem o mesmo topo. Não
+  vale trocar exatidão por 64 ms quando é justamente a exatidão que sustenta o
+  piso do *"não tenho registro"*: um vizinho perdido pela busca aproximada
+  viraria uma **recusa falsa**. Vira uma linha de SQL quando o acervo passar de
+  ~50 mil trechos (construir custou 6,2 s).
+- **`VECTOR(1536)` e não 384.** Foi o único dos dois modelos comparados em que as
+  perguntas COM resposta e as SEM resposta ocupam faixas de similaridade
+  **separadas** (folga +0,061 contra −0,025 do modelo local, sobre 16 perguntas).
+  Sem separação não existe o piso que faz o sistema dizer "não tenho registro"
+  em vez de inventar. **Porta de saída:** trocar de modelo depois custa
+  reindexar o que já foi indexado.
+
+**Uma correção de rota, e ela vale registrar.** A primeira versão espelhava a
+mudança em `infra/schema.sql`, como o plano previa. O runner recusou, e estava
+certo: **`schema.sql` É a migration `000`**, e migration aplicada é imutável — o
+guarda de drift acusa a mudança de checksum em todo banco que já a aplicou. A
+migration `006` também não tocou nele. Estrutura nova vai **só** em migration
+nova. Como bônus, reverter eliminou uma divergência real: com o `schema.sql`
+alterado, uma instalação nova e um banco migrado ficavam com `attnum` diferente
+nas colunas novas; com ele congelado, as duas impressões digitais são **idênticas
+byte a byte** (conferido com dois bancos de apoio). Há teste guardando isso.
+
+**Testes:** `tests/test_message_search_schema.py`, **18 testes** — 10 sobre o
+arquivo (rodam sempre, sem banco: aditividade, colunas no fim, dimensão do vetor,
+guarda do backfill, `is_called=false`, índice parcial, ausência de HNSW,
+`schema.sql` congelado) e 8 sobre o banco (idempotência aplicando **duas vezes**,
+`seq` único e cronológico, mensagem nova ganhando `seq` sozinha, tsvector se
+mantendo no INSERT e no UPDATE, índice trigrama sendo usado em vez de varredura,
+cascade de trecho, UNIQUE de `(message_id, idx)`).
+
+Suíte: **811 passando, 4 pulados** com banco de integração; **714 passando** sem
+banco. Os 18 testes de banco também foram rodados contra o **`kobe_dev` real**,
+com as 3.558 mensagens: 18/18 verdes.
+
+Aplicada em **dev**: 3.558 mensagens numeradas de 1 a 3.558 em ordem cronológica,
+zero `search_tsv` nulo, em **2,7 s**. Portão de compatibilidade **verde em dev**.
+
+**Produção segue na `006`, de propósito** — migration em produção é do agente
+principal, não desta sessão. E o portão agora **diz isso com precisão**, em vez de
+deixar inferir: `[migration] banco ATRASADO: falta(m) a(s) migration(s) 007`,
+seguido dos 7 sintomas. Antes, só apareceriam os sintomas.
+
+**Reversão:** `SEARCH_INDEX_ENABLED=false` deixa `message_chunks` inerte. A
+estrutura é aditiva e se mantém sozinha (a coluna é gerada); sair de vez seria
+uma migration de remoção, não prevista.
+
+### chore(schema): a referência do portão regenerada, e a trava que impede ela nascer velha (2026-08-30)
+
+**Operador pediu:** dentro do escopo da F2 — *"regenere a referência pelo caminho
+documentado, deixe o portão verde, e — mais importante — feche a causa: hoje nada
+obriga a referência a acompanhar uma migration nova"*.
+
+**Por quê:** a F1 acrescentou a migration `006` e **não** regenerou
+`tests/fixtures/schema_expected.json`. A consequência não foi um teste vermelho:
+foi `infra/compat_gate.py` acusando **4 divergências falsas** — *"as tabelas
+`work_*` existem no alvo e não no schema versionado"* — nos **dois** ambientes, ao
+mesmo tempo em que uma suíte de 691 testes ficava verde. Um portão que vive
+vermelho deixa de ser sinal e vira ruído que todo mundo aprende a ignorar. É
+exatamente o defeito que o portão nasceu pra corrigir, reproduzido dentro dele.
+
+E o erro não foi de disciplina, foi de desenho: **nada** olhava para essa
+defasagem, e ela ainda por cima se apresentava **disfarçada de outra coisa**
+(tabela sobrando), obrigando quem lê a inferir a causa.
+
+**Foi feito:**
+
+- **`infra/schema_fingerprint.py` — impressão digital versão 2.** Passa a gravar
+  a chave `migrations`: a lista de versões da tabela de controle do runner. A
+  distinção com o que ficou de fora é o ponto — `applied_at` mudaria a impressão
+  digital a cada aplicação e viraria ruído; a lista de versões só muda quando o
+  modelo muda. `None` (banco nunca tocado pelo runner) e `[]` (controle vazio)
+  são valores diferentes, de propósito.
+- **`infra/compat_gate.py` — duas classes novas**, que separam duas perguntas que
+  antes se confundiam numa só:
+  - **`migration`** — *"o BANCO está em dia com a referência?"*. Atrasado manda
+    rodar `migrate.py up`; adiantado manda **regenerar a referência**, que é o
+    conserto certo e o oposto do que a mensagem antiga sugeria. Ela é avaliada
+    **antes** das tabelas: *"falta a migration 007"* é a causa de *"falta a
+    tabela X"*, e a causa se lê primeiro (há teste exigindo essa ordem).
+  - **`referencia`** — *"a REFERÊNCIA está em dia com `infra/migrations/`?"*.
+    É a que fecha a causa, e é de propósito a peça mais burra do arquivo: duas
+    listas de string, **sem banco, sem rede, sem ambiente**.
+- **`tests/test_schema_reference.py` — 8 testes, nenhum toca no banco.** Por isso
+  rodam em qualquer máquina, em todo `pytest`, inclusive num clone limpo — e não
+  são do tipo que "pula", que é verde por ausência e foi assim que a `006` passou.
+  Quem escrever a próxima migration vê vermelho **no mesmo pytest** em que a
+  escreveu, com a receita da regeneração na mensagem. Quatro deles injetam o
+  vermelho de propósito (migration nova, migration apagada, impressão digital sem
+  a chave, mesma composição em ordem trocada).
+- **`tests/fixtures/schema_expected.json` regenerada** de um banco de apoio
+  erguido do zero por `infra/provision_db.py` + `infra/migrate.py up` — o caminho
+  documentado, que é o que faz *"schema versionado × banco real"* ser verdade por
+  construção e dispensa a produção no ar.
+- **Um teste que era assertiva errada foi corrigido, não silenciado.**
+  `test_referencia_tem_as_seis_tabelas_pos_aposentadoria` fixava a lista
+  **fechada** de tabelas, então ele transformava *"entrou tabela nova"* — que é o
+  trabalho normal — em falha. Virou
+  `test_o_chat_manager_continua_aposentado_na_referencia`, que assevera o que o
+  nome promete: `conversations` e `conversation_tags` fora, as seis originais
+  dentro, `messages.conversation_id` inexistente. Quem vigia tabela
+  entrando e saindo é o portão, contra a referência.
+
+**Um conserto de caminho, achado ao escrever:** carregar `infra/migrate.py`
+dinamicamente sem registrá-lo em `sys.modules` estoura com
+`AttributeError: 'NoneType' object has no attribute '__dict__'` vindo de dentro
+do `dataclasses` da biblioteca padrão — porque ele resolve as anotações via
+`sys.modules[cls.__module__]`. O erro não diz nada sobre a causa; está comentado
+ao lado da linha.
+
+**Testes:** suíte **704 passando, 93 pulados** (era 691 — 13 testes novos: 8 do
+arquivo novo e 5 da classe `migration`). `infra/compat_gate.py` **verde nos dois
+ambientes** — dev e produção (produção apenas **lida**, zero escrita).
+`tests/portability_guard.sh` verde: a referência regenerada não carrega nome de
+banco de apoio nem caminho de máquina, e há teste exigindo isso.
+
+**Reversão:** revert do commit. Nada aqui é importado pelo runtime do bot — as
+três peças são ferramenta de operador e suíte.
+
 ### test(f1): a bateria executada — 99 testes novos, os cinco critérios provados (2026-08-29)
 
 **Operador pediu:** o §3.4 do briefing, que vale a partir de já — *"toda sessão

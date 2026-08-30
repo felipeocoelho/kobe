@@ -22,7 +22,7 @@ driver devolve muda de `+00:00` para o deslocamento local — e o Kobe compara
 `created_at` como STRING em pelo menos um caminho. E exatamente o formato de
 armadilha que motivou o portao, encontrado pelo portao.
 
-AS SEIS CLASSES QUE ELE PEGA
+AS OITO CLASSES QUE ELE PEGA
 ----------------------------
 1. `ambiente`   — collation, ctype, encoding, `data_checksums`, `TimeZone`,
                   versao MAIOR do servidor.
@@ -37,6 +37,29 @@ AS SEIS CLASSES QUE ELE PEGA
                   de `vector` que a referencia fixa. Vide a ressalva honesta na
                   funcao correspondente: isto e uma lista de proibidos, nao uma
                   prova.
+7. `migration`  — o BANCO esta atrasado (ou adiantado) em relacao a referencia.
+8. `referencia` — a REFERENCIA esta velha em relacao a `infra/migrations/`.
+
+AS DUAS CLASSES NOVAS, E POR QUE ELAS PRECISARAM EXISTIR (2026-08-30)
+--------------------------------------------------------------------
+A F1 acrescentou a migration `006` e NAO regenerou a referencia. Resultado: o
+portao passou a acusar 4 divergencias falsas ("as tabelas `work_*` existem no
+alvo e nao no schema versionado") nos DOIS ambientes, ao mesmo tempo em que uma
+suite de 691 testes ficava verde. Um portao que vive vermelho deixa de ser
+sinal — que e precisamente o defeito que este arquivo nasceu para corrigir.
+
+O erro nao foi de disciplina; foi de desenho: NADA obrigava a referencia a
+acompanhar uma migration nova, e a divergencia so aparecia disfarcada de outra
+coisa (tabela sobrando). As duas classes novas separam as duas perguntas que
+antes se confundiam numa so:
+
+- `migration`  responde "o BANCO esta em dia com a referencia?"
+- `referencia` responde "a REFERENCIA esta em dia com o repositorio?"
+
+A segunda e a que fecha a causa, e ela **nao precisa de banco nenhum**: compara
+a lista de versoes gravada na referencia contra os arquivos de
+`infra/migrations/`. Por isso ela tambem roda como teste puro da suite
+(`tests/test_schema_reference.py`), em qualquer maquina, sempre.
 
 O QUE ELE NAO EXIGE
 -------------------
@@ -300,6 +323,107 @@ def scan_pgvector(ref: dict, raiz: Path = _PROJECT_ROOT) -> list[Finding]:
     return out
 
 
+def _cmp_migrations(ref: dict, tgt: dict) -> list[Finding]:
+    """O BANCO esta em dia com a referencia? (classe `migration`)
+
+    `None` de qualquer um dos lados significa "banco nunca tocado pelo runner" —
+    e ai nao ha o que julgar, entao nao se acende nada. Silencio por ignorancia
+    declarada, nao por ausencia de checagem.
+    """
+    r, t = ref.get("migrations"), tgt.get("migrations")
+    if r is None or t is None:
+        return []
+    faltando = [v for v in r if v not in set(t)]
+    sobrando = [v for v in t if v not in set(r)]
+    out: list[Finding] = []
+    if faltando:
+        out.append(
+            Finding(
+                "migration",
+                f"banco ATRASADO: falta(m) a(s) migration(s) {', '.join(faltando)} — "
+                "rode `python infra/migrate.py up --database-url <alvo>`",
+            )
+        )
+    if sobrando:
+        out.append(
+            Finding(
+                "migration",
+                f"banco ADIANTADO: tem a(s) migration(s) {', '.join(sobrando)} que a "
+                "referencia nao conhece — a referencia esta VELHA; regenere-a "
+                "(vide a classe `referencia`)",
+            )
+        )
+    return out
+
+
+def cmp_referencia_vs_disco(ref: dict, versoes_no_disco: list[str]) -> list[Finding]:
+    """A REFERENCIA esta em dia com `infra/migrations/`? (classe `referencia`)
+
+    Esta e a trava que faltava, e ela e de proposito a mais burra do arquivo:
+    duas listas de string, sem banco, sem rede, sem ambiente. Uma migration nova
+    sem regenerar a referencia acende aqui no mesmo `pytest` em que ela foi
+    escrita — e nao semanas depois, disfarcada de "tabela sobrando".
+    """
+    r = ref.get("migrations")
+    if r is None:
+        return [
+            Finding(
+                "referencia",
+                "a referencia nao registra a lista de migrations (impressao digital "
+                "antiga) — regenere-a com infra/schema_fingerprint.py",
+            )
+        ]
+    if r == versoes_no_disco:
+        return []
+    faltando = [v for v in versoes_no_disco if v not in set(r)]
+    sobrando = [v for v in r if v not in set(versoes_no_disco)]
+    partes = []
+    if faltando:
+        partes.append(f"nao conhece {', '.join(faltando)}")
+    if sobrando:
+        partes.append(f"conhece {', '.join(sobrando)}, que nao existe(m) no disco")
+    if not partes:  # mesma composicao, ordem diferente
+        partes.append(f"esta fora de ordem: {r} vs {versoes_no_disco}")
+    return [
+        Finding(
+            "referencia",
+            "tests/fixtures/schema_expected.json esta VELHA — "
+            + "; ".join(partes)
+            + ". Regenere-a de um banco de apoio:\n"
+            "  python infra/migrate.py up --database-url <banco-de-apoio>\n"
+            "  python infra/schema_fingerprint.py --database-url <banco-de-apoio> "
+            "--out tests/fixtures/schema_expected.json",
+        )
+    ]
+
+
+def versoes_no_disco(raiz: Optional[Path] = None) -> list[str]:
+    """As versoes de migration que existem no repositorio, em ordem.
+
+    Import tardio de proposito: `migrate` e vizinho, mas so e necessario aqui —
+    e o portao precisa continuar rodando num checkout sem venv.
+    """
+    import importlib.util
+
+    nome = "_kobe_migrate_para_o_portao"
+    infra = (raiz or _PROJECT_ROOT) / "infra"
+    spec = importlib.util.spec_from_file_location(nome, infra / "migrate.py")
+    if spec is None or spec.loader is None:  # pragma: no cover — caminho impossivel
+        raise SystemExit(f"erro: nao consegui carregar {infra / 'migrate.py'}")
+    mod = importlib.util.module_from_spec(spec)
+    # Registrar ANTES de executar nao e detalhe: `migrate.py` define uma
+    # `@dataclass`, e o `dataclasses` resolve as anotacoes via
+    # `sys.modules[cls.__module__]`. Sem esta linha, o import estoura com um
+    # `AttributeError: 'NoneType' object has no attribute '__dict__'` vindo de
+    # dentro da biblioteca padrao — erro que nao diz nada sobre a causa.
+    sys.modules[nome] = mod
+    try:
+        spec.loader.exec_module(mod)
+        return [m.version for m in mod.discover()]
+    finally:
+        sys.modules.pop(nome, None)
+
+
 def compare(ref: dict, tgt: dict, *, scan_repo: bool = True) -> list[Finding]:
     """Todas as divergencias, em ordem de gravidade (ambiente primeiro)."""
     if ref.get("fingerprint_version") != tgt.get("fingerprint_version"):
@@ -315,12 +439,16 @@ def compare(ref: dict, tgt: dict, *, scan_repo: bool = True) -> list[Finding]:
     achados: list[Finding] = []
     achados += _cmp_ambiente(ref, tgt)
     achados += _cmp_extensoes(ref, tgt)
+    # Antes das tabelas de proposito: "falta a migration 007" e a CAUSA de
+    # "falta a tabela message_chunks". A causa se le primeiro.
+    achados += _cmp_migrations(ref, tgt)
     achados += _cmp_tabelas(ref, tgt)
     achados += _cmp_colunas(ref, tgt)
     achados += _cmp_objetos(ref, tgt, "indexes", "indice")
     achados += _cmp_objetos(ref, tgt, "constraints", "restricao")
     if scan_repo:
         achados += scan_pgvector(ref)
+        achados += cmp_referencia_vs_disco(ref, versoes_no_disco())
     return achados
 
 

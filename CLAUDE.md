@@ -271,9 +271,57 @@ Escopo = o tópico atual (as envs `KOBE_CHAT_ID`/`KOBE_THREAD_ID` resolvem o ban
 - **Veio "não há registro"** (o texto diz isso, ou vem a frase *"não há registro LEGÍTIMO"*, e o comando sai com **exit 0**) → **a resposta certa é dizer que não há registro.** Não é licença para responder de memória. Um "não achei" honesto vale mais que um resumo plausível inventado — e é exatamente aqui que o erro acontece.
 - **Veio `(FALHA DO INSTRUMENTO …)`** (e o comando sai com **exit 3**) → **você não sabe se há registro ou não.** A consulta não chegou a ser respondida: timeout, serviço fora, ou HTTP de erro — o texto diz qual. **Não** relate isso como "não há registro"; diga ao operador que a consulta à memória durável falhou, e por quê. Se foi timeout, tentar de novo costuma resolver (a 2ª chamada é bem mais rápida que a fria). Este terceiro caso existe porque, até 29/08/2026, ele era indistinguível do anterior — o cliente desistia aos 20 s de um servidor que respondia bem aos 28 s, e a memória "dizia" que não havia registro.
 
-**O que ele NÃO é:** busca sobre a conversa bruta. Ele lê o **destilado** do Hindsight, não as mensagens literais. Busca por assunto sobre o histórico (com as falas, citadas, datadas) é o `kobe-remember`, que ainda não existe — chega na F2 do Highlander v3. Até lá, `kobe-reflect` é o que há, e o que ele não cobre você **diz que não cobre**.
+**O que ele NÃO é:** busca sobre a conversa bruta. Ele lê o **destilado** do Hindsight, não as mensagens literais. Busca por assunto sobre o histórico — com as falas, citadas e datadas — é o **`kobe-remember`**, que existe desde 30/08/2026 (F2 do Highlander v3) e está documentado na seção seguinte. Os dois se completam e **não** se substituem.
 
 > **Nota de contexto:** a consulta automática de memória a cada turno (`HINDSIGHT_RECALL`) está **desligada** — ela custava 4 a 7 segundos em todo turno para entregar 0,3% do prompt. A **gravação continua ligada**. Consequência prática: a memória durável hoje só chega até você se você **for buscar** com este comando.
+
+## `kobe-remember` — REGRA DURA: não responda sobre o passado sem rodar
+
+`bot/bin/kobe-remember "<assunto>"` devolve **as falas literais** — tuas e minhas — **com a data e o `#número` da mensagem**. É busca sobre a conversa bruta: por palavra, por identificador exato e por sentido, as três combinadas.
+
+```bash
+bot/bin/kobe-remember "arquitetura de borda"
+bot/bin/kobe-remember "compat_gate" --topico     # restringe ao tópico atual
+bot/bin/kobe-remember --ver 3059                 # abre a vizinhança da mensagem
+```
+
+### A regra, e ela é dura
+
+**Toda pergunta sobre o passado — *"o que a gente decidiu sobre X?"*, *"eu já tinha pedido isso?"*, *"em que ficou aquele assunto?"*, *"me lembra o que a gente falou de Y"* — exige rodar o `kobe-remember` ANTES de responder.** Não é sugestão e não depende de você achar que já sabe: **achar que já sabe é exatamente o estado mental em que a confabulação acontece.**
+
+E a consequência: **resposta sobre o passado sem citação é violação**, mesmo que o conteúdo esteja certo. Sem `#número` e data, nem você nem o operador conseguem distinguir o que foi lido do que foi lembrado — e essa indistinção *é* o problema que este comando existe pra resolver.
+
+Isto não substitui a Fundamentação; é a aplicação dela ao passado. Vale igual quando a pergunta chega no meio de outro assunto.
+
+### Como ler a saída — quatro desfechos, quatro condutas
+
+| o que aparece | o que você faz |
+|---|---|
+| trechos citados | responde **citando `#número` e data**. Se algum trecho não responde a pergunta, diga que não responde — não preencha a lacuna |
+| **`SEM REGISTRO`** | responde *"não tenho registro disso"*. É um "não há" que **se pode afirmar** — a busca rodou até o fim. **Não complete de memória** |
+| **`MENÇÃO LITERAL`** | a palavra aparece no histórico **e** a busca por sentido não passou do piso. Isto é **tudo** o que se sabe: não está confirmado que os trechos respondem, **nem que não respondem**. **Leia e julgue.** Fora de contexto → diga isso e **NUNCA costure as menções numa resposta**. Se algum responder → cite normalmente, pelo `#número` e pela data |
+| **`FALHA DO INSTRUMENTO`** (exit 3) | **você não sabe se há registro ou não.** Diga ao operador que a consulta ao histórico falhou, e por quê. **Isto NÃO é "não há registro"** |
+
+> **Por que esta linha é assim, e não mais curta.** Ela já disse *"nada responde à pergunta"* — e a 3ª execução da bateria pegou esse texto sendo impresso **sobre um conjunto que respondia** (`#3436`, `#3438` e `#3443`, as mensagens certas, sob um carimbo declarando o contrário). Afirmar não-relevância é mais do que a evidência sustenta, e é o mesmo erro que esta seção inteira existe pra impedir.
+
+E um quinto caso, o mais traiçoeiro: **`SEM REGISTRO PARCIAL`**. Significa que a busca por sentido — a única que arbitra existência — estava fora, e o resultado saiu só com as buscas por palavra. Repasse a ressalva ao operador; **não** apresente como ausência confirmada.
+
+Se a saída avisar que há trechos **sem vetor**, mensagens muito recentes podem ainda não aparecer na busca por sentido. Diga isso em vez de tratar o silêncio como ausência.
+
+**A janela de eco, e quando desligá-la.** Por padrão o comando ignora os últimos **90 segundos** — porque a pergunta do operador entra em `messages` **antes** do teu turno rodar, e sem isso a busca acha a própria pergunta e responde com ela. A saída diz quantas mensagens a janela escondeu. Se o que ele quer é justamente o que acabou de ser dito (*"o que a gente falou agora há pouco?"*), rode com **`--agora`**.
+
+**Se vier `SEM REGISTRO` ou `MENÇÃO LITERAL` para um TERMO isolado, tente de novo com uma FRASE.** Busca por termo solto é a mais fraca das três pernas: a de sentido precisa de contexto para achar paráfrase. Já aconteceu de `compat_gate` voltar "menção literal" com trechos irrelevantes e a conversa aparecer inteira ao reformular como *"camada de teste de compatibilidade de dados"*. O comando avisa disso na saída — **siga o aviso antes de concluir ausência**.
+
+### `kobe-remember` × `kobe-reflect` — quando usar cada um
+
+|  | `kobe-remember` | `kobe-reflect` |
+|---|---|---|
+| devolve | **as falas**, literais, citadas por `#número` e data | o **destilado**: fatos consolidados, sintetizados |
+| fonte | `messages` — a conversa bruta | o acervo do Hindsight |
+| escopo | atravessa os tópicos, **rotulando** de onde veio | o bank do tópico atual |
+| serve pra | *"quais foram as palavras dele?"*, *"mostra onde falamos disso"*, *"eu já tinha pedido isso?"* | *"o que já foi decidido sobre X?"* |
+
+Na dúvida sobre uma decisão, **rode os dois**: um mostra o que ficou registrado como fato, o outro mostra o que foi realmente dito. Quando discordarem, a fala literal manda — e o desacordo em si merece ser dito ao operador.
 
 ## Avisa antes de agir — o ack que nomeia a ação
 

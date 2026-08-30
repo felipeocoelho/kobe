@@ -33,32 +33,28 @@
 # Kobe ou o app Flow?"). Assertiva: 0 linhas novas em `work_sessions`, 0 sessões
 # tmux novas.
 manda o Coder arrumar o Flow
-@25
 
 # Respondendo, aí sim a sala nasce — com o par CERTO, e o par depende da resposta.
 # ESPERADO: agora sim uma sala, com `system=Kobe, subsystem=Flow` (o plugin).
-o plugin
-@25
+@25 o plugin
 
 # ── 1. O CASO CLARO — custo: 1 sala ─────────────────────────────────────────
 # Tarefa trivial de propósito (texto de README), pra morrer em um turno.
 # ESPERADO: a sala nasce; linha no catálogo com `system=Kobe` e `subsystem` NULO.
 # O trabalho é no framework em si, então o agente tem que declarar
 # `--subsystem none` — explicitamente, nunca por omissão.
-manda o Coder ajustar o texto do README do Kobe
-@30
+@25 manda o Coder ajustar o texto do README do Kobe
 
 # ── 2. O CASO DE PLUGIN — custo: 1 sala ─────────────────────────────────────
 # É o cenário que prova por que inferir do diretório erraria: a pasta de trabalho
 # é a do PLUGIN, e ainda assim o sistema é o Kobe.
 # ESPERADO: `system=Kobe`, `subsystem=Coder`, e `cwd` apontando pro repositório
 # do plugin — o diretório é metadado, não chave.
-manda o Coder mexer no gate de aprovação de plano do plugin Coder
-@30
+@30 manda o Coder mexer no gate de aprovação de plano do plugin Coder
 
 # ── 4. REGRESSÃO — custo ZERO ───────────────────────────────────────────────
 # A metade de serviço da F1 (coletor, catálogo, registro no dispatch) pode
 # QUEBRAR algo conversacional. Este cenário existe como rede, não como prova da
 # entrega: um turno normal tem que seguir normal, e o tempo do
 # "[n/N] pronto em X.Xs" não pode regredir de forma perceptível.
-me responde em uma linha: que dia é hoje?
+@30 me responde em uma linha: que dia é hoje?

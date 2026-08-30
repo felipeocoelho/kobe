@@ -61,4 +61,23 @@ def build_sources(
                 "source transcripts NÃO registrada (TRANSCRIPT_COLLECTOR_ENABLED off)"
             )
 
+    # SearchIndexSource — 4ª fonte (gatilho de tempo: o índice de busca da F2).
+    # Como a de transcripts, NUNCA devolve despertar: quebrar texto em pedaço e
+    # pedir vetor a uma API não precisa de um modelo. É ela que mantém a busca
+    # por SENTIDO em dia — a busca por palavra não depende de fonte nenhuma,
+    # porque `messages.search_tsv` é coluna gerada e fica pronta no INSERT.
+    try:
+        from bot.search.source import build as build_search
+    except ImportError:
+        logger.exception("SearchIndexSource indisponível — pacote bot.search faltando?")
+    else:
+        busca = build_search(kobe_home=kobe_home, bot_token=bot_token)
+        if busca is not None:
+            sources.append(busca)
+            logger.info("source registrada: search-index")
+        else:
+            logger.info(
+                "source search-index NÃO registrada (SEARCH_INDEX_ENABLED off)"
+            )
+
     return sources

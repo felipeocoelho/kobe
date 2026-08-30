@@ -43,11 +43,19 @@ import os
 import sys
 from typing import Any, Optional
 
-FINGERPRINT_VERSION = 1
+FINGERPRINT_VERSION = 2
 
 # Schema do Kobe. `information_schema` e `pg_catalog` ficam de fora; a tabela de
 # controle de migration tambem — ela e do runner, nao do modelo de dados, e
 # incluir seu `applied_at` faria a impressao digital mudar a cada aplicacao.
+#
+# A LISTA DE VERSOES dela, porem, VAI (chave `migrations`, versao 2 da
+# impressao digital). A distincao e o ponto todo: `applied_at` muda a cada
+# aplicacao e viraria ruido; a lista de versoes so muda quando o MODELO muda —
+# e e exatamente ela que faltava para o portao perceber que a referencia ficou
+# velha. A F1 acrescentou a migration `006` sem regenerar a referencia, e uma
+# suite de 691 testes passou verde enquanto o portao acusava 4 divergencias
+# falsas nos DOIS ambientes. Nada travava, porque nada olhava para isto.
 TARGET_SCHEMA = "public"
 IGNORED_TABLES = frozenset({"schema_migrations"})
 
@@ -117,6 +125,19 @@ ORDER BY c.relname, con.conname
 """
 
 
+# So a coluna `version`. `filename`, `checksum` e `applied_at` ficam de fora de
+# proposito: os dois primeiros ja sao vigiados pelo proprio runner (ele recusa
+# aplicar com checksum divergente), e o terceiro mudaria a impressao digital a
+# cada aplicacao.
+_Q_MIGRATIONS = """
+SELECT version FROM schema_migrations ORDER BY version
+"""
+
+_Q_TEM_CONTROLE = """
+SELECT to_regclass('public.schema_migrations') IS NOT NULL AS existe
+"""
+
+
 def _rows(cur, sql: str, params: tuple = ()) -> list[dict]:
     cur.execute(sql, params) if params else cur.execute(sql)
     cols = [d.name for d in cur.description]
@@ -131,6 +152,15 @@ def fingerprint(conn) -> dict[str, Any]:
         columns = _rows(cur, _Q_COLUMNS, (TARGET_SCHEMA,))
         indexes = _rows(cur, _Q_INDEXES, (TARGET_SCHEMA,))
         constraints = _rows(cur, _Q_CONSTRAINTS, (TARGET_SCHEMA,))
+        # `None` (banco nunca tocado pelo runner) e `[]` (tabela de controle
+        # vazia) sao coisas DIFERENTES, e o portao trata cada uma do seu jeito:
+        # a primeira e "nao da pra julgar", a segunda e "esta zerado".
+        if _rows(cur, _Q_TEM_CONTROLE)[0]["existe"]:
+            migrations: Optional[list[str]] = [
+                r["version"] for r in _rows(cur, _Q_MIGRATIONS)
+            ]
+        else:
+            migrations = None
 
     tables: dict[str, dict] = {}
 
@@ -186,6 +216,7 @@ def fingerprint(conn) -> dict[str, Any]:
             "server_version_major": int(db["server_version_num"]) // 10000,
         },
         "extensions": dict(sorted(extensions.items())),
+        "migrations": migrations,
         "tables": {name: tables[name] for name in sorted(tables)},
     }
 

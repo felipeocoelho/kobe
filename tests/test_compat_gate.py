@@ -221,6 +221,66 @@ def test_versao_menor_do_servidor_nao_acende():
     assert compare(_base(), alvo, scan_repo=False) == []
 
 
+# ── Migrations: o banco está em dia com a referência? (2026-08-30) ────────
+#
+# Antes desta classe, um banco atrasado numa migration não se anunciava: ele
+# aparecia como "tabela faltando", e o operador tinha que INFERIR a causa. Foi
+# assim que a defasagem da `006` ficou quatro dias na tela dos dois ambientes
+# disfarçada de outra coisa.
+
+
+def _com_migrations(versoes):
+    fp = _base()
+    fp["migrations"] = list(versoes)
+    return fp
+
+
+def test_migrations_iguais_nao_acendem():
+    ref = _com_migrations(["000", "001", "002"])
+    assert compare(ref, _com_migrations(["000", "001", "002"]), scan_repo=False) == []
+
+
+def test_banco_atrasado_numa_migration_acende_o_portao():
+    ref = _com_migrations(["000", "001", "002"])
+    alvo = _com_migrations(["000", "001"])
+    achados = compare(ref, alvo, scan_repo=False)
+    assert "migration" in _classes(achados)
+    assert "ATRASADO" in _texto(achados)
+    assert "002" in _texto(achados)
+    assert "migrate.py up" in _texto(achados)
+
+
+def test_banco_adiantado_aponta_a_referencia_velha():
+    """É EXATAMENTE o caso da `006`: o banco andou, a referência não. A
+    mensagem tem que mandar regenerar a referência, não 'consertar' o banco."""
+    ref = _com_migrations(["000", "001"])
+    alvo = _com_migrations(["000", "001", "002"])
+    achados = compare(ref, alvo, scan_repo=False)
+    assert "migration" in _classes(achados)
+    assert "referencia esta VELHA" in _texto(achados)
+
+
+def test_a_causa_vem_antes_do_sintoma():
+    """'Falta a migration 002' é a CAUSA de 'falta a tabela X'. Quem lê o
+    portão tem que bater o olho na causa primeiro — senão vai consertar o
+    sintoma à mão e deixar o banco fora de versão."""
+    ref = _com_migrations(["000", "001", "002"])
+    ref["tables"]["work_sessions"] = {"columns": [], "indexes": [], "constraints": []}
+    alvo = _com_migrations(["000", "001"])
+    achados = compare(ref, alvo, scan_repo=False)
+    classes = [f.classe for f in achados]
+    assert classes.index("migration") < classes.index("tabela")
+
+
+def test_banco_sem_tabela_de_controle_nao_acende_migration():
+    """`None` é "não dá pra julgar", não "está zerado". Silêncio por ignorância
+    declarada — um banco nunca tocado pelo runner não é um banco atrasado."""
+    ref = _com_migrations(["000", "001"])
+    alvo = _base()  # sem a chave: fingerprint de banco sem `schema_migrations`
+    achados = compare(ref, alvo, scan_repo=False)
+    assert "migration" not in _classes(achados)
+
+
 # ── Extensões ─────────────────────────────────────────────────────────────
 
 
@@ -427,19 +487,29 @@ def test_repositorio_real_nao_usa_recurso_de_pgvector_acima_do_fixado():
 
 def test_referencia_versionada_existe_e_e_json_valido():
     ref = load_reference(DEFAULT_REFERENCE)
-    assert ref["fingerprint_version"] == 1
+    assert ref["fingerprint_version"] == 2
     assert ref["database"]["collate"] == "en_US.UTF-8"
     assert ref["database"]["timezone"] == "UTC"
     assert ref["database"]["data_checksums"] == "on"
 
 
-def test_referencia_tem_as_seis_tabelas_pos_aposentadoria():
+def test_o_chat_manager_continua_aposentado_na_referencia():
     """A referência é gerada de `schema.sql` + migrations. Se `conversations`
-    reaparecer aqui, alguém ressuscitou o Chat Manager sem querer."""
+    reaparecer aqui, alguém ressuscitou o Chat Manager sem querer.
+
+    Este teste asseverava a lista FECHADA de seis tabelas, e por isso ficou
+    vermelho quando a referência foi regenerada com o catálogo da F1. A lista
+    fechada era assertiva errada: ela transformava "entrou tabela nova" —
+    que é o trabalho normal — em falha, e o preço de conviver com isso teria
+    sido alguém frouxar o teste. Quem vigia tabela entrando/saindo é o portão,
+    contra a referência; o que este teste guarda é só o que ele nomeia."""
     ref = load_reference(DEFAULT_REFERENCE)
-    assert set(ref["tables"]) == {
-        "contacts", "messages", "saved_artifacts",
-        "sessions", "topic_name_history", "topics",
+    tabelas = set(ref["tables"])
+    assert {"conversations", "conversation_tags"}.isdisjoint(tabelas)
+    assert {"contacts", "messages", "saved_artifacts",
+            "sessions", "topic_name_history", "topics"} <= tabelas
+    assert "conversation_id" not in {
+        c["name"] for c in ref["tables"]["messages"]["columns"]
     }
 
 

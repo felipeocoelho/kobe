@@ -1,5 +1,5 @@
 {
-  "fingerprint_version": 1,
+  "fingerprint_version": 2,
   "database": {
     "encoding": "UTF8",
     "collate": "en_US.UTF-8",
@@ -15,6 +15,16 @@
     "uuid-ossp": "1.1",
     "vector": "0.6.0"
   },
+  "migrations": [
+    "000",
+    "001",
+    "002",
+    "003",
+    "004",
+    "005",
+    "006",
+    "007"
+  ],
   "tables": {
     "contacts": {
       "columns": [
@@ -196,6 +206,122 @@
         }
       ]
     },
+    "message_chunks": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": "d",
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "message_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "idx",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "body",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "embedding",
+          "type": "vector(1536)",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "model",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "embedded_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_message_chunks_message",
+          "definition": "CREATE INDEX idx_message_chunks_message ON public.message_chunks USING btree (message_id)"
+        },
+        {
+          "name": "idx_message_chunks_pendentes",
+          "definition": "CREATE INDEX idx_message_chunks_pendentes ON public.message_chunks USING btree (id) WHERE (embedding IS NULL)"
+        },
+        {
+          "name": "message_chunks_message_id_idx_key",
+          "definition": "CREATE UNIQUE INDEX message_chunks_message_id_idx_key ON public.message_chunks USING btree (message_id, idx)"
+        },
+        {
+          "name": "message_chunks_pkey",
+          "definition": "CREATE UNIQUE INDEX message_chunks_pkey ON public.message_chunks USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "message_chunks_message_id_fkey",
+          "definition": "FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "message_chunks_message_id_idx_key",
+          "definition": "UNIQUE (message_id, idx)"
+        },
+        {
+          "name": "message_chunks_pkey",
+          "definition": "PRIMARY KEY (id)"
+        }
+      ]
+    },
     "messages": {
       "columns": [
         {
@@ -287,12 +413,44 @@
           "default": "now()",
           "identity": null,
           "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 12,
+          "name": "seq",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('messages_seq_seq'::regclass)",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 13,
+          "name": "search_tsv",
+          "type": "tsvector",
+          "nullable": true,
+          "default": "to_tsvector('portuguese'::regconfig, content)",
+          "identity": null,
+          "collation": null
         }
       ],
       "indexes": [
         {
+          "name": "idx_messages_content_trgm",
+          "definition": "CREATE INDEX idx_messages_content_trgm ON public.messages USING gin (content gin_trgm_ops)"
+        },
+        {
           "name": "idx_messages_created",
           "definition": "CREATE INDEX idx_messages_created ON public.messages USING btree (created_at)"
+        },
+        {
+          "name": "idx_messages_search_tsv",
+          "definition": "CREATE INDEX idx_messages_search_tsv ON public.messages USING gin (search_tsv)"
+        },
+        {
+          "name": "idx_messages_seq",
+          "definition": "CREATE UNIQUE INDEX idx_messages_seq ON public.messages USING btree (seq)"
         },
         {
           "name": "idx_messages_session",
@@ -421,6 +579,52 @@
         {
           "name": "saved_artifacts_topic_id_fkey",
           "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id)"
+        }
+      ]
+    },
+    "search_lexeme_df": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "word",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "ndoc",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "refreshed_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "search_lexeme_df_pkey",
+          "definition": "CREATE UNIQUE INDEX search_lexeme_df_pkey ON public.search_lexeme_df USING btree (word)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "search_lexeme_df_pkey",
+          "definition": "PRIMARY KEY (word)"
         }
       ]
     },
@@ -703,6 +907,502 @@
         {
           "name": "topics_status_check",
           "definition": "CHECK ((status = ANY (ARRAY['active'::text, 'deleted'::text, 'archived'::text])))"
+        }
+      ]
+    },
+    "work_session_artifacts": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "session_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "path",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "kind",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "description",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_work_session_artifacts_kind",
+          "definition": "CREATE INDEX idx_work_session_artifacts_kind ON public.work_session_artifacts USING btree (kind)"
+        },
+        {
+          "name": "idx_work_session_artifacts_session",
+          "definition": "CREATE INDEX idx_work_session_artifacts_session ON public.work_session_artifacts USING btree (session_id)"
+        },
+        {
+          "name": "work_session_artifacts_pkey",
+          "definition": "CREATE UNIQUE INDEX work_session_artifacts_pkey ON public.work_session_artifacts USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "work_session_artifacts_kind_check",
+          "definition": "CHECK ((kind = ANY (ARRAY['code'::text, 'doc'::text, 'diagram'::text, 'commit'::text, 'migration'::text, 'test-report'::text])))"
+        },
+        {
+          "name": "work_session_artifacts_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "work_session_artifacts_session_id_fkey",
+          "definition": "FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE"
+        }
+      ]
+    },
+    "work_sessions": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "system_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "subsystem_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "kind",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "title",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "slug",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "briefing",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "motivation",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "cwd",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "last_activity_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 13,
+          "attnum": 13,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'running'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 14,
+          "attnum": 14,
+          "name": "transcript_path",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 15,
+          "attnum": 15,
+          "name": "transcript_bytes_copied",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 16,
+          "attnum": 16,
+          "name": "dossier_path",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 17,
+          "attnum": 17,
+          "name": "outcome_summary",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_work_sessions_started_at",
+          "definition": "CREATE INDEX idx_work_sessions_started_at ON public.work_sessions USING btree (started_at)"
+        },
+        {
+          "name": "idx_work_sessions_status",
+          "definition": "CREATE INDEX idx_work_sessions_status ON public.work_sessions USING btree (status)"
+        },
+        {
+          "name": "idx_work_sessions_subsystem",
+          "definition": "CREATE INDEX idx_work_sessions_subsystem ON public.work_sessions USING btree (subsystem_id)"
+        },
+        {
+          "name": "idx_work_sessions_system",
+          "definition": "CREATE INDEX idx_work_sessions_system ON public.work_sessions USING btree (system_id)"
+        },
+        {
+          "name": "idx_work_sessions_topic",
+          "definition": "CREATE INDEX idx_work_sessions_topic ON public.work_sessions USING btree (topic_id)"
+        },
+        {
+          "name": "work_sessions_pkey",
+          "definition": "CREATE UNIQUE INDEX work_sessions_pkey ON public.work_sessions USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "work_sessions_kind_check",
+          "definition": "CHECK ((kind = ANY (ARRAY['coder'::text, 'mission'::text])))"
+        },
+        {
+          "name": "work_sessions_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "work_sessions_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['running'::text, 'idle'::text, 'closed'::text, 'dead'::text])))"
+        },
+        {
+          "name": "work_sessions_subsystem_belongs_to_system",
+          "definition": "FOREIGN KEY (subsystem_id, system_id) REFERENCES work_subsystems(id, system_id)"
+        },
+        {
+          "name": "work_sessions_subsystem_id_fkey",
+          "definition": "FOREIGN KEY (subsystem_id) REFERENCES work_subsystems(id)"
+        },
+        {
+          "name": "work_sessions_system_id_fkey",
+          "definition": "FOREIGN KEY (system_id) REFERENCES work_systems(id)"
+        },
+        {
+          "name": "work_sessions_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id)"
+        }
+      ]
+    },
+    "work_subsystems": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "system_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "slug",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_work_subsystems_system",
+          "definition": "CREATE INDEX idx_work_subsystems_system ON public.work_subsystems USING btree (system_id)"
+        },
+        {
+          "name": "work_subsystems_id_system_unique",
+          "definition": "CREATE UNIQUE INDEX work_subsystems_id_system_unique ON public.work_subsystems USING btree (id, system_id)"
+        },
+        {
+          "name": "work_subsystems_pkey",
+          "definition": "CREATE UNIQUE INDEX work_subsystems_pkey ON public.work_subsystems USING btree (id)"
+        },
+        {
+          "name": "work_subsystems_system_slug_unique",
+          "definition": "CREATE UNIQUE INDEX work_subsystems_system_slug_unique ON public.work_subsystems USING btree (system_id, slug)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "work_subsystems_id_system_unique",
+          "definition": "UNIQUE (id, system_id)"
+        },
+        {
+          "name": "work_subsystems_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "work_subsystems_system_id_fkey",
+          "definition": "FOREIGN KEY (system_id) REFERENCES work_systems(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "work_subsystems_system_slug_unique",
+          "definition": "UNIQUE (system_id, slug)"
+        }
+      ]
+    },
+    "work_systems": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "slug",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "work_systems_pkey",
+          "definition": "CREATE UNIQUE INDEX work_systems_pkey ON public.work_systems USING btree (id)"
+        },
+        {
+          "name": "work_systems_slug_key",
+          "definition": "CREATE UNIQUE INDEX work_systems_slug_key ON public.work_systems USING btree (slug)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "work_systems_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "work_systems_slug_key",
+          "definition": "UNIQUE (slug)"
         }
       ]
     }

@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""kobe-remember — as FALAS LITERAIS do passado, citadas com data e número.
+
+O QUE ELE É, E O QUE ELE NÃO É
+-------------------------------
+É o caminho para responder *"o que a gente decidiu sobre X?"* com o que foi
+realmente dito, em vez de com memória. Ele devolve **trecho literal + data +
+`#número da mensagem`** — os três juntos, para que o operador possa conferir.
+
+Ele NÃO é o `kobe-reflect`. Os dois se completam e não se substituem:
+
+    kobe-reflect   → o DESTILADO do Hindsight: fatos consolidados, sintetizados.
+    kobe-remember  → as FALAS BRUTAS: o que foi dito, palavra por palavra.
+
+Pergunta sobre uma decisão? Os dois ajudam. Pergunta do tipo *"quais foram as
+palavras dele?"*, *"eu já tinha pedido isso?"*, *"mostra onde a gente falou
+disso"* — só este.
+
+OS QUATRO DESFECHOS, E POR QUE O QUARTO EXISTE
+-----------------------------------------------
+    exit 0 + trechos citados        → ACHOU
+    exit 0 + MENÇÃO LITERAL         → a palavra aparece, mas nada responde a
+                                      pergunta. NÃO costure as menções numa
+                                      resposta.
+    exit 0 + SEM REGISTRO           → procurou, e não há. Pode dizer "não tenho
+                                      registro disso".
+    exit 3 + FALHA DO INSTRUMENTO   → NÃO SE SABE. Banco fora, ou o serviço de
+                                      embedding não respondeu. **Nunca** relate
+                                      isto como ausência de registro.
+
+O quarto não é zelo excessivo: este sistema já transformou falha de instrumento
+em *"não há registro disso"* **duas vezes** — na F0.5-B (os embeddings tomando
+401 e o `reflect` respondendo vazio, com latência ótima) e no `kobe-reflect` em
+29/08 (o cliente desistindo aos 20 s de um servidor que respondia aos 28 s). Os
+dois eram indistinguíveis de acervo vazio na tela.
+
+ESCOPO: ATRAVESSA OS TÓPICOS, ROTULANDO
+----------------------------------------
+Decisão E5 do briefing: *"injeção automática respeita a parede entre tópicos;
+recuperação sob demanda ATRAVESSA, sempre rotulando de onde veio"*. Por isso
+cada trecho sai com o nome do tópico. `--topico` restringe ao tópico atual.
+
+USO
+---
+    kobe-remember "arquitetura de borda"
+    kobe-remember "compat_gate" --topico
+    kobe-remember "o que decidimos sobre deploy" --desde 2026-06-01 --limite 5
+    kobe-remember --ver 3059          # abre a vizinhança da mensagem #3059
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+_RAIZ = Path(__file__).resolve().parent.parent.parent
+if str(_RAIZ) not in sys.path:
+    sys.path.insert(0, str(_RAIZ))
+
+# Re-exec no python do venv se as deps não estiverem no interpretador atual. O
+# shebang resolve pro python do SISTEMA, que não tem `psycopg` nem `openai`.
+# Conferir TODAS as dependências, não uma delas (conserto de 2026-08-27, F0.2:
+# checar só a primeira deixava a segunda faltando estourar bem mais tarde).
+_VENV_PY = _RAIZ / ".venv" / "bin" / "python"
+if (
+    _VENV_PY.exists()
+    and sys.executable != str(_VENV_PY)
+    and any(importlib.util.find_spec(m) is None for m in ("psycopg", "openai", "dotenv"))
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+
+LARGURA = 88
+
+
+def _cortar(texto: str, limite: int = 420) -> str:
+    t = " ".join((texto or "").split())
+    return t if len(t) <= limite else t[: limite - 1].rstrip() + "…"
+
+
+# A ponte fixa `TimeZone=UTC` na conexão de propósito (vide `bot/db.py`), então
+# o carimbo chega em UTC. Citar em UTC para um operador que vive em Brasília faz
+# a citação **não bater com o que ele viu na tela** — apontado por ele mesmo
+# durante a bateria. A conversão é de exibição; o dado guardado não muda.
+_FUSO = "America/Sao_Paulo"
+
+
+def _data(iso: str) -> str:
+    """`13/07/2026 15:22` — no fuso do operador, a partir do carimbo UTC."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    bruto = str(iso or "").strip()
+    if not bruto:
+        return ""
+    try:
+        dt = datetime.fromisoformat(bruto.replace(" ", "T"))
+    except ValueError:
+        return bruto[:16]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    return dt.astimezone(ZoneInfo(_FUSO)).strftime("%d/%m/%Y %H:%M")
+
+
+def _topico_atual(db):
+    """O `topics.id` do tópico de onde a chamada veio, ou `None`.
+
+    Sem `KOBE_CHAT_ID` no ambiente não há tópico atual — é o caso de rodar o
+    comando à mão num terminal. Aí `--topico` não tem o que restringir, e isso
+    é dito em voz alta em vez de virar um filtro vazio que devolve nada.
+    """
+    chat = os.environ.get("KOBE_CHAT_ID")
+    if not chat:
+        return None
+    thread = os.environ.get("KOBE_THREAD_ID") or None
+    try:
+        chat_id = int(chat)
+        thread_id = int(thread) if thread not in (None, "") else 0
+    except ValueError:
+        return None
+    linha = db.one(
+        "SELECT id FROM topics WHERE telegram_chat_id = %s AND telegram_thread_id = %s",
+        (chat_id, thread_id),
+    )
+    return linha["id"] if linha else None
+
+
+def _imprimir_achados(r) -> None:
+    for a in r.achados:
+        pernas = []
+        if "sentido" in a.pernas and a.cos is not None:
+            pernas.append(f"sentido {a.cos:.3f}")
+        if "palavra" in a.pernas:
+            pernas.append("palavra")
+        if a.literal:
+            pernas.append("literal")
+        quem = "operador" if a.role == "user" else ("agente" if a.role == "assistant" else a.role)
+        print(f"#{a.seq} · {_data(a.created_at)} · {quem} · tópico {a.topico}")
+        print(f'   "{_cortar(a.corpo)}"')
+        print(f"   ({' · '.join(pernas)})")
+        print()
+
+
+def _rodape(r) -> None:
+    """O que o agente precisa saber para não afirmar mais do que foi apurado."""
+    if not r.sentido_ativo:
+        print(
+            "⚠️  A busca por SENTIDO está fora — "
+            f"{r.motivo_sentido_fora}\n"
+            "    Isto rodou só com as duas buscas por palavra. Um 'não achei' "
+            "aqui é PARCIAL:\n"
+            "    diga isso ao operador, não o apresente como ausência confirmada."
+        )
+    if r.ecos_descartados:
+        print(
+            f"ℹ️  descartei {r.ecos_descartados} resultado(s) que eram a PRÓPRIA "
+            "pergunta (versões dela já gravadas no histórico) — uma pergunta "
+            "repetida se parece consigo mesma e ocuparia as vagas dos resultados "
+            "de verdade."
+        )
+    if r.ignoradas_pelo_eco:
+        print(
+            f"ℹ️  ignorei {r.ignoradas_pelo_eco} mensagem(ns) dos últimos "
+            f"{int(r.janela_eco_s)}s — inclusive a pergunta que originou este "
+            "turno, que entra no histórico antes da busca rodar. Use `--agora` "
+            "para incluí-las."
+        )
+    pend = r.pendencia or {}
+    atraso = int(pend.get("trechos_sem_vetor") or 0) + int(
+        pend.get("mensagens_sem_trecho") or 0
+    )
+    if atraso:
+        idade = pend.get("idade_segundos") or 0
+        print(
+            f"ℹ️  {atraso} trecho(s) ainda sem vetor (o mais antigo há "
+            f"{int(idade // 60)} min). Mensagens muito recentes podem não "
+            "aparecer na busca por sentido ainda."
+        )
+
+
+def _ver(db, seq: int, janela: int) -> int:
+    """A vizinhança de uma mensagem. É o que fecha o ciclo de conferência:
+    o operador lê a citação, pede o número, e vê o contexto em volta."""
+    linhas = db.query(
+        "SELECT m.seq, m.role, m.created_at, m.content,"
+        "       COALESCE(t.current_name, '?') AS topico"
+        "  FROM messages m LEFT JOIN topics t ON t.id = m.topic_id"
+        " WHERE m.seq BETWEEN %s AND %s ORDER BY m.seq",
+        (seq - janela, seq + janela),
+    )
+    if not linhas:
+        print(f"não existe mensagem #{seq}.")
+        return 0
+    for l in linhas:
+        marca = "▸" if l["seq"] == seq else " "
+        quem = "operador" if l["role"] == "user" else (
+            "agente" if l["role"] == "assistant" else l["role"]
+        )
+        print(f"{marca} #{l['seq']} · {_data(l['created_at'])} · {quem} · {l['topico']}")
+        print(f"    {_cortar(l['content'], 600)}")
+        print()
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="kobe-remember",
+        description="As falas literais do passado, citadas com data e número.",
+    )
+    ap.add_argument("assunto", nargs="*", help="o que procurar")
+    ap.add_argument("--limite", type=int, default=8, help="quantos trechos (padrão 8)")
+    ap.add_argument(
+        "--topico",
+        action="store_true",
+        help="restringe ao tópico atual (o padrão atravessa todos, rotulando)",
+    )
+    ap.add_argument(
+        "--agora",
+        action="store_true",
+        help="inclui os últimos segundos (por padrão a janela de eco os ignora — "
+        "a pergunta que você acabou de fazer não é registro do passado)",
+    )
+    ap.add_argument("--desde", default=None, help="só a partir desta data (ISO)")
+    ap.add_argument("--ate", default=None, help="só até esta data (ISO)")
+    ap.add_argument("--ver", type=int, default=None, help="abre a vizinhança de uma mensagem")
+    ap.add_argument("--janela", type=int, default=2, help="quantas mensagens em volta do --ver")
+    ap.add_argument("--json", action="store_true", help="saída em JSON")
+    args = ap.parse_args(argv)
+
+    assunto = " ".join(args.assunto).strip()
+    if not assunto and args.ver is None:
+        print('Uso: kobe-remember "<assunto>"   |   kobe-remember --ver <n>', file=sys.stderr)
+        return 2
+
+    from bot.config import load_config
+    from bot.db import build_client
+    from bot.search import query as q
+
+    try:
+        db = build_client(load_config())
+    except Exception as exc:  # noqa: BLE001
+        # Nem chegou ao acervo. Dizer "sem registro" aqui seria a mentira que
+        # este comando existe pra não contar.
+        print(f"kobe-remember: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            "(FALHA DO INSTRUMENTO — não deu pra abrir o banco. NÃO conclua que "
+            "não há registro: a busca não chegou a acontecer.)"
+        )
+        return 3
+
+    if args.ver is not None:
+        return _ver(db, args.ver, max(0, args.janela))
+
+    topic_id = _topico_atual(db) if args.topico else None
+    if args.topico and topic_id is None:
+        print(
+            "(--topico pedido, mas não há tópico atual no ambiente "
+            "(KOBE_CHAT_ID). Busquei em TODOS os tópicos.)"
+        )
+
+    r = q.buscar(
+        db,
+        assunto,
+        topic_id=topic_id,
+        desde=args.desde,
+        ate=args.ate,
+        janela_eco=0.0 if args.agora else q.JANELA_ECO_S,
+        limite=max(1, args.limite),
+    )
+
+    if args.json:
+        import json
+        from dataclasses import asdict
+
+        print(json.dumps(asdict(r), ensure_ascii=False, indent=2, default=str))
+        return 3 if r.veredito == "FALHA" else 0
+
+    if r.veredito == "FALHA":
+        print(f"kobe-remember: {r.erro}", file=sys.stderr)
+        print(
+            f"(FALHA DO INSTRUMENTO — {r.erro}\n"
+            "NÃO conclua que não há registro: a busca não chegou a ser "
+            "respondida. Diga ao operador que a consulta ao histórico falhou, "
+            "e por quê.)"
+        )
+        return 3
+
+    if r.veredito == "SEM_REGISTRO":
+        parcial = "" if r.sentido_ativo else " PARCIAL"
+        print(
+            f"SEM REGISTRO{parcial} — procurei em todo o histórico e não há nada "
+            f"sobre isso.\n"
+            f"(A busca RODOU até o fim{'' if r.sentido_ativo else ', mas SEM a busca por sentido'}. "
+            + (
+                'Este é um "não há registro" que se pode afirmar: responda "não tenho '
+                "registro disso\" e não complete de memória.)"
+                if r.sentido_ativo
+                else "Diga ao operador que a busca por sentido estava fora e que o "
+                'resultado é parcial.)'
+            )
+        )
+        print()
+        if r.radicais_uteis or r.literais:
+            print(f"   procurei por: {', '.join(r.literais + r.radicais_uteis)}")
+        # Dedupe sem diferenciar caixa: a palavra crua ("Zendesk") e o radical
+        # dela ("zendesk") chegam por caminhos diferentes e são a mesma notícia.
+        ausentes, vistos = [], set()
+        for termo in r.literais_ausentes + r.radicais_ausentes:
+            if termo.lower() not in vistos:
+                vistos.add(termo.lower())
+                ausentes.append(termo)
+        if ausentes:
+            # Isto é quase a resposta: o termo NUNCA foi dito no histórico.
+            print("   nunca apareceu no histórico: " + ", ".join(ausentes))
+        if r.radicais_banais:
+            print(
+                "   ignorei (comuns demais no acervo para discriminar): "
+                + ", ".join(r.radicais_banais)
+            )
+        print()
+        print(
+            "💡 Busca por um TERMO isolado é a mais fraca das três: se o assunto "
+            "pode ter sido dito com outras palavras, tente de novo com uma "
+            "FRASE descrevendo a ideia — é a busca por sentido que acha "
+            "paráfrase, e ela precisa de contexto para funcionar."
+        )
+        _rodape(r)
+        return 0
+
+    if r.veredito == "MENCAO_LITERAL":
+        print(
+            f"MENÇÃO LITERAL — a(s) palavra(s) {', '.join(r.literais)} "
+            "aparece(m) no histórico, e a busca por SENTIDO não passou do piso.\n"
+            "\n"
+            "O QUE ISTO SIGNIFICA, EXATAMENTE: eu não consigo confirmar que os "
+            "trechos abaixo respondem à pergunta — e **também não consigo "
+            "afirmar que não respondem**. LEIA e julgue.\n"
+            "  · se forem fora de contexto (a palavra aparece falando de outra "
+            "coisa), diga isso ao operador e NÃO costure os trechos numa "
+            "resposta;\n"
+            "  · se algum deles responder, cite normalmente, pelo #número e pela "
+            "data.\n"
+            "A nota de cada trecho vai ao lado dele."
+        )
+        print()
+        _imprimir_achados(r)
+        print(
+            "💡 Busca por um TERMO isolado é a mais fraca das três: se o assunto "
+            "pode ter sido dito com outras palavras, tente de novo com uma "
+            "FRASE descrevendo a ideia — é a busca por sentido que acha "
+            "paráfrase, e ela precisa de contexto para funcionar."
+        )
+        _rodape(r)
+        return 0
+
+    print(f"{len(r.achados)} trecho(s) do histórico:")
+    print()
+    _imprimir_achados(r)
+    print(
+        "(Cite pelo #número e pela data ao responder. Se algo aqui não responde "
+        "a pergunta, diga que não responde — não preencha a lacuna de memória.)\n"
+        "⚠️  Um trecho marcado como `operador` pode ser uma PERGUNTA que ele fez, "
+        "não uma decisão. Uma pergunta parecida com a de agora é um vizinho "
+        "próximo por construção — leia antes de citar como se fosse resposta."
+    )
+    print()
+    _rodape(r)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

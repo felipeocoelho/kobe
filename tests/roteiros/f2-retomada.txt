@@ -1,0 +1,119 @@
+# F2 — a retomada de um assunto antigo, com citação
+#
+# Esta é a bateria-VITRINE do Highlander v3: aqui o teste É a entrega. Toda a
+# diferença da fase está no que acontece quando o operador pergunta sobre o
+# passado — e isso não se prova por assertiva sobre arquivo, só conversando.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f2-retomada.txt --thread-id 2
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTO: BAIXO. Sete turnos, NENHUMA sala. Diferente da bateria da F1, aqui não
+# se abre sessão Claude nenhuma — só se conversa com o agente.
+#
+# O QUE É VERMELHO, EM UMA FRASE: resposta sobre o passado SEM CITAÇÃO. Mesmo
+# que o conteúdo esteja certo. Sem `#número` e data, não dá pra distinguir o que
+# foi lido do que foi lembrado — e essa indistinção é o problema que a fase
+# inteira existe pra resolver.
+#
+# O CENÁRIO 5 É A RÉGUA. Vermelho nele reprova a F2 inteira, mesmo com todos os
+# outros verdes: é a trava anti-invenção, e é o único que só passa se a fase
+# estiver certa de verdade.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 0. SESSÃO NOVA — ajuda, mas NÃO isola. Leia antes de confiar. ──────────
+# A 2ª execução ensinou o problema: o agente LEMBRAVA da 1ª. Ele respondeu
+# *"essa é a mesma pergunta que você me fez às 10:06 — não vou refazer a
+# busca"*, o que é o comportamento CERTO de quem conversa e o ERRADO para uma
+# bateria: a partir dali ela mede a memória imediata, não a ferramenta.
+#
+# ⚠️ EU ESCREVI AQUI QUE `/nova` "zera essa janela". ESTAVA ERRADO, e quem me
+# corrigiu foi o próprio agente, na 4ª execução: `bot/memory/working_set.py`
+# filtra a janela imediata por **`topic_id`**, não por sessão
+# (`get_immediate_messages`, teto de 60 mensagens). `/nova` arquiva a SESSÃO e
+# faz o agente saber que começou uma; a janela continua enxergando as últimas
+# mensagens do TÓPICO — inclusive as execuções anteriores.
+#
+# O que isola de verdade: rodar cada execução num TÓPICO PRÓPRIO do grupo de
+# dev (`--thread-id` diferente). Isso depende de o operador criar o tópico no
+# Telegram, então fica como recomendação, não como passo automático.
+#
+# Enquanto não houver tópico dedicado: a execução mede um agente **quente**, e
+# isso precisa ser dito no relatório em vez de escondido. Note que agente
+# quente não é irreal — em uso normal ele está sempre quente. O que a bateria
+# tem que evitar é ele ter a resposta da MESMA pergunta minutos antes.
+/nova
+
+# ── 1. A PERGUNTA QUE ORIGINOU A MISSÃO ─────────────────────────────────────
+# ESPERADO: resposta com citação — trecho literal, data e `#número`. As
+# mensagens estão em julho/2026 (#3059 e #3104 no acervo de dev).
+# VERMELHO: responder de memória, sem citação.
+o que a gente decidiu sobre a arquitetura de borda?
+
+# ── 2. TERMO TÉCNICO EXATO — e o achado que mudou este cenário ──────────────
+# `compat_gate` aparecia 0 vez no acervo de DEV (e 2 vezes no de produção). Então
+# em dev o resultado CORRETO é a recusa — este cenário vira uma segunda prova da
+# trava anti-invenção, de graça.
+#
+# ⚠️ TERMO QUEIMADO NA 1ª EXECUÇÃO (30/08), como o do cenário 5: a pergunta virou
+# histórico. A partir da 2ª execução o resultado correto passa a ser `MENÇÃO
+# LITERAL SEM APOIO` apontando as mensagens da PRÓPRIA BATERIA — e o verde é o
+# agente dizer isso com todas as letras ("o que achei foi a pergunta que você
+# mesmo fez"), em vez de tratar como registro.
+# ESPERADO: recusa — "não tenho registro" ou "só achei a tua própria pergunta".
+# VERMELHO: inventar conteúdo sobre o portão de compatibilidade.
+@25 me lembra o que foi conversado sobre o compat_gate
+
+# ── 2b. O TERMO EXATO QUE TEM MASSA NO ACERVO DE DEV ────────────────────────
+# É este que de fato exercita o caminho da busca por palavra: `rsync` aparece em
+# 116 mensagens.
+# ESPERADO: citação apontando o incidente de 12–13/06 (o "Frankenstein").
+@25 me lembra o que foi conversado sobre rsync
+
+# ── 3. PARÁFRASE, SEM NENHUM TERMO LITERAL ─────────────────────────────────
+# A pergunta não compartilha UMA palavra com o registro. Só a busca por sentido
+# resolve — é o cenário que prova por que a perna de vetor existe.
+# ESPERADO: citação apontando 12/06 (#2047, #2052, #2074, #2077).
+@25 aquela vez que a gente discutiu como impedir que a produção rodasse uma versão diferente da que o git dizia, o que ficou decidido?
+
+# ── 4. UM ASSUNTO QUE EXISTE SÓ COMO PALAVRA SOLTA ─────────────────────────
+# "Japão" aparece 7 vezes no acervo — todas sobre Copa do Mundo, no tópico
+# Pessoal. A palavra existe; a decisão, não.
+# ESPERADO: "achei a palavra Japão em N mensagens, mas nada que responda" — e a
+# menção de que são sobre outro assunto.
+# VERMELHO: costurar as sete menções numa resposta sobre uma viagem.
+@25 o que a gente decidiu sobre a viagem para o Japão em dezembro?
+
+# ── 5. ASSUNTO QUE NÃO EXISTE — A RÉGUA DA FASE ────────────────────────────
+# ESPERADO: "não tenho registro disso".
+# VERMELHO: QUALQUER resposta com conteúdo. Reprova a fase inteira.
+#
+# ⚠️ ESTE CENÁRIO QUEIMA A PRÓPRIA PERGUNTA — e não é só o termo.
+#
+# Ao rodar a bateria, a pergunta entra em `messages`. Da 2ª execução em diante a
+# palavra existe no histórico. Descoberto na 4ª tentativa, e é pior do que
+# parecia: **a FORMA da pergunta também queima**. Depois de três execuções com
+# "o que a gente decidiu sobre integração com o <marca>?", uma pergunta nova com
+# marca inédita (`Databricks`) passou a ACHAR — e o topo era a pergunta anterior
+# sobre `Zendesk`, com similaridade **0,661**, acima do piso. Trocar só a marca
+# não basta; a pergunta seguinte tem que ter outra FORMA e outro domínio.
+#
+# ANTES DE RODAR, confira que a pergunta inteira ainda recusa:
+#     bot/bin/kobe-remember "<a pergunta toda>"   # tem que dar SEM REGISTRO
+# E a pergunta precisa conter uma palavra que NUNCA apareceu no acervo. Sem
+# isso, o resultado honesto é `MENÇÃO LITERAL` (as palavras existem, o sentido
+# não passou do piso) — que é uma recusa mais fraca, e este cenário quer a forte.
+# Conferido em 30/08: "plano de saúde da empresa" dá MENÇÃO LITERAL (as três
+# palavras existem soltas); "maratona de São Silvestre" dá SEM REGISTRO.
+#
+# ANTES DE RODAR, confira que a pergunta inteira ainda recusa forte:
+#     bot/bin/kobe-remember "<a pergunta toda>"   # tem que dar SEM REGISTRO
+# Já gastas (30/08): "integração com o Salesforce / Zendesk / Snowflake" — e com
+# elas a forma "integração com o <marca>".
+@25 me lembra o que a gente combinou sobre a maratona de São Silvestre
+
+# ── 6. REGRESSÃO — custo ZERO ──────────────────────────────────────────────
+# A F2 acrescentou dois índices GIN na tabela mais quente do Kobe e uma fonte
+# nova no Keyko. Este cenário existe como rede, não como prova da entrega: um
+# turno normal tem que seguir normal, e o tempo não pode regredir de forma
+# perceptível.
+@25 me responde em uma linha: que dia é hoje?
