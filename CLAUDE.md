@@ -68,6 +68,36 @@ Você pode, sem pedir permissão a cada passo:
 
 **Por que a regra é dura, e não uma preferência:** cópia crua move arquivo solto sem saber de que versão ele faz parte. Num incidente de 12-13/06/2026 isso congelou o git da produção numa tag velha enquanto o disco era repintado por cima — a produção passou a rodar um "Frankenstein" cujo versionamento mentia, e um `rsync --delete` cego apagou arquivo sem caminho de volta. Deploy via git preserva o versionamento e é verificável; e o próprio git da produção **é** o rollback.
 
+## Mudou o banco? A DDL vai junto, no repo público — regra dura
+
+**Toda alteração de banco de dados nasce como migration versionada em `infra/migrations/`, no mesmo commit que o código que depende dela.** Não existe `ALTER TABLE` rodado à mão, não existe "depois eu escrevo o script", não existe mudança que viva só no banco de um ambiente.
+
+**Por que isto é lei, e não capricho:** o **repo público é a única fonte de instalação** — é dali que um segundo usuário clona o Kobe e o levanta do zero. Se a DDL não estiver lá, o que ele instala não é o Kobe: é o código do Kobe sobre um banco que não tem as tabelas que esse código pressupõe. E o modo de falha é o pior que existe — não falha no `install.sh`, falha meses depois, no primeiro uso da feature.
+
+**O que "refletido no repo público" quer dizer, mecanicamente.** O schema do Kobe é `infra/schema.sql` (a versão `000`, o alicerce) **mais** `infra/migrations/NNN_*.sql` aplicadas em ordem pelo runner. O instalador roda `provision_db.py` e depois `migrate.py up`. Logo: **a migration commitada e publicada É a DDL do segundo usuário** — não é preciso (nem se deve) reescrever a tabela nova dentro do `schema.sql`. O que não pode, em hipótese alguma, é a migration existir só na sua árvore.
+
+### A checklist, e ela é curta
+
+Ao encostar no schema, os quatro passos saem **no mesmo commit**:
+
+1. **A migration**, numerada na sequência, **aditiva e idempotente** (`IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`). Migration aplicada é imutável: correção vira migration nova, pra frente.
+2. **A referência regenerada** — `python infra/schema_fingerprint.py --database-url <banco-de-apoio> --out tests/fixtures/schema_expected.json`. Sem isso o portão de compatibilidade passa a acusar divergência **falsa**, e portão que vive vermelho deixa de ser sinal.
+3. **O teste**, se a mudança tem comportamento.
+4. **O CHANGELOG**, dizendo o que muda no banco e **como reverter**.
+
+### Quem cobra (você não é o guardião disso)
+
+A disciplina está mecanizada — de propósito, porque disciplina que depende de lembrar falha:
+
+- **`tests/test_schema_reference.py`** compara `infra/migrations/` com a referência versionada e **fica vermelho** se a referência não conhece a migration nova. Roda **sem banco e sem rede**, em todo `pytest`, inclusive em clone limpo. A mensagem nomeia a versão que falta e o comando que conserta.
+- **`infra/compat_gate.py`** compara o **banco real** com o schema versionado — pega o `ALTER` rodado à mão, a coluna fora de ordem, o ambiente atrasado.
+
+Se o `pytest` reclamar de referência velha, **a resposta certa é regenerar a referência**, nunca editar a fixture à mão nem silenciar o teste.
+
+### Ligar a chave ≠ publicar o código
+
+Feature nova atrás de flag: **publicar o código e ligar a flag são atos separados**, e o segundo é do operador quando envolve custo, privacidade ou dado saindo da VPS. Publique com a flag **desligada** no `.env.example` e diga ao operador o que ligar a chave implica.
+
 ## Não declarar limitação sem testar primeiro
 
 Antes de afirmar "não tenho acesso a X" ou "não consigo fazer Y", **teste com uma tool call**. WebFetch, WebSearch, leitura de arquivo, execução de Bash — tudo isso está liberado no runtime do Kobe (`bypassPermissions` ativo). Reflexo de modelo cru ("é dinâmico, é externo, é tempo-real → digo que não tenho") é fonte clássica de respostas erradas que limitam o operador.
