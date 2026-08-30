@@ -25,6 +25,7 @@ from bot.sala import cleanup as sala_cleanup
 from bot.sala import state as sala_state
 from bot.sala import tmux as sala_tmux
 from bot.mission_control import sala_prompt, storage
+from bot import work_catalog
 
 
 logger = logging.getLogger("kobe.mission_control.sala_dispatch")
@@ -167,8 +168,26 @@ def _spawn_worker(kobe_home: Path, sala_json: Path, mode: str, log_path: Path) -
 # --- API ----------------------------------------------------------------
 
 def abrir_sala(*, kobe_home: Path, objetivo: str, chat_id: int,
-               thread_id: Optional[int], cwd: Optional[Path] = None) -> dict:
-    """Abre uma sala estrategista nova. Retorna um dict-resultado (ok/erro)."""
+               thread_id: Optional[int], cwd: Optional[Path] = None,
+               system: Optional[str] = None,
+               subsystem: Optional[str] = None) -> dict:
+    """Abre uma sala estrategista nova. Retorna um dict-resultado (ok/erro).
+
+    SOBRE `system`/`subsystem` (Highlander v3, F1, §6.3)
+    ----------------------------------------------------
+    São declaração OBRIGATÓRIA quando o catálogo está ligado, e a sala **não
+    nasce** sem eles. Não é validação de formulário: é a Camada 2 de uma
+    garantia de três camadas, cuja base é uma restrição de integridade no banco
+    (`work_sessions.system_id` é `NOT NULL` com chave estrangeira).
+
+    A ordem aqui é o desenho inteiro: **registra-se primeiro, abre-se depois.**
+    Se o registro falhar, nada é criado — nem a pasta da missão, nem o
+    `sala.json`, nem o processo tmux. O contrário produziria exatamente o que a
+    F1 existe pra evitar: uma sala trabalhando sem linha em lugar nenhum.
+
+    E `cwd` continua sendo **metadado**, nunca chave — o sistema vem da
+    declaração, não da pasta.
+    """
     if not sala_enabled():
         return {"error": "sala_disabled",
                 "message": "Mission Control sala desligada (MISSION_CONTROL_SALA_ENABLED)."}
@@ -202,6 +221,21 @@ def abrir_sala(*, kobe_home: Path, objetivo: str, chat_id: int,
     sala = sala_prompt.sala_name(short, slug)
     run_cwd = Path(cwd).expanduser().resolve() if cwd else kobe_home
 
+    # ── CATÁLOGO (F1): registra ANTES de criar qualquer coisa ──────────────
+    # Fica acima do primeiro `mkdir` de propósito. Uma recusa aqui não pode
+    # deixar pasta de missão órfã pra trás — "nenhuma sala foi aberta" tem que
+    # ser literalmente verdade, inclusive no disco.
+    try:
+        catalogo = work_catalog.register_from_dispatch(
+            session_id=session_id, kind="mission",
+            system=system, subsystem=subsystem,
+            title=objetivo[:200], slug=slug, motivation=objetivo,
+            cwd=str(run_cwd), chat_id=chat_id, thread_id=thread_id,
+        )
+    except work_catalog.CatalogError as exc:
+        logger.warning("sala recusada pelo catálogo: %s", exc)
+        return work_catalog.refusal_payload(exc)
+
     storage.missao_dir(kobe_home, missao_id).mkdir(parents=True, exist_ok=True)
     storage.ensure_workspace(kobe_home, missao_id)
 
@@ -234,7 +268,10 @@ def abrir_sala(*, kobe_home: Path, objetivo: str, chat_id: int,
 
     logger.info("sala aberta missao=%s sala=%s worker_pid=%s", missao_id, sala, worker_pid)
     return {"ok": True, "missao_id": missao_id, "session_id": session_id,
-            "short_id": short, "sala_name": sala, "worker_pid": worker_pid}
+            "short_id": short, "sala_name": sala, "worker_pid": worker_pid,
+            "system": catalogo.get("system"),
+            "subsystem": catalogo.get("subsystem"),
+            "catalogado": not catalogo.get("skipped", False)}
 
 
 def retomar_sala(*, kobe_home: Path, missao_id: str, texto: str) -> dict:
@@ -287,6 +324,14 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     pa = sub.add_parser("abrir")
     pa.add_argument("--objetivo", required=True)
+    # NÃO são `required=True` de propósito: quem recusa é o catálogo, com uma
+    # mensagem que ensina o que fazer, e não o argparse com um "the following
+    # arguments are required". Aqui a recusa É a entrega, então ela merece
+    # texto bom — quem a lê é um agente decidindo o próximo passo.
+    pa.add_argument("--system", default="",
+                    help="o sistema (obrigatório com o catálogo ligado)")
+    pa.add_argument("--subsystem", default="",
+                    help="o subsistema, ou `none` pra declarar que não há")
     pa.add_argument("--chat-id", type=int, default=_env_int("KOBE_CHAT_ID"))
     pa.add_argument("--thread-id", type=int, default=_env_int("KOBE_THREAD_ID"))
     pr = sub.add_parser("retomar")
@@ -305,7 +350,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": "chat_id ausente (passe --chat-id ou KOBE_CHAT_ID)"}))
             return 1
         res = abrir_sala(kobe_home=kobe_home, objetivo=args.objetivo,
-                         chat_id=args.chat_id, thread_id=args.thread_id)
+                         chat_id=args.chat_id, thread_id=args.thread_id,
+                         system=args.system, subsystem=args.subsystem)
     elif args.cmd == "retomar":
         res = retomar_sala(kobe_home=kobe_home, missao_id=args.missao, texto=args.texto)
     else:

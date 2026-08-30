@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""kobe-work-session — o catálogo de desenvolvimento, pela linha de comando.
+
+É por aqui que os dois dispatchers (o do Coder, que é plugin em repositório
+separado, e o do Mission Control, que é core) registram uma sala **antes** de
+abri-la. O conhecimento de banco fica em `bot/work_catalog.py`; isto é a casca.
+
+  kobe-work-session register --kind coder --session-id <uuid> \
+      --system Kobe --subsystem Coder \
+      --title "…" --motivation "…" [--briefing-file <path>] [--cwd <path>]
+
+  kobe-work-session touch    --session-id <uuid> [--status running|idle|closed|dead]
+                             [--transcript-path P] [--transcript-bytes N]
+                             [--dossier-path P]
+  kobe-work-session close    --session-id <uuid> [--status closed] [--outcome "…"]
+  kobe-work-session artifact --session-id <uuid> --path P --kind test-report [--description "…"]
+  kobe-work-session show     --session-id <uuid>
+  kobe-work-session systems  [--json]
+  kobe-work-session subsystems --system Kobe [--json]
+
+SAÍDA E CÓDIGOS DE SAÍDA — a distinção é o ponto
+------------------------------------------------
+  exit 0  → deu certo. `{"ok": true, ...}` no stdout.
+  exit 2  → **recusa de regra**: você não declarou o sistema, ou declarou um que
+            não existe no catálogo. **Nenhuma sala foi aberta.** Conserta-se
+            declarando direito (a saída traz `hint` dizendo como).
+  exit 3  → **falha de instrumento**: o banco não respondeu, a migration não foi
+            aplicada, falta `DATABASE_URL`. **Nenhuma sala foi aberta** — mas
+            redeclarar não conserta nada, porque o problema não é a declaração.
+
+Por que 2 e 3 não são o mesmo código: quem lê esta saída é um agente, e as duas
+situações pedem reações opostas. Confundi-las faria o agente inventar um sistema
+pra "satisfazer" um erro que não era sobre sistema nenhum. É a mesma lição do
+conserto do `kobe-reflect` de 29/08/2026 — lá, um timeout do serviço era impresso
+com a mesma frase de "não há registro", e o agente passou a afirmar ausência onde
+havia só uma falha.
+
+  exit 4  → a chave `WORK_CATALOG_ENABLED` está desligada. **Não é erro**: é o
+            estado de rollback, em que os dispatchers seguem abrindo sala sem
+            declaração, como antes da F1. O chamador trata isto como "siga sem
+            registrar", nunca como "aborte".
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Re-exec sob o venv do projeto quando as deps não estão no interpretador atual
+# — o shebang resolve pro python do SISTEMA, que não tem `psycopg`. Mesmo padrão
+# do `kobe-reflect`, e pela mesma razão: sem isto o helper morre com
+# `ModuleNotFoundError` justamente no caminho em que o dispatcher o chama.
+# Confere TODAS as deps, não uma: esta VPS tem `psycopg` no python do sistema e
+# não tem as outras, então olhar só uma daria falso "está tudo bem".
+#
+# O venv é procurado em DOIS lugares, e a ordem importa. Diferente dos outros
+# helpers, este roda também de dentro de uma **worktree do Coder** — que é uma
+# árvore de trabalho do repositório, e onde `.venv/` **não existe** (é
+# gitignorado). Procurar só na raiz derivada do arquivo faria o helper não
+# re-executar ali e morrer com `ModuleNotFoundError: psycopg_pool` (medido).
+# `$KOBE_HOME` aponta pra instalação, que é onde o venv de fato mora.
+def _find_venv_python() -> Path | None:
+    candidatos = []
+    kobe_home = (os.environ.get("KOBE_HOME") or "").strip()
+    if kobe_home:
+        candidatos.append(Path(kobe_home).expanduser() / ".venv" / "bin" / "python")
+    candidatos.append(_REPO_ROOT / ".venv" / "bin" / "python")
+    for c in candidatos:
+        if c.exists():
+            return c
+    return None
+
+
+_VENV_PY = _find_venv_python()
+if (
+    _VENV_PY is not None
+    and sys.executable != str(_VENV_PY)
+    and any(
+        importlib.util.find_spec(dep) is None
+        for dep in ("psycopg", "psycopg_pool", "dotenv")
+    )
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+from bot import work_catalog as wc  # noqa: E402
+
+
+EXIT_OK, EXIT_REFUSAL, EXIT_UNAVAILABLE, EXIT_DISABLED = 0, 2, 3, 4
+
+
+def _emit(payload: dict, code: int = EXIT_OK) -> int:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return code
+
+
+def _env_int(name: str):
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def _read_briefing(args) -> str | None:
+    """O briefing integral que abriu a sala.
+
+    Vem de arquivo (`--briefing-file`) porque briefing é texto longo e
+    multilinha, e passá-lo como argumento de linha de comando o exporia a todo
+    problema de aspas e de limite de tamanho de argv que existe. `-` lê do stdin.
+    """
+    if args.briefing_file:
+        if args.briefing_file == "-":
+            return sys.stdin.read()
+        p = Path(args.briefing_file).expanduser()
+        if not p.is_file():
+            return None
+        try:
+            return p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+    return args.briefing
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        prog="kobe-work-session",
+        description="O catálogo de desenvolvimento (Highlander v3, F1).",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("register", help="registra uma sala ANTES de abri-la")
+    r.add_argument("--session-id", required=True)
+    r.add_argument("--kind", required=True, choices=list(wc.SESSION_KINDS))
+    # `--system`/`--subsystem` NÃO são `required=True` de propósito: quem recusa
+    # é o catálogo, com uma mensagem que ensina, e não o argparse com um
+    # "the following arguments are required". A recusa é a entrega aqui, então
+    # ela merece texto bom.
+    r.add_argument("--system", default="")
+    r.add_argument("--subsystem", default="",
+                   help="o subsistema, ou `none` pra declarar que não há")
+    r.add_argument("--title", default=None)
+    r.add_argument("--slug", default=None)
+    r.add_argument("--motivation", default=None)
+    r.add_argument("--briefing", default=None)
+    r.add_argument("--briefing-file", default=None, help="arquivo, ou `-` pra stdin")
+    r.add_argument("--cwd", default=None, help="METADADO: onde a sala roda")
+    r.add_argument("--transcript-path", default=None)
+    r.add_argument("--chat-id", type=int, default=_env_int("KOBE_CHAT_ID"))
+    r.add_argument("--thread-id", type=int, default=_env_int("KOBE_THREAD_ID"))
+
+    t = sub.add_parser("touch", help="atualiza status / ponteiros da sala")
+    t.add_argument("--session-id", required=True)
+    t.add_argument("--status", default=None, choices=[None, *wc.SESSION_STATUSES])
+    t.add_argument("--transcript-path", default=None)
+    t.add_argument("--transcript-bytes", type=int, default=None)
+    t.add_argument("--dossier-path", default=None)
+
+    c = sub.add_parser("close", help="rótulo de estado final + resumo do que entregou")
+    c.add_argument("--session-id", required=True)
+    c.add_argument("--status", default="closed", choices=list(wc.SESSION_STATUSES))
+    c.add_argument("--outcome", default=None)
+
+    a = sub.add_parser("artifact", help="registra um artefato produzido pela sessão")
+    a.add_argument("--session-id", required=True)
+    a.add_argument("--path", required=True)
+    a.add_argument("--kind", required=True, choices=list(wc.ARTIFACT_KINDS))
+    a.add_argument("--description", default=None)
+
+    s = sub.add_parser("show", help="a linha da sala, com artefatos")
+    s.add_argument("--session-id", required=True)
+
+    ls = sub.add_parser("systems", help="os sistemas do catálogo")
+    ls.add_argument("--json", action="store_true")
+
+    lsub = sub.add_parser("subsystems", help="os subsistemas de um sistema")
+    lsub.add_argument("--system", default="")
+    lsub.add_argument("--json", action="store_true")
+
+    args = p.parse_args(argv)
+
+    # A chave desligada é resposta legítima, não falha — e vale pra TODO
+    # subcomando, inclusive os de leitura: com a F1 desligada, o catálogo pode
+    # nem existir no banco.
+    if not wc.catalog_enabled():
+        return _emit(
+            {
+                "ok": False,
+                "disabled": True,
+                "code": "catalogo_desligado",
+                "message": "WORK_CATALOG_ENABLED está off — nada foi registrado.",
+                "hint": "isto NÃO é erro: siga sem registrar, como antes da F1.",
+            },
+            EXIT_DISABLED,
+        )
+
+    db = None
+    try:
+        db = wc.connect()
+
+        if args.cmd == "register":
+            out = wc.register_session(
+                db,
+                session_id=args.session_id, kind=args.kind,
+                system=args.system, subsystem=args.subsystem,
+                title=args.title, slug=args.slug,
+                briefing=_read_briefing(args), motivation=args.motivation,
+                cwd=args.cwd, transcript_path=args.transcript_path,
+                chat_id=args.chat_id, thread_id=args.thread_id,
+            )
+            return _emit({"ok": True, "action": "register", **out})
+
+        if args.cmd == "touch":
+            achou = wc.touch_session(
+                db, session_id=args.session_id, status=args.status,
+                transcript_path=args.transcript_path,
+                transcript_bytes_copied=args.transcript_bytes,
+                dossier_path=args.dossier_path,
+            )
+            return _emit({"ok": True, "action": "touch", "found": achou,
+                          "session_id": args.session_id})
+
+        if args.cmd == "close":
+            achou = wc.close_session(
+                db, session_id=args.session_id, status=args.status,
+                outcome_summary=args.outcome,
+            )
+            return _emit({"ok": True, "action": "close", "found": achou,
+                          "session_id": args.session_id, "status": args.status})
+
+        if args.cmd == "artifact":
+            out = wc.add_artifact(
+                db, session_id=args.session_id, path=args.path,
+                kind=args.kind, description=args.description,
+            )
+            return _emit({"ok": True, "action": "artifact", **out})
+
+        if args.cmd == "show":
+            linha = wc.get_session(db, args.session_id)
+            if linha is None:
+                return _emit(
+                    {"ok": False, "code": "sessao_nao_catalogada",
+                     "message": f"não há linha para {args.session_id}.",
+                     "hint": "salas anteriores à F1 não têm registro — isso é "
+                             "esperado, e não impede o transcript de ser colhido."},
+                    EXIT_REFUSAL,
+                )
+            linha["artifacts"] = wc.list_artifacts(db, args.session_id)
+            return _emit({"ok": True, "action": "show", "session": linha})
+
+        if args.cmd == "systems":
+            return _emit({"ok": True, "systems": wc.list_systems(db)})
+
+        if args.cmd == "subsystems":
+            sistema = wc.resolve_system(db, args.system) if args.system else None
+            return _emit({
+                "ok": True,
+                "system": sistema["name"] if sistema else None,
+                "subsystems": wc.list_subsystems(
+                    db, sistema["id"] if sistema else None),
+            })
+
+        return _emit({"ok": False, "message": f"subcomando {args.cmd!r} desconhecido"},
+                     EXIT_REFUSAL)
+
+    except wc.CatalogRefusal as exc:
+        return _emit(
+            {"ok": False, "refusal": True, "code": exc.code,
+             "message": exc.message, "hint": exc.hint,
+             "note": "NENHUMA sala foi aberta."},
+            EXIT_REFUSAL,
+        )
+    except wc.CatalogUnavailable as exc:
+        return _emit(
+            {"ok": False, "unavailable": True, "code": "catalogo_indisponivel",
+             "message": exc.message, "detail": exc.detail,
+             "note": "FALHA DE INSTRUMENTO — isto NÃO é 'sistema não declarado'. "
+                     "Redeclarar não conserta. NENHUMA sala foi aberta."},
+            EXIT_UNAVAILABLE,
+        )
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001 — fechar pool não pode mascarar saída
+                pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

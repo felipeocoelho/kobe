@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""kobe-collect-transcripts — salva o transcript das salas antes que ele expire.
+
+O Claude Code guarda, por sala, um registro riquíssimo em
+`~/.claude/projects/<projeto>/<session_id>.jsonl`: o pedido, o raciocínio, cada
+ferramenta chamada, cada resultado. **E o apaga em 30 dias.** Medido em
+29/08/2026: o mais antigo em disco era de 30/07. Os das salas de julho já se
+foram.
+
+Este comando copia o que houver de novo em cada sala — **viva ou morta, aberta
+ou fechada** — por deslocamento de byte, sem travar nada e sem nunca corromper.
+A cópia é crua e íntegra: nenhum bloco é peneirado, nem `thinking`.
+
+    kobe-collect-transcripts                 # uma passada
+    kobe-collect-transcripts --dry-run       # o que faria, sem escrever
+    kobe-collect-transcripts --session 17f5  # uma sala só (aceita o short id)
+    kobe-collect-transcripts status          # quando foi a última coleta
+    kobe-collect-transcripts status --json
+
+CÓDIGOS DE SAÍDA
+----------------
+  0  passada concluída (inclusive quando não havia nada novo — o caso normal)
+  3  alguma sessão falhou, ou a origem não existe
+  4  `TRANSCRIPT_COLLECTOR_ENABLED` desligada — **não é erro**, é o estado de
+     rollback. Quem chama trata como "não havia o que fazer".
+  5  já há uma coleta em andamento; esta passada foi dispensada. Também **não é
+     erro**: a outra vai fazer exatamente o mesmo trabalho.
+
+SOBRE `status` E O RELÓGIO
+--------------------------
+O subcomando `status` existe por causa da lacuna L4 do briefing — a única que o
+autor classificou como "a com maior chance de virar surpresa": um erro de
+agendamento não é pego por teste nenhum, porque testar "roda toda madrugada"
+exigiria esperar até a madrugada. E um coletor que simplesmente pare de rodar
+não produz erro: produz **silêncio**, indistinguível de "não havia nada novo".
+
+`status` mostra a idade da última coleta bem-sucedida e marca `STALE` acima do
+limite (`TRANSCRIPT_STALE_HOURS`, padrão 48). É o que dá ao silêncio uma voz.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _find_venv_python():
+    """O venv, procurado em `$KOBE_HOME` antes da raiz derivada do arquivo.
+
+    Este helper roda também de dentro de uma worktree do Coder, onde `.venv/`
+    não existe (é gitignorado). Sem procurar em `$KOBE_HOME` ele não
+    re-executaria ali e morreria com `ModuleNotFoundError`.
+    """
+    candidatos = []
+    kobe_home = (os.environ.get("KOBE_HOME") or "").strip()
+    if kobe_home:
+        candidatos.append(Path(kobe_home).expanduser() / ".venv" / "bin" / "python")
+    candidatos.append(_REPO_ROOT / ".venv" / "bin" / "python")
+    for c in candidatos:
+        if c.exists():
+            return c
+    return None
+
+
+# A coleta em si é stdlib pura — de propósito, porque ela é a parte que não pode
+# falhar. O re-exec existe pro enriquecimento (catálogo e dossiê), que fala com
+# o Postgres.
+#
+# **Confere TODAS as dependências, não uma.** O python do SISTEMA desta VPS tem
+# `psycopg` e NÃO tem `psycopg_pool` — que `bot/db.py` importa no topo. Olhando
+# só `psycopg`, o re-exec decidia que estava tudo bem, não acontecia, e o
+# catálogo falhava lá dentro: o dossiê saía com `sistema: (não catalogada)`
+# mesmo com a linha existindo no banco. Exatamente o mesmo defeito que o
+# `kobe-reflect` já tinha tido em 27/08/2026, e pela mesma causa. Uma
+# dependência a menos nesta lista = o mesmo bug de volta.
+_VENV_PY = _find_venv_python()
+if (
+    _VENV_PY is not None
+    and sys.executable != str(_VENV_PY)
+    and any(
+        importlib.util.find_spec(dep) is None
+        for dep in ("psycopg", "psycopg_pool", "dotenv")
+    )
+):
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
+from bot.transcripts import collector  # noqa: E402
+from bot.transcripts import state as st  # noqa: E402
+
+EXIT_OK, EXIT_ERROR, EXIT_DISABLED, EXIT_BUSY = 0, 3, 4, 5
+
+
+def _humano(n: int) -> str:
+    for unidade in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024 or unidade == "GB":
+            return f"{n:.0f} {unidade}" if unidade == "B" else f"{n:.1f} {unidade}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def cmd_status(args) -> int:
+    info = collector.staleness()
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    marca = "STALE" if info["stale"] else "ok"
+    print(f"destino:            {info['dest_root']}")
+    print(f"sessões rastreadas: {info['sessions_tracked']}")
+    print(f"última tentativa:   {info['last_run_at'] or '(nunca)'}")
+    idade = info["age_hours"]
+    quando = info["last_success_at"] or "(nunca)"
+    sufixo = f"  ({idade:.1f}h atrás)" if idade is not None else ""
+    print(f"último ÊXITO:       {quando}{sufixo}   [{marca}]")
+    print(f"limite de idade:    {info['stale_hours']:.0f}h")
+
+    aviso = collector.staleness_warning()
+    if aviso:
+        # A frase é imperativa de propósito: quem a lê é um agente treinado a
+        # tratar ausência de erro como "está tudo bem", e uma frase branda
+        # deixaria a falha de relógio passar exatamente como ela passa hoje.
+        print()
+        print(f"⚠️  {aviso}")
+    return EXIT_OK
+
+
+def cmd_run(args) -> int:
+    if not collector.collector_enabled() and not args.force:
+        payload = {
+            "ok": False, "disabled": True,
+            "message": "TRANSCRIPT_COLLECTOR_ENABLED está off — nada foi colhido.",
+            "hint": "isto NÃO é erro. Use --force pra uma passada avulsa.",
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2)
+              if args.json else f"coletor desligado — {payload['hint']}")
+        return EXIT_DISABLED
+
+    source_root = Path(args.source).expanduser() if args.source \
+        else collector.default_source_root()
+    dest_root = Path(args.dest).expanduser() if args.dest \
+        else collector.default_dest_root()
+
+    if not source_root.is_dir():
+        msg = f"origem não existe: {source_root}"
+        print(json.dumps({"ok": False, "message": msg}, ensure_ascii=False, indent=2)
+              if args.json else msg)
+        return EXIT_ERROR
+
+    try:
+        res = collector.collect_once(
+            source_root=source_root, dest_root=dest_root,
+            only=args.session or None, dry_run=args.dry_run,
+            update_catalog=not args.no_catalog,
+        )
+    except st.LockBusy as exc:
+        msg = str(exc)
+        print(json.dumps({"ok": True, "busy": True, "message": msg},
+                         ensure_ascii=False, indent=2) if args.json else msg)
+        return EXIT_BUSY
+
+    if args.json:
+        print(json.dumps({
+            "ok": res.ok,
+            "dry_run": args.dry_run,
+            "dest_root": str(res.dest_root),
+            "sessions_seen": len(res.sessions),
+            "sessions_touched": len(res.touched),
+            "bytes_copied": res.total_copied,
+            "catalog_note": res.catalog_note,
+            "errors": [{"session": e.session_id, "error": e.error}
+                       for e in res.errors],
+            "touched": [{"session": s.session_id, "project": s.project,
+                         "action": s.action, "copied": s.copied,
+                         "superseded_to": s.superseded_to}
+                        for s in res.touched],
+        }, ensure_ascii=False, indent=2))
+    else:
+        prefixo = "[dry-run] " if args.dry_run else ""
+        print(f"{prefixo}{len(res.sessions)} transcript(s) vistos, "
+              f"{len(res.touched)} com novidade, "
+              f"{_humano(res.total_copied)} copiados → {res.dest_root}")
+        for s in res.touched:
+            extra = f"  (antigo preservado como {s.superseded_to})" \
+                if s.superseded_to else ""
+            print(f"  {s.action:9s} {s.session_id[:8]}  "
+                  f"{_humano(s.copied):>9s}  {s.project}{extra}")
+        for e in res.errors:
+            print(f"  ERRO      {e.session_id[:8]}  {e.error}")
+        if res.catalog_note:
+            # Enriquecimento degradado é dito em voz alta. Ficar calado aqui já
+            # escondeu um dossiê saindo sem sistema enquanto a linha existia.
+            print(f"  ⚠️  {res.catalog_note}")
+
+    return EXIT_OK if res.ok else EXIT_ERROR
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        prog="kobe-collect-transcripts",
+        description="Coletor incremental dos transcripts das salas (Highlander v3, F1).",
+    )
+    p.add_argument("--json", action="store_true", help="saída em JSON")
+    sub = p.add_subparsers(dest="cmd")
+
+    def _add_run_args(parser):
+        parser.add_argument("--dry-run", action="store_true",
+                            help="mostra o que faria, sem escrever nada")
+        parser.add_argument("--session", action="append", default=[],
+                            help="colhe só esta sessão (aceita o short id); repetível")
+        parser.add_argument("--source", default=None)
+        parser.add_argument("--dest", default=None)
+        parser.add_argument("--no-catalog", action="store_true",
+                            help="não espelha ponteiros no catálogo")
+        parser.add_argument("--force", action="store_true",
+                            help="roda mesmo com TRANSCRIPT_COLLECTOR_ENABLED off")
+
+    r = sub.add_parser("run", help="uma passada de coleta (o padrão)")
+    _add_run_args(r)
+    r.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("status", help="quando foi a última coleta bem-sucedida")
+    s.set_defaults(func=cmd_status)
+
+    # Sem subcomando = `run`. O caminho comum é o do relógio, e ele não deve
+    # precisar de palavra nenhuma.
+    _add_run_args(p)
+    p.set_defaults(func=cmd_run)
+
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

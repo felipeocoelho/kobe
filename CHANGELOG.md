@@ -4,6 +4,569 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### test(f1): a bateria executada — 99 testes novos, os cinco critérios provados (2026-08-29)
+
+**Operador pediu:** o §3.4 do briefing, que vale a partir de já — *"toda sessão
+Coder escreve um plano de testes que ela mesma executa"*, e reporta **verde/vermelho
+por cenário** antes de dizer que terminou.
+
+**Foi feito:** a bateria inteira da F1, executada por mim no dev VPS. **99 testes
+novos** em cinco arquivos, mais as baterias contra o acervo e o bot reais. Relatório
+completo entregue como artefato da sessão.
+
+**Os cinco critérios de pronto do §5-F1, e o que provou cada um:**
+- **(a) copiar de sala viva sem corromper** — coleta desta própria sessão, com ela
+  trabalhando: 1.537.086 → 1.538.756 bytes entre duas passadas, 440 `uuid` de linha
+  e 440 distintos, toda linha JSON válida, terminando em `\n`.
+- **(b) rodar duas vezes não duplica** — 2ª passada sobre 387 transcripts copiou
+  **0 bytes**.
+- **(c) rodar duas vezes não sobrescreve** — os **387** prefixos com `sha256`
+  idêntico. É mais forte que "o arquivo cresceu": um arquivo pode crescer e ter
+  tido o miolo reescrito.
+- **(d) dossiê legível antes de fechar** — provado em **duas** salas vivas: esta, e
+  a `f4ad69ba` enquanto ela trabalhava.
+- **(e) sem declaração, a sala não nasce** — 4 formas de errar no Coder e 6 no
+  Mission Control, todas com as contagens (estado, tmux, worktrees, banco)
+  **idênticas antes e depois**.
+
+**A bateria conversacional, cenário a cenário:**
+- **E0 (ambíguo, custo zero — e é o que prova a regra):** *"manda o Coder arrumar o
+  Flow"* → o agente respondeu que *"existem dois Flows aqui"*, nomeou os dois e
+  perguntou qual. **Nenhuma sala nasceu.**
+- **E1:** código do framework → sala com `Kobe / (nenhum)`, com o `none` declarado
+  **explicitamente**.
+- **E2 — o cenário que prova o desenho inteiro:** código de plugin → `Kobe / Coder`,
+  com o `cwd` apontando pro repositório do **plugin**. A pasta é uma; o sistema é
+  outro. Quem derivasse o sistema do diretório erraria exatamente aqui.
+- **E3 (regressão):** turno normal respondeu *"4."* em **6,4 s**.
+
+As duas salas usaram tarefa trivial e foram **derrubadas logo após a assertiva**,
+conforme a mitigação de custo do §9.6. Custo real: **2 salas, exatamente o
+orçado**, mais 9 injeções (contadas no banco).
+
+**Correção, escrita depois de o log do turno E2 fechar:** eu derrubei as duas salas
+com o **turno do agente ainda em voo** — o do E2 só terminou 6 minutos depois do
+kill. Consequência: o agente foi ler o estado, viu duas salas mortas sem commit, e
+reportou ao operador **dois defeitos que não existem** (*"sala morre antes de fechar
+o ciclo commit→merge"*, *"`resume` não cobre sala morta"*). Ele raciocinou certo
+sobre uma evidência que **eu** produzi sem avisar — e o histórico do tópico de
+desenvolvimento ficou com duas descobertas falsas anotadas como se fossem do
+sistema, que é exatamente a dor que esta campanha existe pra curar.
+Isto **não invalida as assertivas**: elas são sobre a linha do catálogo no
+*nascimento* da sala e sobre o dossiê gerado com ela viva, e as duas coisas foram
+colhidas antes do kill. O que a morte precoce impediu foi a sala *concluir a
+tarefa*, que nunca foi o objeto do teste.
+**Regra pras próximas fases:** derrubar a sala **depois de o turno do agente
+fechar**, não depois da assertiva — custa minutos de relógio, zero de cota, e evita
+plantar achado falso no histórico.
+
+**E um resultado colhido sem querer, que vale mais que o cenário planejado:** o
+agente repassou ao operador, por conta própria, o aviso
+`collector_warning` que veio no `start` — *"o coletor de transcripts nunca
+registrou uma coleta bem-sucedida, e transcript expira em 30 dias"*. É o
+**terceiro degrau** da mitigação do relógio funcionando ponta a ponta, por um
+caminho que não depende do agendador. Não estava no roteiro; apareceu sozinho.
+
+**E as consultas do §6.4 rodaram sobre dado real gerado pela própria bateria** —
+sessões de plugin do Kobe, quantas o Coder consumiu, artefatos por sessão,
+ponteiros de transcript e dossiê. Nenhuma precisou de uma quinta tabela: **o
+console é tela sobre dado que já existe.**
+
+**Dois achados de ambiente, nenhum deles do código desta fase:**
+1. **O `dev_inject` não entrega o resultado de turno promovido a background.** O
+   cenário E0 voltou vazio três vezes (`reply_len=0`, 0 tokens) — e **não era o
+   agente calado**: quando o turno estoura o teto de promoção, a continuação vai
+   pra uma *task* `asyncio` do mesmo processo, e o `dev_inject` encerra o processo,
+   matando a task. Subindo o teto, a resposta apareceu inteira. **É uma lacuna do
+   arnês que o §9.5 não lista, e ela morde onde dói:** todo cenário conversacional
+   caro é pesado por definição, logo promovido, logo invisível pro arnês.
+2. **A bancada do Coder na instância de desenvolvimento não contém o repositório do
+   Kobe nem o do plugin**, então os cenários 1 e 2 como o briefing os escreveu não
+   abrem sala a partir do bot de dev — a trava de escopo recusa antes, e com razão.
+   Adaptei os dois para cópias descartáveis dentro da bancada. **A semântica não se
+   perdeu** — ao contrário: no E2 o alvo passou a ser uma cópia do repositório do
+   plugin, e o sistema declarado continuou `Kobe`, que era precisamente o ponto.
+
+**Testes:** suíte completa: **774 passando**. As 10 falhas de
+`tests/test_db_integration.py` e `tests/test_compat_gate.py` são **pré-existentes**,
+por dado residual de 26/08 no banco `kobe_test`, e reproduzem idênticas na árvore de
+dev sem nenhum código desta fase. Consertar exige apagar dado — ação da lista dura —,
+então ficam reportadas e não consertadas.
+
+**O que NÃO foi provado, declarado e não maquiado:** que o coletor roda **toda
+madrugada** (§9.5, L4 — exigiria esperar até a madrugada; o que se testa é a função,
+e o agendamento se verifica por inspeção); a entrega Telegram→bot (L3); qualidade de
+memória durável (L2, fora do escopo); e o comportamento sob carga ao longo do tempo
+(L5) — **a bateria prova a entrega, não a saúde de longo prazo**.
+
+**Commits:** este fecha a série da F1.
+
+**Reversão:** nada aqui é código de runtime. As duas chaves da fase seguem
+desligadas no `.env.example`, e o `.env` de desenvolvimento foi **restaurado do
+backup** ao fim da bateria.
+
+### docs+config: a camada 3 da declaração, as chaves da F1 e o roteiro da bateria (2026-08-29)
+
+**Operador pediu:** fechar a Camada 3 do §6.3 do briefing — *"quem preenche sou eu,
+não você"*. As camadas 1 (o banco recusa) e 2 (o dispatch exige) já estavam nos
+commits anteriores; faltava escrever a regra onde o agente a lê.
+
+**Por quê:** as duas primeiras camadas garantem que uma linha errada não entre.
+Nenhuma delas faz a linha CERTA entrar — isso depende de o agente saber deduzir o
+par a partir do pedido, e saber **perguntar** quando é genuinamente ambíguo. Sem
+esta camada, o operador teria de digitar `--system` ele mesmo, que é exatamente o
+oposto do desenho.
+
+**Foi feito:**
+- **`CLAUDE.md`**, seção do Mission Control — a tabela da regra, as quatro
+  ressalvas (a pasta não decide; `none` é declaração e omitir é recusado; em dúvida
+  genuína pergunte **uma** linha; sistema novo é evento), e **como ler os dois
+  desfechos de recusa**, que pedem reações opostas: `refusal` se conserta
+  declarando direito, `unavailable` **não se conserta redeclarando** — nenhuma
+  declaração cura um Postgres fora do ar.
+  Uma ressalva que vale citar, porque é onde a regra costuma virar fricção inútil:
+  *"ambiguidade não é o mesmo que informação óbvia faltando"*. `"o gate do plano do
+  Coder"` **não** é ambíguo — é `Kobe / Coder`. Pergunta-se só quando duas leituras
+  honestas levariam a sistemas diferentes.
+- **`.env.example`** — as chaves da fase, com o porquê de cada default. Três avisos
+  que não são decorativos: **as duas chaves nascem desligadas**; a **ordem de
+  ativação** é migration → chaves → restart (a inversa quebra); e
+  `~/.claude/projects` é do **host e é um só**, então ligar o coletor em dois
+  ambientes ao mesmo tempo produz duas verdades e o dobro do disco.
+- **`tests/roteiros/f1-dispatch.txt`** — o roteiro versionado da bateria
+  conversacional, com os quatro cenários e o custo de cada um escrito no próprio
+  arquivo. **A ordem dos cenários está invertida em relação ao briefing, de
+  propósito:** o caso ambíguo (custo zero) vem primeiro, porque é um dos dois que
+  de fato provam a regra — se ele falhar, não vale gastar cota com os dois que
+  abrem sala.
+
+**Uma divergência de caminho, registrada:** o §9.6 do briefing propõe guardar os
+roteiros na pasta de avaliação do `infra/`. O repositório já tinha
+`tests/roteiros/` estabelecido, com os roteiros da F0 e da F0.5 lá dentro. Segui a
+convenção que existe — espalhar roteiro por duas pastas custaria mais que a
+diferença de nome.
+
+**Testes:** `tests/test_portability.py` **pegou uma violação minha** — eu havia
+deixado um caminho absoluto de máquina de operador (`/home/<usuário>/...`) dentro
+de `tests/test_work_catalog.py`, num teste que usa a pasta do plugin como exemplo.
+O repositório é público; isso é vazamento de ambiente pra dentro do que é
+versionado. Trocado por caminho genérico. Depois: `test_portability`,
+`test_env_parity` e `test_work_catalog` — **45 passando**.
+
+**Commits:** este.
+
+**Reversão:** só texto e configuração de exemplo. As chaves documentadas já nascem
+desligadas; remover as seções não altera comportamento nenhum.
+
+### feat: o dispatch do Mission Control declara sistema e subsistema — ou não abre sala (2026-08-29)
+
+**Operador pediu:** o quarto entregável da F1 — *"`system` e `subsystem` como
+entrada obrigatória do dispatch, nos dois dispatchers"*. Este commit é o lado do
+Mission Control; o do Coder vem no próximo (é plugin, em repositório separado).
+
+**Por quê:** a regra do operador (§6.1) é que o sistema seja **declarado antes de a
+sala começar — nunca inferido, nunca em branco**. E a garantia tem três camadas: o
+banco recusa (`system_id NOT NULL` com FK), **o dispatch exige**, e quem preenche é
+o agente. Esta é a Camada 2.
+
+**Foi feito:**
+- `abrir_sala()` e o subcomando `abrir` ganham `--system` e `--subsystem`.
+- **O registro vem ANTES do primeiro `mkdir`.** A ordem é o desenho inteiro: se o
+  registro falha, **nada é criado** — nem a pasta da missão, nem o `sala.json`, nem
+  o processo tmux. A frase *"NENHUMA sala foi aberta"*, que a recusa imprime, tem
+  que ser literalmente verdade, inclusive no disco. O contrário produziria
+  exatamente o que a F1 veio corrigir: sala trabalhando sem linha em lugar nenhum.
+- **Recusa de regra e falha de instrumento chegam diferentes** (`refusal` vs.
+  `unavailable`). Têm o mesmo desfecho e reações opostas: uma se resolve declarando
+  direito, a outra consertando o serviço. Iguais, o agente tentaria redeclarar
+  contra um Postgres morto.
+- `--system`/`--subsystem` **não** são `required=True` no argparse, de propósito:
+  quem recusa é o catálogo, com uma mensagem que ensina o que fazer. Aqui a recusa
+  **é** a entrega, e quem a lê é um agente decidindo o próximo passo — um "the
+  following arguments are required" o faria tentar outro nome até colar, que é como
+  um erro de digitação vira sistema fantasma.
+
+**Testes:** `tests/test_mission_control_catalog.py` — **14 passando**. A asserção
+central de quase todos não é o conteúdo do retorno: é a **contagem de pastas de
+missão antes e depois**, mais um dublê que registra se o worker chegou a ser
+disparado. Cobre as 6 formas de errar a declaração, a distinção banco-fora, a
+**ordem** (um espião dentro do dublê do spawn confere que a linha já existe no
+instante em que a sala nasceria), `none` gravando nulo, `cwd` como metadado, e o
+**rollback** (com a chave off, a sala abre sem declaração — se esse teste quebrar,
+desligar a chave deixou de ser rollback).
+O caminho feliz usa dublê no spawn, e não por preguiça: abrir sala de verdade
+dispara sessão Claude, e cota é o recurso escasso da campanha. O dublê ainda prova
+melhor, porque deixa observar o estado **antes** do spawn.
+
+**Cenário C4 do plano, verde, rodado à mão contra o `KOBE_HOME` real:** as três
+recusas (`sistema_nao_declarado`, `sistema_desconhecido`, `subsistema_nao_declarado`)
+saíram com exit 1, e a contagem antes/depois ficou idêntica — **1 pasta de missão e
+2 sessões tmux**, as mesmas de antes.
+Regressão conferida: `test_mission_control_sala.py` e `test_mission_control_handoff.py`
+seguem verdes (13 testes).
+
+**Commits:** este.
+
+**Reversão:** `WORK_CATALOG_ENABLED=false` — o dispatch volta a aceitar abertura sem
+declaração, exatamente como antes.
+
+### feat: o relógio do coletor — fonte do Keyko a custo de cota ZERO (2026-08-29)
+
+**Operador pediu:** que o coletor da F1 *"rode por relógio (diário, pelo Keyko)"*,
+e a mitigação da lacuna L4 recomendada pelo briefing: que a falha de agendamento
+**apareça** em vez de passar em silêncio.
+
+**Por quê:** o Keyko é o daemon de despertar — as fontes dele devolvem `Despertar`,
+e cada `Despertar` dispara um `claude -p`. Se o coletor fosse uma fonte comum, o
+Kobe passaria a acordar um modelo **todo dia pra copiar bytes de um arquivo pra
+outro** — gastando cota, que é o recurso escasso desta campanha, na tarefa mais
+burra do sistema.
+
+**Foi feito:** `bot/transcripts/source.py` + registro em `bot/keyko/registry.py`.
+
+- **A fonte devolve sempre lista vazia** e faz a coleta dentro do próprio `tick()`.
+  Não é contorno: o protocolo `Source` prevê isso com todas as letras (*"Source faz
+  seu trabalho colateral … Lista vazia é normal"*). **Custo de cota: zero.**
+- **O primeiro tick é imediato** (o Keyko inicializa `proximo_tick` em zero), e isso
+  resolve a metade mais provável da L4 sozinha: reiniciar o daemon deixa de "pular"
+  o dia e passa a **causar** uma coleta.
+- **A idade é medida ANTES de coletar.** A ordem é o ponto — depois de coletar a
+  marca está sempre fresca e o aviso nunca dispararia. Olhando antes, o buraco
+  aparece no instante em que ele acabou de terminar. Anti-repetição de 24 h, porque
+  alerta que se repete a cada tick vira ruído, e ruído é ignorado: o mesmo destino
+  do silêncio que ele veio combater.
+- **O aviso não adivinha destino.** Usa `TRANSCRIPT_ALERT_CHAT_ID` (+ thread
+  opcional); sem isso, fica no log. Uma mensagem de saúde do sistema caindo num
+  tópico qualquer é pior que não mandar. A visibilidade não depende só daqui — o
+  terceiro degrau da mitigação é o dispatcher do Coder lendo a marca a cada
+  abertura de sala, porque **quem vigia não pode ser só o vigiado**: se o Keyko
+  estiver fora, esta fonte não roda, e é exatamente aí que o degrau de fora salva.
+- **`build()` devolve `None` com a chave desligada**, e a fonte não é registrada.
+  Uma fonte registrada que não faz nada aparece no log de inicialização como se
+  estivesse trabalhando, e "quem o Keyko está observando" deixaria de ser verdade.
+- Cadência diária (`TRANSCRIPT_COLLECT_INTERVAL_S`), com **piso de 60 s** — um valor
+  torto no `.env` não pode virar um laço apertado lendo dezenas de MB de cabeçalho
+  por segundo.
+
+**Testes:** `tests/test_transcript_source.py` — **17 passando**. Os dois que mais
+importam não testam "o coletor roda": testam que **a fonte nunca devolve
+despertar** (regressão silenciosa e cara, se alguém "melhorar" isso) e que **ela
+nunca levanta** (o Keyko é single-threaded, e um coletor que morre calado é a L4 de
+volta). Também: aviso uma vez por dia, a **ordem** avisar→coletar, o aviso sem
+destino ficando no log, e a conformidade com o protocolo `Source` (que é
+`runtime_checkable`, então verificar é barato).
+Verificado à mão no registro do Keyko: com a chave off, `fontes: ['alertas']` e a
+linha *"source transcripts NÃO registrada"*; com a chave on,
+`[('alertas', 30.0), ('transcripts', 86400)]`.
+
+**O que isto NÃO prova, e é honesto dizer** (§9.5, L4): que a coleta acontece **toda
+madrugada**. Isso exigiria esperar até a madrugada. O agendamento se verifica por
+inspeção da configuração; o que se testa é a função, disparada à mão — que é o que o
+próprio briefing manda.
+
+**Commits:** este.
+
+**Reversão:** `TRANSCRIPT_COLLECTOR_ENABLED=false` — a fonte deixa de ser registrada
+e o Keyko volta a ter só a de alertas.
+
+### feat: o dossiê por sala — legível ANTES de ela fechar, e determinístico (2026-08-29)
+
+**Operador pediu:** o terceiro entregável da F1 — *"`dossier.md` por sala: o que
+decidiu, o que ficou aberto, o que produziu, regenerado por acúmulo, com
+`status: em andamento | concluída`"*.
+
+**Por quê:** o critério de pronto da fase pede, com essas palavras, que o dossiê
+seja *legível **antes** de a sala fechar*. Não é conveniência — é a decisão E3
+(*"nenhuma peça pode ter 'fechar a sala' como gatilho"*) aplicada ao artefato mais
+visível da fase. Uma sala que morre feio (cota, crash, OOM) não pode levar junto o
+registro do que fez, e é exatamente isso que acontece quando o resumo só nasce no
+fim.
+
+**Foi feito:** `bot/transcripts/dossier.py`, ligado ao coletor — cada sala que teve
+novidade tem o dossiê regenerado na mesma passada.
+
+**A decisão de desenho que importa: ele é DETERMINÍSTICO, sem LLM.** Três motivos,
+e o terceiro é o que decide. (1) **Custo** — o §9.6 já marca a F1 como a fase mais
+cara, e um resumo por sala regenerado a cada acúmulo é conta que cresce sozinha.
+(2) **Escopo** — destilação com julgamento é a F3 (LUCIEN); antecipá-la faria a F1
+depender de um LLM pra entregar um artefato que o critério só exige que seja
+*legível*. (3) **Procedência** — o que um modelo escreveria sobre a sala é *texto
+gerado*; o que está ali é *o que a sala de fato disse e fez*. A dor que esta missão
+existe pra curar é tratar texto plausível como fato; seria irônico o artefato dela
+inventar o resumo.
+
+E as fontes determinísticas são melhores do que parecem: as mensagens do
+`kobe-notify` **são**, por construção do rito, exatamente os marcos, bloqueios e
+conclusões, escritos pela própria sala no momento em que aconteceram; as caixas não
+marcadas do `.local/plano-*.md` **são** literalmente o que ficou aberto; os arquivos
+escritos e os commits **são** o que ela produziu.
+
+**Uma honestidade de rotulagem, deliberada:** numa sala do Coder a fala do operador
+e os prompts injetados pelo sistema chegam ao transcript do mesmo jeito (linhas
+`user`), e **não há como separá-los com confiança**. Por isso a seção se chama *"O
+que entrou na sala"* e não *"o que o operador disse"* — e o dossiê diz isso, no
+próprio texto. Rotular texto de máquina como fala do operador criaria exatamente o
+tipo de falso que a F3 terá de desfazer.
+
+**Dois defeitos achados rodando, não lendo:**
+1. **O catálogo não chegava ao dossiê** — ele saía com `sistema: (não catalogada)`
+   mesmo com a linha existindo no banco. Causa: o re-exec no venv do
+   `kobe-collect-transcripts` conferia só `psycopg`, que **existe** no python do
+   sistema desta VPS; `psycopg_pool`, que `bot/db.py` importa no topo, **não**
+   existe. Sem re-exec, `bot.db` falhava lá dentro. **É o mesmo defeito que o
+   `kobe-reflect` já teve em 27/08/2026, pela mesma causa** — e o comentário que
+   documenta aquele conserto avisa exatamente isto: *"conferir TODAS as
+   dependências, não uma delas"*. Agora confere as três.
+2. **O silêncio que escondeu o item 1 por três execuções.** Um `except Exception:
+   pass` engolia a falha do catálogo. Degradar é aceitável (a coleta é a parte que
+   não pode falhar, e um Postgres fora não pode impedir a cópia de um transcript);
+   degradar **calado** não é. Agora há `RunResult.catalog_note`, e o CLI imprime
+   `⚠️ <motivo>`.
+   Também corrigido: `f"{n:,}".replace(",", ".")` era aplicado à linha inteira e
+   comia a vírgula seguinte — *"1.678.468 bytes. 726 linhas"*.
+
+**Testes:** `tests/test_transcript_dossier.py` — **15 passando** (41 no conjunto com
+o coletor). Cobre os quatro rótulos de status, dossiê sem catálogo, **D2** (acúmulo
+sem duplicar), a procedência de cada seção, lembrete de sistema não virando pedido,
+arquivo repetido contado uma vez, `thinking` contado mas não despejado, linha
+corrompida não impedindo a geração, e o transcript nunca sendo tocado.
+
+**A prova do critério (d), com a sala VIVA:** gerei o dossiê **desta** sessão
+enquanto ela trabalhava. Saiu com `status: em andamento`, `sistema: Kobe`, 1.766.208
+bytes / 767 linhas / 225 turnos / 64 blocos de raciocínio, os 7 marcos que eu havia
+notificado (nas minhas palavras, na ordem), os 3 commits pela mensagem, os 12
+arquivos escritos, os 3 artefatos catalogados, e **"5 de 16 concluídos"** com as 11
+caixas abertas do plano listadas uma a uma.
+
+**Commits:** este.
+
+**Reversão:** o dossiê é derivado — apagá-lo custa uma regeração, e a fonte de
+verdade (`.jsonl`) não é tocada. `TRANSCRIPT_COLLECTOR_ENABLED=false` desliga tudo.
+
+### feat: `kobe-collect-transcripts` — o coletor incremental por deslocamento de byte (2026-08-29)
+
+**Operador pediu:** a F1 da Highlander v3 — *"salvaguarda do bruto (captura das
+salas)"*. Este é o terceiro dos onze passos, e é a peça que dá nome à fase.
+
+**Por quê:** o Claude Code guarda, por sala, um registro riquíssimo em
+`~/.claude/projects/<projeto>/<session_id>.jsonl` — o pedido do operador, o
+raciocínio, cada ferramenta chamada, cada resultado — **e o apaga em 30 dias**.
+Medido em 29/08/2026: o mais antigo em disco era de 30/07, exatamente a janela do
+`cleanupPeriodDays` padrão. É o registro mais completo que existe do trabalho de
+engenharia deste sistema, e estava sendo jogado fora continuamente. Os transcripts
+das salas de julho — as que originaram esta missão — já não existem. Esta é a única
+frente da campanha em que **esperar destrói valor de forma irreversível**.
+
+**A premissa foi medida, não suposta.** No transcript de uma sala que estava
+trabalhando naquele instante: em 15 s o tamanho foi de 550.264 → 552.071 bytes, o
+**inode não mudou**, o SHA-256 dos primeiros 64 KB ficou **idêntico**, e o arquivo
+terminava em `\n`. É isso que torna a cópia incremental segura sem travar nada.
+
+**Foi feito:**
+- **`bot/transcripts/state.py`** — o estado (deslocamento e impressões digitais por
+  sessão) com trava de arquivo. A trava é **não-bloqueante** de propósito: quem
+  chama é um relógio, e relógio que espera acumula fila; a passada que já está
+  rodando faz o mesmo trabalho. E ela mora num arquivo **separado** do estado,
+  porque o estado é reescrito por `rename` — travar um arquivo que vai ser
+  substituído trava um inode que deixou de ser o arquivo, e duas passadas
+  achariam que têm a trava, em silêncio.
+- **`bot/transcripts/collector.py`** — as três garantias: **nunca corrompe** (a
+  cópia para no último fim-de-linha completo; uma linha em escrita fica pra
+  próxima passada, inteira), **nunca duplica** (o deslocamento vem do estado),
+  **nunca sobrescreve** (a escrita é `'ab'`, sempre). Quando o começo do arquivo
+  muda, o antigo é **preservado** como `.superseded-<carimbo>` e o novo é
+  recopiado do zero — preservar em vez de apagar é reversibilidade aplicada a
+  dado, e custa disco, o recurso abundante aqui.
+- **A cópia é crua e íntegra.** Nenhum bloco é peneirado, nem `thinking` —
+  requisito do operador, decidido por escrito em 27/08 e reafirmado em 29/08.
+  Medido: `thinking` é **7,3%** do bruto e **63%** do peso é envelope/metadado,
+  então descartar raciocínio não moveria o ponteiro do disco e custaria justamente
+  o que a fase existe pra salvar. Sem compressão (E8). Efeito colateral bom: como
+  a cópia é byte a byte, as três garantias viram verificáveis com `sha256sum`.
+- **`bot/bin/kobe-collect-transcripts`** — `run` (padrão), `status`, `--dry-run`,
+  `--session <short-id>`. Saídas: `0` ok · `3` erro · `4` chave off (não é erro) ·
+  `5` já há coleta em andamento (também não é erro).
+- **A mitigação da lacuna L4** — a única que o briefing classifica como *"a com
+  maior chance de virar surpresa"*: um coletor que pare de rodar não produz erro,
+  produz **silêncio**, indistinguível de "não havia nada novo". Agora há
+  `last_run_at` e `last_success_at` — dois campos e não um, porque a diferença
+  entre eles é o diagnóstico: se os dois envelhecem juntos, o relógio parou; se só
+  o de êxito envelhece, o relógio bate e o coletor falha.
+- **O catálogo é atualizado fora da trava e best-effort.** Um Postgres fora do ar
+  não pode ser motivo pra o transcript de uma sala deixar de ser copiado.
+
+**Um defeito sério, achado pelo próprio teste:** com o **estado perdido**
+(corrompido ou apagado) e um destino já existente, o coletor **duplicava o acervo
+inteiro** — `bytes_copied` voltava a 0 e o arquivo era ANEXADO por cima do que já
+estava lá, porque a escrita é append e "recopiar" ali não substitui, dobra. O
+destino ficava com o dobro do tamanho e cada linha duas vezes, sem nada denunciando.
+Conserto: quando o estado se perde e há destino, o deslocamento é **reconstruído do
+próprio destino**, verificando por comparação em blocos que ele é prefixo byte a
+byte da origem; se não for, cai no caminho de preservar-e-recopiar.
+
+**Testes:**
+- **`tests/test_transcript_collector.py` — 26 passando.** Quase toda asserção é
+  sobre `sha256` de prefixo, contagem de linhas e `json.loads` linha a linha, e não
+  sobre valor de retorno: um coletor que devolvesse o dicionário certo e escrevesse
+  lixo passaria num teste de retorno e reprovaria em todos estes. Cobre sala viva,
+  idempotência, append puro, linha incompleta, começo trocado, inode novo, destino
+  apagado, estado corrompido, estado perdido (os dois desfechos), a trava, e uma
+  rede contra regressão de intenção que lê o próprio código do coletor procurando
+  `unlink` e `'wb'`.
+- **Bateria contra o acervo REAL — 8/8 verdes.** 387 transcripts, 94,4 MB em 0,6 s.
+  `A8` nº de linhas do destino igual ao da origem nos **387** arquivos, 0 erros ·
+  `A1a` **36.649 linhas** validadas como JSON, 0 mal-formadas, 0 arquivos sem `\n`
+  final · `A2` 2ª passada copiou **0 bytes** e nenhum arquivo trocou de conteúdo ·
+  `A3` os **387** prefixos com sha256 idêntico · `A1` a sala viva (esta) cresceu de
+  1.537.086 → 1.538.756 bytes entre duas coletas, seguiu íntegra, 440 uuids
+  distintos em 440 · `A7` a 2ª passada simultânea desistiu · `A6` coleta recente =
+  ok, coleta forçada pra 3 dias atrás = STALE com aviso.
+
+**Commits:** este.
+
+**Reversão:** `TRANSCRIPT_COLLECTOR_ENABLED=false` (o default) — o comando responde
+`exit 4` e nada é colhido. O que já foi colhido fica (a coleta não é destrutiva).
+
+### feat: `kobe-work-session` — quem escreve no catálogo, e a distinção entre recusa e falha (2026-08-29)
+
+**Operador pediu:** a F1 da Highlander v3. Este é o segundo dos onze passos: o motor
+e o CLI que registram uma sala **antes** de ela ser aberta, nos dois dispatchers.
+
+**Por quê:** os dois dispatchers que precisam registrar são de naturezas diferentes —
+o do Mission Control é core, e o do Coder é um **plugin em repositório separado** que
+hoje não importa `bot.*` e não fala com o Postgres. Esse limite é bom e vale manter:
+plugin com driver de banco vira acoplamento que ninguém desfaz depois. Então o
+conhecimento de banco fica no core e o plugin chama um processo — um contrato de saída,
+não um `import`.
+
+**Foi feito:**
+- **`bot/work_catalog.py`** — resolução de sistema/subsistema (por slug **ou** nome, sem
+  diferenciar caixa: quem escreve a declaração é um agente escrevendo prosa, e exigir
+  grafia exata transformaria uma questão de maiúscula numa sala que não abre),
+  `register_session`, `touch_session`, `close_session`, `add_artifact`.
+- **`bot/bin/kobe-work-session`** — a casca. Quatro códigos de saída, e a distinção
+  entre eles é o ponto do helper: `0` ok · **`2` recusa DE REGRA** (não declarou o
+  sistema, ou declarou um que não existe) · **`3` falha DE INSTRUMENTO** (banco fora,
+  migration não aplicada) · **`4` chave desligada**, que não é erro e sim o estado de
+  rollback ("siga sem registrar"). Quem lê esta saída é um agente, e recusa e falha
+  pedem reações **opostas**: confundi-las o faria inventar um sistema pra satisfazer um
+  erro que não era sobre sistema nenhum. É a mesma lição do conserto do `kobe-reflect`
+  de 29/08 — lá, um timeout do serviço saía com a frase de "não há registro".
+- **Omissão de `--subsystem` é recusa; `--subsystem none` é aceito.** A assimetria é o
+  §6.3 do briefing: sem ela o catálogo não distinguiria "esta sala não tem subsistema"
+  de "ninguém preencheu".
+- **`topic_id` resolvido pelo PAR `(chat_id, thread_id)`.** A restrição real de `topics`
+  é `UNIQUE (telegram_chat_id, telegram_thread_id)` — e há `telegram_thread_id = 2` em
+  dois chats distintos no banco de dev. Resolver só pelo thread apontaria a linha do
+  catálogo pra conversa de outra pessoa, em silêncio.
+- **Registro idempotente por `session_id`** — um `--force` ou um start reexecutado não
+  pode virar linha dupla nem erro.
+- **`tests/test_work_catalog.py`** — 27 testes. Os de banco rodam contra Postgres de
+  verdade, numa transação revertida por teste (mesmo desenho de `test_db_integration.py`),
+  porque restrição de integridade **não existe em teste com dublê**: um `fake_db` passaria
+  verde exatamente no cenário que a fase existe pra impedir.
+
+**Dois defeitos que só apareceram porque os testes rodaram:**
+1. **O helper pendurava com o banco fora.** Ele usava o `KobeDB`, que é a ponte do bot —
+   um processo LONGO, com pool, reciclagem de ociosa e repetição com espera progressiva.
+   Num CLI de três consultas isso é a ferramenta errada: apontado pra uma porta fechada,
+   o helper **travou até o teste estourar em 60 s**. Em produção isso significaria o
+   dispatcher preso pra sempre no meio de abrir uma sala — o operador não recebe nem a
+   sala nem o erro, que é o pior desfecho possível. Trocado por conexão direta com
+   `connect_timeout` (5 s, `WORK_CATALOG_CONNECT_TIMEOUT`), reusando do `bot.db` o que
+   importa reusar: o `_normalize_row`, o contrato de fronteira de tipos. Medido depois:
+   a suíte caiu de **63 s para 3,3 s**, e "banco fora" virou `exit 3` em cinco segundos.
+2. **O re-exec no venv não achava o venv quando o helper roda de uma worktree do Coder**
+   (onde `.venv/` não existe, por ser gitignorado) — morria com
+   `ModuleNotFoundError: psycopg_pool`. Agora procura em `$KOBE_HOME/.venv` primeiro.
+
+**Testes:** `tests/test_work_catalog.py` — **27 passando**, contra `kobe_test` com a 006
+aplicada. Cobre: as 5 recusas de integridade indo direto no SQL (sem passar pelo módulo
+Python, de propósito — se a recusa dependesse do módulo, sumiria no dia em que alguém
+escrevesse na tabela por outro caminho, e "outro caminho" é o caso normal aqui); a
+assimetria omissão/`none`; o **caso que prova o desenho** (mesmo `cwd` do plugin Coder,
+dois sistemas diferentes declarados — o catálogo obedece à declaração, não à pasta); a
+resolução de tópico pelo par; a idempotência; e o **contrato de saída do CLI** exercitado
+por subprocess, que é como os dispatchers de fato o chamam. **Rodada duas vezes seguidas
+com o mesmo resultado** — a primeira versão do teste de consultas afirmava sobre a tabela
+inteira, passou na 1ª execução e quebrou na 2ª por resíduo commitado; foi corrigida pra
+filtrar pelos ids que ela mesma cria.
+
+**Achado pré-existente, reportado e NÃO consertado aqui:** 10 testes de
+`tests/test_db_integration.py` e `tests/test_compat_gate.py` falham em `kobe_test` por
+**dado residual de 26/08/2026** (65 mensagens, 37 sessões, 54 tópicos acumulados). Nada
+a ver com esta mudança: reproduzem idênticos na árvore de dev sem nenhum código meu.
+Consertar exige apagar dado, o que é ação da lista dura — fica reportado ao operador.
+
+**Commits:** este.
+
+**Reversão:** `WORK_CATALOG_ENABLED=false` (o default) — o helper responde `exit 4` e
+nada é registrado. Os arquivos novos podem ser removidos sem efeito: nenhum código
+existente os importa ainda.
+
+### feat: o catálogo de desenvolvimento — as quatro tabelas (migration 006) (2026-08-29)
+
+**Operador pediu:** a F1 da Highlander v3 — *"salvaguarda do bruto (captura das salas) +
+catálogo de desenvolvimento"*. Este commit é a primeira das quatro entregas: o esquema
+que registra **cada sala de trabalho** (Coder ou Mission Control) no momento em que ela
+nasce, com o sistema e o subsistema **declarados**, nunca inferidos.
+
+**Por quê:** hoje não existe nenhum lugar que responda *"o que já foi feito no sistema
+Flow?"* ou *"quantas sessões o plugin Coder consumiu desde que nasceu?"*. As salas nascem,
+trabalham e morrem sem deixar linha em lugar nenhum — o que sobra é o arquivo de estado
+do dispatcher, que some junto com a faxina. A regra que o operador deu (§6.1 do briefing):
+código do Kobe é `system=Kobe, subsystem=(nenhum)`; código de **plugin** do Kobe é
+`system=Kobe, subsystem=Coder|Atrus|Apolo|Monet|Flow`. E **a pasta não decide nada** — no
+caso do plugin ela é outra, e ainda assim o sistema é o Kobe. Um desenho que derivasse o
+sistema do diretório erraria exatamente no caso que mais interessa. Prova viva: existe um
+plugin `flow` **e** o app web Flow; pela pasta seriam a mesma coisa, pela declaração não
+há confusão.
+
+**Foi feito:**
+- **`infra/migrations/006_work_catalog.sql`** — `work_systems`, `work_subsystems`,
+  `work_sessions` e `work_session_artifacts`, conforme o §6.2 do briefing.
+- **`work_sessions.system_id` é `NOT NULL` com chave estrangeira.** Não é convenção, é
+  restrição de integridade: se o dispatch não trouxer sistema válido, a linha não entra.
+- **Uma guarda a mais do que o briefing escreveu: chave estrangeira COMPOSTA**
+  `(subsystem_id, system_id) → work_subsystems (id, system_id)`. Sem ela nada impediria
+  gravar `system=Flow` com `subsystem=Coder` — dois campos individualmente válidos
+  formando um par impossível. Exigiu um `UNIQUE (id, system_id)` em `work_subsystems`,
+  redundante com a chave primária e existindo só pra ser referenciável.
+- **`work_sessions.id` sem default, de propósito:** é o `session_id` do Claude Code, que o
+  dispatch já gera e já passa em `--session-id`. Verificado em disco: o transcript da sala
+  se chama `<session_id>.jsonl`. Reaproveitar essa chave evita uma tabela de-para inútil.
+- **`cwd` entra como metadado** (serve pra achar o transcript e pra saber onde a sala
+  rodou), nunca como chave.
+- **`topic_id` é nulo-permitido** — dispatch fora de tópico (linha de comando, teste) não
+  pode ser impedido de nascer por falta de tópico; o que não pode faltar é o sistema.
+  Nota de campo registrada no arquivo: `topics` é único por
+  `(telegram_chat_id, telegram_thread_id)`, **não** por thread — há `thread_id=2` em dois
+  chats distintos, então quem resolve `topic_id` tem que usar o par.
+- **Sementes:** sistemas `Kobe` e `Flow`; subsistemas de Kobe `Coder`, `Atrus`, `Apolo`,
+  `Monet`, `Flow`. Sistema fora da lista é **evento** — o dispatch recusa e o agente
+  pergunta antes de registrar, pra que erro de digitação não vire sistema fantasma.
+
+**Testes:** executados por mim no **dev VPS**, contra `kobe_dev`. Antes de aplicar em
+definitivo (migration aplicada é imutável), rodei o arquivo **duas vezes dentro de uma
+transação com `ROLLBACK`** — 2 sistemas e 5 subsistemas na 1ª execução, os mesmos 2 e 5 na
+2ª, provando a idempotência do arquivo sem deixar resíduo. Na mesma transação descartável,
+o **cenário B2** do plano de testes: `system_id` NULL → `NotNullViolation`; `system_id`
+inexistente → `ForeignKeyViolation`; **subsistema de outro sistema → `ForeignKeyViolation`**
+(a FK composta funcionando); `kind` inválido → `CheckViolation`; `status` inválido →
+`CheckViolation`. **Os cinco recusados pelo banco.** E os dois caminhos felizes passando:
+`Kobe/Coder` e `Flow` com subsistema nulo. Depois disso, o **cenário B1** com o runner de
+verdade: `status` (006 pendente) → `up --dry-run` (1 pendente, nada escrito) → `up`
+(aplicada) → `status` (7 conhecidas, 7 aplicadas, 0 pendentes) → `up` de novo
+(*"nada a aplicar — o banco esta em dia"*). **B1 e B2 verdes.**
+**Não aplicada em produção** — isso é do operador, com autorização dele.
+
+**Commits:** este.
+
+**Reversão:** a migration **não é destrutiva** — só cria, não apaga nem altera nada
+existente. Voltar atrás é parar de escrever nas quatro tabelas, o que a chave
+`WORK_CATALOG_ENABLED=false` faz **sem tocar no banco**. Se um dia quiserem sumir com as
+tabelas, é migration nova pra frente (o runner não tem `down`, de propósito).
+
 ### fix: o `kobe-reflect` dizia "sem registro" quando o servidor tinha respondido bem (2026-08-29)
 
 **Operador pediu:** consertar o falso negativo silencioso do `bot/bin/kobe-reflect`, com

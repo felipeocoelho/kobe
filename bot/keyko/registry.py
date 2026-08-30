@@ -38,4 +38,27 @@ def build_sources(
         sources.append(AlertasSource(kobe_home=kobe_home, bot_token=bot_token))
         logger.info("source registrada: alertas")
 
+    # TranscriptsSource — 3ª fonte (gatilho de tempo: o coletor diário da F1).
+    # Diferente das outras, ela NUNCA devolve despertar: faz o trabalho dentro
+    # do próprio tick e retorna lista vazia. Copiar bytes não precisa de um
+    # modelo, e acordar um pra isso todo dia gastaria cota — o recurso escasso
+    # desta campanha — na tarefa mais burra do sistema.
+    #
+    # `build` devolve None com a chave desligada, e a fonte não é registrada:
+    # uma fonte que aparece no log de inicialização sem fazer nada faria "quem o
+    # Keyko está observando" deixar de ser verdade.
+    try:
+        from bot.transcripts.source import build as build_transcripts
+    except ImportError:
+        logger.exception("TranscriptsSource indisponível — pacote bot.transcripts faltando?")
+    else:
+        transcripts = build_transcripts(kobe_home=kobe_home, bot_token=bot_token)
+        if transcripts is not None:
+            sources.append(transcripts)
+            logger.info("source registrada: transcripts")
+        else:
+            logger.info(
+                "source transcripts NÃO registrada (TRANSCRIPT_COLLECTOR_ENABLED off)"
+            )
+
     return sources

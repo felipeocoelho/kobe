@@ -1,0 +1,64 @@
+# F1 — a declaração de sistema/subsistema atravessando o bot inteiro
+#
+# Esta é a metade CONVERSACIONAL da F1. A metade de serviço (o coletor, o
+# catálogo, o caminho da recusa) se prova por assertiva sobre arquivo e banco, e
+# custa zero. Isto aqui é o que o operador percebe conversando: ele pede uma
+# sessão de código no Telegram, o agente declara `--system` e `--subsystem`, e o
+# dispatch aceita ou pergunta.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f1-dispatch.txt --thread-id 2
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTO — leia antes de rodar
+#
+# Este é o roteiro mais caro do projeto, e o recurso escasso não é dinheiro, é
+# COTA DE ASSINATURA. Os cenários 1 e 2 abrem sessões Claude de verdade. Duas
+# mitigações são obrigatórias e estão embutidas nas tarefas abaixo:
+#
+#   (a) as tarefas são TRIVIAIS de propósito (mexer num texto, um comentário) —
+#       coisa que morre em um turno;
+#   (b) as salas são DERRUBADAS logo depois da assertiva.
+#
+# E note a ordem: o cenário 3 vem PRIMEIRO. Ele não custa sala nenhuma, e é —
+# junto com o caminho da recusa, que roda fora deste roteiro — um dos dois que
+# de fato provam a regra. Se ele falhar, não vale gastar cota com os outros dois.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 3. O CASO AMBÍGUO — custo ZERO, e é o que prova a regra ──────────────────
+# Existe um PLUGIN chamado flow e existe o APP WEB Flow. Pela pasta de trabalho
+# os dois seriam a mesma coisa; pela declaração, não há confusão. Aqui o agente
+# NÃO pode chutar: ele tem que perguntar uma linha.
+#
+# ESPERADO: nenhuma sala nasce ainda. Chega uma pergunta curta ("o plugin Flow do
+# Kobe ou o app Flow?"). Assertiva: 0 linhas novas em `work_sessions`, 0 sessões
+# tmux novas.
+manda o Coder arrumar o Flow
+@25
+
+# Respondendo, aí sim a sala nasce — com o par CERTO, e o par depende da resposta.
+# ESPERADO: agora sim uma sala, com `system=Kobe, subsystem=Flow` (o plugin).
+o plugin
+@25
+
+# ── 1. O CASO CLARO — custo: 1 sala ─────────────────────────────────────────
+# Tarefa trivial de propósito (texto de README), pra morrer em um turno.
+# ESPERADO: a sala nasce; linha no catálogo com `system=Kobe` e `subsystem` NULO.
+# O trabalho é no framework em si, então o agente tem que declarar
+# `--subsystem none` — explicitamente, nunca por omissão.
+manda o Coder ajustar o texto do README do Kobe
+@30
+
+# ── 2. O CASO DE PLUGIN — custo: 1 sala ─────────────────────────────────────
+# É o cenário que prova por que inferir do diretório erraria: a pasta de trabalho
+# é a do PLUGIN, e ainda assim o sistema é o Kobe.
+# ESPERADO: `system=Kobe`, `subsystem=Coder`, e `cwd` apontando pro repositório
+# do plugin — o diretório é metadado, não chave.
+manda o Coder mexer no gate de aprovação de plano do plugin Coder
+@30
+
+# ── 4. REGRESSÃO — custo ZERO ───────────────────────────────────────────────
+# A metade de serviço da F1 (coletor, catálogo, registro no dispatch) pode
+# QUEBRAR algo conversacional. Este cenário existe como rede, não como prova da
+# entrega: um turno normal tem que seguir normal, e o tempo do
+# "[n/N] pronto em X.Xs" não pode regredir de forma perceptível.
+me responde em uma linha: que dia é hoje?

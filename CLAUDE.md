@@ -361,9 +361,45 @@ Uma **missão** é um turno longo de raciocínio numa **sala visível** (tmux `-
 ### Abrir (por linguagem natural — NÃO há comando slash)
 Quando o operador pedir em linguagem natural pra abrir/pensar uma missão — "abre uma missão sobre X", "quero pensar fundo sobre Y", "monta uma sala pra analisar Z" — você abre:
 ```
-.venv/bin/python -m bot.mission_control.sala_dispatch abrir --objetivo "<o tema, fiel ao que ele pediu>"
+.venv/bin/python -m bot.mission_control.sala_dispatch abrir --objetivo "<o tema, fiel ao que ele pediu>" \
+    --system "<Sistema>" --subsystem "<Subsistema|none>"
 ```
 O resultado traz o `missao_id`. Confirme em uma linha ("abri a missão `<id>`, a sala já está pensando — te reporto por aqui"). Abrir **não** redireciona o tópico.
+
+**`--system` e `--subsystem` são obrigatórios, e quem declara é você.** Toda sala
+nasce com uma linha no catálogo de desenvolvimento dizendo em que sistema o
+trabalho aconteceu; sem os dois, o dispatch **recusa e não abre sala nenhuma** —
+não é validação de formulário, é restrição de integridade no banco. O operador
+continua pedindo do jeito que pede; ele não digita nada disso.
+
+| O trabalho é… | Declare |
+|---|---|
+| sobre o **Kobe** (o framework: core, `bot/`, `infra/`, `keyko/`) | `--system Kobe --subsystem none` |
+| sobre um **plugin do Kobe** (Coder, Atrus, Apolo, Monet, o plugin Flow) | `--system Kobe --subsystem <Coder\|Atrus\|Apolo\|Monet\|Flow>` |
+| sobre **outro sistema** (o app web Flow, por exemplo) | `--system Flow --subsystem none` |
+
+Quatro regras que fecham o desenho:
+
+- **A pasta não decide.** Um plugin do Kobe mora em pasta própria e ainda assim o
+  sistema é o **Kobe** — o plugin é o *subsistema*. O caso que prova: existe um
+  **plugin** `flow` e existe o **app web Flow**; pela pasta seriam a mesma coisa,
+  pela declaração não há confusão.
+- **`none` é declaração; omitir é recusado.** Seis meses depois, uma linha sem
+  subsistema tem que querer dizer *"não tinha subsistema"*, e não *"ninguém
+  preencheu"*.
+- **Em dúvida genuína, pergunte UMA linha antes de abrir** — *"isso é o plugin
+  Flow ou o app Flow?"*. Ambiguidade não é o mesmo que informação óbvia faltando:
+  *"pensar sobre o gate do plano do Coder"* não é ambíguo, é `Kobe / Coder`.
+- **Sistema novo é EVENTO.** Se o dispatch recusar por sistema desconhecido, **não
+  tente outro nome até colar** — pergunte ao operador se é sistema novo pra
+  registrar. É o que impede um erro de digitação seu de virar sistema fantasma.
+
+**Como ler a recusa — são três coisas diferentes.** Olhe `refusal` e `unavailable`
+no retorno: `refusal: true` é **recusa de regra** (corrija a declaração; o campo
+`message` diz como); `unavailable: true` é **falha de instrumento** (o banco não
+respondeu — **não redeclare**, nenhuma declaração conserta um Postgres fora do ar;
+avise o operador). Nos dois casos **nenhuma sala foi aberta** — o que muda é o que
+fazer a respeito.
 
 ### Roteamento — a sala NÃO captura o canal (regra dura)
 Ter uma sala ativa no tópico **não muda** a conversa: por padrão, **você (Hal) responde normal**, como se a sala não existisse. Quando há sala ativa, seu prompt traz uma linha `[Sala de missão ativa neste tópico: <id> — "<obj>"]` — isso é só **ciência**, não ordem de repassar.
