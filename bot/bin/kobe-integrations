@@ -50,6 +50,17 @@ _PROJECT_ROOT = _HELPER_DIR.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+# O interpretador certo — ver `bot/bin/_venv.py`. Este helper não tinha guarda
+# nenhum: ele importa `bot.plugins` e funcionava por sorte, porque o python do
+# sistema tinha o que ele precisava NAQUELE dia. É a mesma classe de defeito que
+# derrubou o `kobe-recall-since`, esperando a primeira dependência nova.
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
 from bot.plugins import (  # noqa: E402
     CapabilityRoute,
     build_capability_index,

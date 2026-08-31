@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -44,24 +43,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Re-exec no venv do projeto se as deps não estiverem no interpretador atual
-# (mesmo padrão do kobe-recall — o shebang resolve pro Python do sistema).
-_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
-# Conferir TODAS as dependências, não uma delas (conserto de 2026-08-27, F0.2).
-# O guard antigo olhava só `psycopg`: numa máquina onde o python do sistema tem
-# psycopg mas NÃO tem httpx — que é o caso desta VPS —, ele decidia que estava
-# tudo bem, não re-exec-utava no venv, e o script morria duas linhas abaixo com
-# `ModuleNotFoundError: No module named 'httpx'`. Achado ao rodar o cenário F6
-# do plano de testes da F0: o helper estava quebrado no caminho em que o agente
-# de fato o chama. Uma dependência a menos na lista = o mesmo bug de volta.
-if (
-    _VENV_PY.exists()
-    and sys.executable != str(_VENV_PY)
-    and any(
-        importlib.util.find_spec(dep) is None for dep in ("psycopg", "httpx", "dotenv")
-    )
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem lista de dependências: a
+# pergunta é "já estou no venv do projeto?", não "falta algum módulo?". Este
+# helper já teve o bug da lista incompleta em 27/08/2026 (a lista dizia
+# `psycopg`, faltava `httpx`/`openai`).
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
 
 # Dir dos helpers no sys.path pra importar `_kobe_topic` (leitura do `.env`).
 _HELPER_DIR = Path(__file__).resolve().parent

@@ -25,7 +25,6 @@ Em dev isso é o `kobe_dev`; a bateria da F0 rodou exatamente assim.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import sys
 from collections import Counter, defaultdict
@@ -35,13 +34,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
-if (
-    _VENV_PY.exists()
-    and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("psycopg") is None
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem lista de dependências: a
+# pergunta é "já estou no venv do projeto?", não "falta algum módulo?".
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
 
 from bot import transcription_normalizer as tn  # noqa: E402
 

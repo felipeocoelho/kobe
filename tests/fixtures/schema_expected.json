@@ -23,7 +23,8 @@
     "004",
     "005",
     "006",
-    "007"
+    "007",
+    "008"
   ],
   "tables": {
     "contacts": {
@@ -203,6 +204,730 @@
         {
           "name": "contacts_tipo_check",
           "definition": "CHECK ((tipo = ANY (ARRAY['pessoa'::text, 'grupo'::text])))"
+        }
+      ]
+    },
+    "lucien_claim_evidence": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "claim_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "message_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "seq",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_lucien_claim_evidence_msg",
+          "definition": "CREATE INDEX idx_lucien_claim_evidence_msg ON public.lucien_claim_evidence USING btree (message_id)"
+        },
+        {
+          "name": "lucien_claim_evidence_pkey",
+          "definition": "CREATE UNIQUE INDEX lucien_claim_evidence_pkey ON public.lucien_claim_evidence USING btree (claim_id, message_id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "lucien_claim_evidence_claim_id_fkey",
+          "definition": "FOREIGN KEY (claim_id) REFERENCES lucien_claims(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "lucien_claim_evidence_message_id_fkey",
+          "definition": "FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "lucien_claim_evidence_pkey",
+          "definition": "PRIMARY KEY (claim_id, message_id)"
+        }
+      ]
+    },
+    "lucien_claims": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "subject",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "subject_slug",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "statement",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "kind",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'vigente'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "confidence",
+          "type": "text",
+          "nullable": false,
+          "default": "'media'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "valid_from",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "valid_to",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "superseded_by",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "source_message_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 13,
+          "attnum": 13,
+          "name": "source_seq",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 14,
+          "attnum": 14,
+          "name": "created_by",
+          "type": "text",
+          "nullable": false,
+          "default": "'lucien'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 15,
+          "attnum": 15,
+          "name": "run_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 16,
+          "attnum": 16,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 17,
+          "attnum": 17,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 18,
+          "attnum": 18,
+          "name": "search_tsv",
+          "type": "tsvector",
+          "nullable": true,
+          "default": "to_tsvector('portuguese'::regconfig, ((subject || ' '::text) || statement))",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 19,
+          "attnum": 19,
+          "name": "embedding",
+          "type": "vector(1536)",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 20,
+          "attnum": 20,
+          "name": "model",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 21,
+          "attnum": 21,
+          "name": "embedded_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_lucien_claims_origem",
+          "definition": "CREATE INDEX idx_lucien_claims_origem ON public.lucien_claims USING btree (source_message_id)"
+        },
+        {
+          "name": "idx_lucien_claims_sem_vetor",
+          "definition": "CREATE INDEX idx_lucien_claims_sem_vetor ON public.lucien_claims USING btree (id) WHERE (embedding IS NULL)"
+        },
+        {
+          "name": "idx_lucien_claims_seq",
+          "definition": "CREATE INDEX idx_lucien_claims_seq ON public.lucien_claims USING btree (source_seq)"
+        },
+        {
+          "name": "idx_lucien_claims_statement_trgm",
+          "definition": "CREATE INDEX idx_lucien_claims_statement_trgm ON public.lucien_claims USING gin (statement gin_trgm_ops)"
+        },
+        {
+          "name": "idx_lucien_claims_tsv",
+          "definition": "CREATE INDEX idx_lucien_claims_tsv ON public.lucien_claims USING gin (search_tsv)"
+        },
+        {
+          "name": "idx_lucien_claims_vigentes",
+          "definition": "CREATE INDEX idx_lucien_claims_vigentes ON public.lucien_claims USING btree (topic_id, subject_slug) WHERE (status = 'vigente'::text)"
+        },
+        {
+          "name": "lucien_claims_pkey",
+          "definition": "CREATE UNIQUE INDEX lucien_claims_pkey ON public.lucien_claims USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "lucien_claims_confidence_check",
+          "definition": "CHECK ((confidence = ANY (ARRAY['alta'::text, 'media'::text, 'baixa'::text])))"
+        },
+        {
+          "name": "lucien_claims_created_by_check",
+          "definition": "CHECK ((created_by = ANY (ARRAY['lucien'::text, 'operador'::text])))"
+        },
+        {
+          "name": "lucien_claims_kind_check",
+          "definition": "CHECK ((kind = ANY (ARRAY['decision'::text, 'open'::text, 'preference'::text, 'fact'::text])))"
+        },
+        {
+          "name": "lucien_claims_nao_se_substitui",
+          "definition": "CHECK (((superseded_by IS NULL) OR (superseded_by <> id)))"
+        },
+        {
+          "name": "lucien_claims_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "lucien_claims_run_id_fkey",
+          "definition": "FOREIGN KEY (run_id) REFERENCES lucien_runs(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "lucien_claims_source_message_id_fkey",
+          "definition": "FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "lucien_claims_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['vigente'::text, 'superada'::text, 'fechada'::text, 'abandonada'::text])))"
+        },
+        {
+          "name": "lucien_claims_superseded_by_check",
+          "definition": "CHECK (((superseded_by IS NULL) OR (status = 'superada'::text)))"
+        },
+        {
+          "name": "lucien_claims_superseded_by_fkey",
+          "definition": "FOREIGN KEY (superseded_by) REFERENCES lucien_claims(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "lucien_claims_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "lucien_claims_vigencia_check",
+          "definition": "CHECK (((status = 'vigente'::text) = (valid_to IS NULL)))"
+        }
+      ]
+    },
+    "lucien_cursor": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "scope",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "last_seq",
+          "type": "bigint",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "lucien_cursor_pkey",
+          "definition": "CREATE UNIQUE INDEX lucien_cursor_pkey ON public.lucien_cursor USING btree (scope, topic_id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "lucien_cursor_pkey",
+          "definition": "PRIMARY KEY (scope, topic_id)"
+        },
+        {
+          "name": "lucien_cursor_scope_check",
+          "definition": "CHECK ((scope = ANY (ARRAY['incremental'::text, 'reconstruction'::text])))"
+        },
+        {
+          "name": "lucien_cursor_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE"
+        }
+      ]
+    },
+    "lucien_events": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "claim_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "action",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "before",
+          "type": "jsonb",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "detail",
+          "type": "jsonb",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "actor",
+          "type": "text",
+          "nullable": false,
+          "default": "'lucien'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "run_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_lucien_events_claim",
+          "definition": "CREATE INDEX idx_lucien_events_claim ON public.lucien_events USING btree (claim_id, at DESC)"
+        },
+        {
+          "name": "idx_lucien_events_periodo",
+          "definition": "CREATE INDEX idx_lucien_events_periodo ON public.lucien_events USING btree (at DESC)"
+        },
+        {
+          "name": "lucien_events_pkey",
+          "definition": "CREATE UNIQUE INDEX lucien_events_pkey ON public.lucien_events USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "lucien_events_action_check",
+          "definition": "CHECK ((action = ANY (ARRAY['created'::text, 'superseded'::text, 'closed'::text, 'abandoned'::text, 'reverted'::text])))"
+        },
+        {
+          "name": "lucien_events_actor_check",
+          "definition": "CHECK ((actor = ANY (ARRAY['lucien'::text, 'operador'::text])))"
+        },
+        {
+          "name": "lucien_events_claim_id_fkey",
+          "definition": "FOREIGN KEY (claim_id) REFERENCES lucien_claims(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "lucien_events_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "lucien_events_run_id_fkey",
+          "definition": "FOREIGN KEY (run_id) REFERENCES lucien_runs(id) ON DELETE SET NULL"
+        }
+      ]
+    },
+    "lucien_runs": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "mode",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "from_seq",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "to_seq",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "messages_seen",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "claims_created",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "claims_superseded",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "claims_rejected",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "model",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "tokens_in",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "tokens_out",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 13,
+          "attnum": 13,
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 14,
+          "attnum": 14,
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 15,
+          "attnum": 15,
+          "name": "ok",
+          "type": "boolean",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 16,
+          "attnum": 16,
+          "name": "error",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_lucien_runs_recentes",
+          "definition": "CREATE INDEX idx_lucien_runs_recentes ON public.lucien_runs USING btree (started_at DESC)"
+        },
+        {
+          "name": "lucien_runs_pkey",
+          "definition": "CREATE UNIQUE INDEX lucien_runs_pkey ON public.lucien_runs USING btree (id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "lucien_runs_mode_check",
+          "definition": "CHECK ((mode = ANY (ARRAY['incremental'::text, 'reconstruction'::text])))"
+        },
+        {
+          "name": "lucien_runs_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "lucien_runs_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE SET NULL"
         }
       ]
     },

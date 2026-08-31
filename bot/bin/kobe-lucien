@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""kobe-lucien — operar o registro de estado à mão.
+
+OS SEIS COMANDOS, E POR QUE CADA UM EXISTE
+-------------------------------------------
+    init          finca o marco: "daqui pra frente é leitura corrente".
+                  Sem ele, LUCIEN gastaria semanas mastigando o passado a seis
+                  rodadas por hora, e NÃO veria a conversa de hoje.
+    status        o registro está vivo? LUCIEN rodou? quando? Um agendador que
+                  para não produz erro — produz SILÊNCIO, indistinguível de
+                  "não havia nada novo". Este comando dá voz ao silêncio.
+    rodada        uma passada à mão, para provar o caminho sem esperar o relógio.
+    relatorio     o que LUCIEN escreveu no período, com a origem de cada linha.
+                  É mitigação declarada da fase, não conveniência: um modelo que
+                  escreve estado tem que ser auditável por quem lê o estado.
+    reconstruir   a varredura do passado, com teto de lotes e ensaio.
+    reverter      desfaz UM evento, pela imagem anterior guardada.
+
+POR QUE `reverter` E NÃO UM `UPDATE` À MÃO
+-------------------------------------------
+Superação errada é o modo de falha mais caro desta fase: ela **esconde** uma
+decisão que continua valendo, e o operador não tem como saber que ela sumiu. Um
+`UPDATE` à mão desfaria — e não deixaria rastro de que foi desfeito. Este comando
+grava a reversão como evento, e mostra **o estado final** para conferência, que é
+o que o operador pediu: *"Ok, corrigi, segue o resumo de como vou deixar os
+registros — confirma para mim se é isso mesmo"*.
+
+O BANCO NÃO TEM DEFAULT, DE PROPÓSITO
+--------------------------------------
+`DATABASE_URL` ou `--database-url`. Apontar para o banco errado tem que custar um
+ato explícito — o `migrate.py` já segue essa regra, e já houve caso de comando
+rodado da pasta de dev acertar o banco de produção.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+_RAIZ = Path(__file__).resolve().parent.parent.parent
+if str(_RAIZ) not in sys.path:
+    sys.path.insert(0, str(_RAIZ))
+
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem lista de dependências: a
+# pergunta é "já estou no venv do projeto?", não "falta algum módulo?".
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+LARGURA = 88
+
+
+def _url(args) -> str:
+    url = (getattr(args, "database_url", None) or os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        print(
+            "kobe-lucien: sem banco. Passe --database-url ou defina DATABASE_URL.\n"
+            "Não há alvo default de propósito — apontar pro banco errado tem que "
+            "custar um ato explícito.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return url
+
+
+def _home() -> str:
+    return os.environ.get("KOBE_HOME") or str(_RAIZ)
+
+
+def _dia(v) -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    if v is None:
+        return "—"
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v.replace(" ", "T"))
+        except ValueError:
+            return v[:16]
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=ZoneInfo("UTC"))
+    return v.astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
+
+
+def _idade(v) -> str:
+    from datetime import datetime, timezone
+
+    if v is None:
+        return "nunca"
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=timezone.utc)
+    s = (datetime.now(timezone.utc) - v).total_seconds()
+    if s < 3600:
+        return f"{int(s // 60)} min atrás"
+    if s < 86400:
+        return f"{s / 3600:.1f}h atrás"
+    return f"{int(s // 86400)}d atrás"
+
+
+# ── init ──────────────────────────────────────────────────────────────────
+
+
+def cmd_init(args) -> int:
+    from bot.lucien import reconstrucao, store
+
+    cx = store.conectar(_url(args))
+    try:
+        marcos = reconstrucao.fincar_marco(cx)
+        if not args.ensaio:
+            cx.commit()
+        print(
+            f"marco {'que SERIA fincado' if args.ensaio else 'fincado'} em "
+            f"{len(marcos)} tópico(s):"
+        )
+        for m in marcos:
+            print(f"  {m['topico']:<24} até #{m['topo']}  ({m['mensagens']} mensagens)")
+        print()
+        print("Daqui pra frente a leitura corrente acompanha a conversa nova.")
+        print("O que ficou para trás é trabalho da reconstrução:")
+        print("    kobe-lucien reconstruir --ensaio")
+        return 0
+    finally:
+        cx.close()
+
+
+# ── status ────────────────────────────────────────────────────────────────
+
+
+def cmd_status(args) -> int:
+    from bot import lucien as cfg
+    from bot.lucien import consulta, reconstrucao, store
+
+    cx = store.conectar(_url(args))
+    try:
+        cur = cx.cursor()
+        if not cur.execute("SELECT to_regclass('public.lucien_claims') AS t").fetchone()["t"]:
+            print("o registro de estado NÃO existe neste banco (falta a migration 008).")
+            return 3
+
+        print(f"chave LUCIEN_ENABLED: {'ligada' if cfg.habilitado() else 'DESLIGADA'}")
+        cur.execute(
+            "SELECT status, COUNT(*) n FROM lucien_claims GROUP BY status ORDER BY 1"
+        )
+        por_status = {r["status"]: r["n"] for r in cur.fetchall()}
+        total = sum(por_status.values())
+        print(f"afirmações: {total}" + (
+            "  (" + " · ".join(f"{k} {v}" for k, v in por_status.items()) + ")"
+            if por_status else "  (nenhuma ainda)"
+        ))
+
+        cur.execute("SELECT COUNT(*) n FROM lucien_claims WHERE embedding IS NULL")
+        sem_vetor = cur.fetchone()["n"]
+        if sem_vetor:
+            print(f"  ⚠️  {sem_vetor} sem vetor — achaveis por palavra, não por paráfrase")
+
+        # A marca do relógio. É o remédio contra a lacuna L4 do briefing: um
+        # agendador que para não produz erro, produz silêncio.
+        cur.execute(
+            "SELECT mode, MAX(started_at) ultima, MAX(started_at) FILTER (WHERE ok)"
+            "       AS ultimo_exito, COUNT(*) n"
+            "  FROM lucien_runs GROUP BY mode ORDER BY 1"
+        )
+        linhas = cur.fetchall()
+        if not linhas:
+            print("rodadas: NENHUMA ainda.")
+        for l in linhas:
+            print(f"rodadas [{l['mode']}]: {l['n']} · última {_idade(l['ultima'])}"
+                  f" · último ÊXITO {_idade(l['ultimo_exito'])}")
+
+        cur.execute(
+            "SELECT error, started_at FROM lucien_runs WHERE ok = false"
+            " ORDER BY started_at DESC LIMIT 3"
+        )
+        falhas = cur.fetchall()
+        if falhas:
+            print("falhas recentes:")
+            for f in falhas:
+                print(f"  {_dia(f['started_at'])} — {(f['error'] or '')[:100]}")
+
+        plano = reconstrucao.planejar(cx)
+        if plano.mensagens:
+            print(f"reconstrução pendente: {plano.mensagens} mensagens em "
+                  f"{len(plano.topicos)} tópico(s) — ~{plano.lotes} lote(s)")
+        else:
+            cur.execute("SELECT COUNT(*) n FROM lucien_cursor WHERE scope='incremental'")
+            if not cur.fetchone()["n"]:
+                print("reconstrução: o marco ainda NÃO foi fincado — rode `kobe-lucien init`")
+            else:
+                print("reconstrução: nada pendente")
+        return 0
+    finally:
+        cx.close()
+
+
+# ── rodada ────────────────────────────────────────────────────────────────
+
+
+def cmd_rodada(args) -> int:
+    from bot.lucien import worker
+
+    r = worker.uma_rodada(
+        conninfo=_url(args), kobe_home=_home(), topic_id=args.topico,
+        limite_mensagens=args.limite, dry_run=args.ensaio,
+        respeitar_cota=not args.sem_cota,
+    )
+    print(r.resumo())
+    for rec in r.recusas:
+        print(f"  recusa {rec.trava}: {rec.motivo}")
+    return 0 if r.ok else 1
+
+
+# ── relatorio ─────────────────────────────────────────────────────────────
+
+
+def cmd_relatorio(args) -> int:
+    """O que LUCIEN fez no período. Mitigação declarada da fase.
+
+    O ciclo semanal CONVERSACIONAL (ele te escrevendo na sexta, você respondendo
+    solto) é a F5. O que existe aqui é o dado e a visão sobre os quais ela se
+    monta — e que já servem para auditar hoje.
+    """
+    from bot.lucien import store
+
+    cx = store.conectar(_url(args))
+    try:
+        cur = cx.cursor()
+        cur.execute(
+            """
+            SELECT e.action, e.at, e.detail, e.actor,
+                   c.subject, c.statement, c.kind, c.source_seq, c.confidence,
+                   COALESCE(t.current_name,'?') AS topico
+              FROM lucien_events e
+              JOIN lucien_claims c ON c.id = e.claim_id
+              LEFT JOIN topics t ON t.id = c.topic_id
+             WHERE e.at > NOW() - make_interval(days => %s)
+             ORDER BY e.at
+            """,
+            (args.dias,),
+        )
+        eventos = cur.fetchall()
+        print(f"# LUCIEN — o que foi para a memória nos últimos {args.dias} dia(s)")
+        print()
+        if not eventos:
+            print("Nada. Nenhuma afirmação foi criada, superada ou encerrada.")
+            return 0
+
+        criados = [e for e in eventos if e["action"] == "created"]
+        mudados = [e for e in eventos if e["action"] != "created"]
+
+        if criados:
+            print(f"## Gravei {len(criados)} coisa(s)")
+            print()
+            for e in criados:
+                conf = "" if e["confidence"] == "media" else f" · confiança {e['confidence']}"
+                print(f"- [{e['kind']}] **{e['subject']}** — {e['statement']}")
+                print(f"  ← #{e['source_seq']} · {e['topico']} · {_dia(e['at'])}{conf}")
+            print()
+        if mudados:
+            print(f"## Mudei {len(mudados)} que já valia(m)")
+            print()
+            for e in mudados:
+                motivo = (e["detail"] or {}).get("motivo", "")
+                print(f"- **{e['action']}**: {e['statement']}")
+                print(f"  motivo: {motivo or '(não registrado)'} · {_dia(e['at'])}")
+                if args.com_id:
+                    print(f"  para desfazer: kobe-lucien reverter {e.get('id','')}")
+            print()
+
+        cur.execute(
+            "SELECT SUM(claims_rejected) r, COUNT(*) n FROM lucien_runs"
+            " WHERE started_at > NOW() - make_interval(days => %s)",
+            (args.dias,),
+        )
+        l = cur.fetchone()
+        print(f"_({l['n'] or 0} rodada(s); {l['r'] or 0} proposta(s) recusada(s) pelas "
+              "travas — se este número subir, o modelo está inventando origem.)_")
+        return 0
+    finally:
+        cx.close()
+
+
+# ── reconstruir ───────────────────────────────────────────────────────────
+
+
+def cmd_reconstruir(args) -> int:
+    from bot.lucien import reconstrucao, store
+
+    url = _url(args)
+    cx = store.conectar(url)
+    try:
+        plano = reconstrucao.planejar(cx, topic_id=args.topico)
+    finally:
+        cx.close()
+
+    print("O QUE FALTA RECONSTRUIR")
+    print("─" * LARGURA)
+    for t in plano.topicos:
+        print(f"  {t['topico']:<24} {t['mensagens']:>5} mensagens · "
+              f"#{t['de_seq']}→#{t['ate_seq']} · ~{t['lotes']} lote(s)")
+    print("─" * LARGURA)
+    print(f"  total: {plano.mensagens} mensagens · {plano.caracteres} caracteres · "
+          f"~{plano.lotes} lote(s) · ~{plano.tokens_aproximados:,} tokens".replace(",", "."))
+    print()
+    if not plano.mensagens:
+        print("Nada a reconstruir. (Fincou o marco? `kobe-lucien init`)")
+        return 0
+    if args.ensaio:
+        print("ENSAIO — nenhuma chamada de modelo foi feita.")
+        return 0
+
+    print(f"rodando no máximo {args.max_lotes} lote(s)…")
+    print()
+
+    def _aviso(i, r):
+        print(f"  [{i}] {r.resumo()}")
+        for rec in r.recusas:
+            print(f"      recusa {rec.trava}: {rec.motivo}")
+
+    rs = reconstrucao.rodar(
+        conninfo=url, kobe_home=_home(), topic_id=args.topico,
+        max_lotes=args.max_lotes, ao_terminar_lote=_aviso,
+    )
+    print()
+    print(f"{len(rs)} lote(s) processado(s) · "
+          f"{sum(r.criadas for r in rs)} afirmação(ões) criada(s) · "
+          f"{sum(r.superadas for r in rs)} superada(s) · "
+          f"{sum(r.rejeitadas for r in rs)} recusada(s)")
+    return 0
+
+
+# ── reverter ──────────────────────────────────────────────────────────────
+
+
+def cmd_reverter(args) -> int:
+    from bot.lucien import store
+
+    cx = store.conectar(_url(args))
+    try:
+        antes = store.reverter(cx, args.evento)
+        if args.ensaio:
+            cx.rollback()
+            print("ENSAIO — nada foi gravado. A afirmação VOLTARIA a:")
+        else:
+            cx.commit()
+            print("Revertido. A afirmação ficou assim:")
+        print()
+        print(f"  [{antes['kind']}] {antes['statement']}")
+        print(f"  status: {antes['status']} · desde {_dia(antes['valid_from'])}"
+              f" · ← #{antes['source_seq']}")
+        print()
+        print("⚠️  A afirmação que a SUPERAVA continua existindo e vigente. Se ela")
+        print("   também estiver errada, encerre-a — reverter desfaz a superação,")
+        print("   não apaga o que foi criado.")
+        return 0
+    except (LookupError, ValueError) as exc:
+        cx.rollback()
+        print(f"kobe-lucien: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        cx.close()
+
+
+# ── main ──────────────────────────────────────────────────────────────────
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="kobe-lucien",
+        description="Operar o registro de estado (Highlander v3, F3).",
+    )
+    ap.add_argument("--database-url", default=None,
+                    help="o banco (ou DATABASE_URL no ambiente). Sem default.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", help="finca o marco 'daqui pra frente'")
+    p.add_argument("--ensaio", action="store_true", help="mostra e não grava")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("status", help="o registro está vivo? LUCIEN rodou?")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("rodada", help="uma passada à mão")
+    p.add_argument("--topico", default=None, help="UUID do tópico")
+    p.add_argument("--limite", type=int, default=None, help="teto de mensagens")
+    p.add_argument("--ensaio", action="store_true", help="monta o lote e NÃO chama o modelo")
+    p.add_argument("--sem-cota", action="store_true", help="ignora o teto por hora")
+    p.set_defaults(func=cmd_rodada)
+
+    p = sub.add_parser("relatorio", help="o que LUCIEN escreveu no período")
+    p.add_argument("--dias", type=int, default=7)
+    p.add_argument("--com-id", action="store_true", help="mostra como desfazer cada mudança")
+    p.set_defaults(func=cmd_relatorio)
+
+    p = sub.add_parser("reconstruir", help="a varredura do passado")
+    p.add_argument("--topico", default=None, help="UUID do tópico (default: todos)")
+    p.add_argument("--max-lotes", type=int, default=5,
+                   help="teto DURO de lotes (default 5). Não existe 'até acabar'.")
+    p.add_argument("--ensaio", action="store_true", help="só a conta, sem chamar modelo")
+    p.set_defaults(func=cmd_reconstruir)
+
+    p = sub.add_parser("reverter", help="desfaz UM evento pela imagem anterior")
+    p.add_argument("evento", help="o id do evento (kobe-lucien relatorio --com-id)")
+    p.add_argument("--ensaio", action="store_true", help="mostra e não grava")
+    p.set_defaults(func=cmd_reverter)
+
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -147,11 +147,39 @@ def embed(textos: Sequence[str], *, cliente=None) -> list[list[float]]:
     return _conferir(saida)
 
 
+# Memória de processo para o vetor da PERGUNTA. Pequena de propósito: o que ela
+# existe para evitar é a mesma pergunta ser embeddada duas vezes no mesmo
+# comando, não guardar acervo.
+#
+# Por que ela apareceu: a F3 acrescentou uma segunda busca por sentido — a do
+# ESTADO — sobre a MESMA pergunta que a busca de evidência já tinha embeddado.
+# Medido no `kobe-remember`: a ida e volta extra à API custava ~0,3 s por
+# comando, e o resultado era bit a bit idêntico. É a mesma função pura chamada
+# duas vezes.
+#
+# A chave inclui o MODELO porque ele sai do ambiente e pode mudar entre
+# processos; dentro de um processo, dois vetores de modelos diferentes no mesmo
+# índice seriam o defeito silencioso que a 007 documenta.
+_CACHE_PERGUNTA: dict[tuple, list[float]] = {}
+_CACHE_MAX = 32
+
+
 def embed_um(texto: str, *, cliente=None) -> list[float]:
-    """O vetor de uma pergunta. Levanta se não der pra saber."""
+    """O vetor de uma pergunta. Levanta se não der pra saber.
+
+    Memoizado por processo — ver `_CACHE_PERGUNTA`. Continua levantando
+    `EmbeddingIndisponivel` normalmente: **falha não é cacheada**, senão um
+    tropeço de rede no primeiro uso condenaria o comando inteiro.
+    """
+    chave = (texto, modelo())
+    if chave in _CACHE_PERGUNTA:
+        return _CACHE_PERGUNTA[chave]
     v = embed([texto], cliente=cliente)
     if not v:
         raise EmbeddingIndisponivel("texto vazio não tem vetor")
+    if len(_CACHE_PERGUNTA) >= _CACHE_MAX:
+        _CACHE_PERGUNTA.clear()
+    _CACHE_PERGUNTA[chave] = v[0]
     return v[0]
 
 

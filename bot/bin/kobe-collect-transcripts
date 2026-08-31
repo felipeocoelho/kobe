@@ -41,7 +41,6 @@ limite (`TRANSCRIPT_STALE_HOURS`, padrão 48). É o que dá ao silêncio uma voz
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -52,45 +51,21 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-def _find_venv_python():
-    """O venv, procurado em `$KOBE_HOME` antes da raiz derivada do arquivo.
-
-    Este helper roda também de dentro de uma worktree do Coder, onde `.venv/`
-    não existe (é gitignorado). Sem procurar em `$KOBE_HOME` ele não
-    re-executaria ali e morreria com `ModuleNotFoundError`.
-    """
-    candidatos = []
-    kobe_home = (os.environ.get("KOBE_HOME") or "").strip()
-    if kobe_home:
-        candidatos.append(Path(kobe_home).expanduser() / ".venv" / "bin" / "python")
-    candidatos.append(_REPO_ROOT / ".venv" / "bin" / "python")
-    for c in candidatos:
-        if c.exists():
-            return c
-    return None
-
-
-# A coleta em si é stdlib pura — de propósito, porque ela é a parte que não pode
-# falhar. O re-exec existe pro enriquecimento (catálogo e dossiê), que fala com
-# o Postgres.
+# O interpretador certo — ver `bot/bin/_venv.py`.
 #
-# **Confere TODAS as dependências, não uma.** O python do SISTEMA desta VPS tem
-# `psycopg` e NÃO tem `psycopg_pool` — que `bot/db.py` importa no topo. Olhando
-# só `psycopg`, o re-exec decidia que estava tudo bem, não acontecia, e o
-# catálogo falhava lá dentro: o dossiê saía com `sistema: (não catalogada)`
-# mesmo com a linha existindo no banco. Exatamente o mesmo defeito que o
-# `kobe-reflect` já tinha tido em 27/08/2026, e pela mesma causa. Uma
-# dependência a menos nesta lista = o mesmo bug de volta.
-_VENV_PY = _find_venv_python()
-if (
-    _VENV_PY is not None
-    and sys.executable != str(_VENV_PY)
-    and any(
-        importlib.util.find_spec(dep) is None
-        for dep in ("psycopg", "psycopg_pool", "dotenv")
-    )
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+# Aqui morava um guarda com uma LISTA de dependências. A lista funcionava, mas
+# era frágil por desenho: bastava este helper passar a usar uma biblioteca nova
+# para o bug voltar. `_venv.ensure()` não pergunta o que falta — pergunta se já
+# estamos no venv do projeto, e vai pra lá se não estivermos.
+#
+# O caso da WORKTREE do Coder continua coberto, e é por isso que ele importa:
+# lá `.venv/` não existe (é gitignorado), e `_venv` cai em `$KOBE_HOME`.
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
 
 from bot.transcripts import collector  # noqa: E402
 from bot.transcripts import state as st  # noqa: E402

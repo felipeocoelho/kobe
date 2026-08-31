@@ -1,0 +1,84 @@
+# F3 — a superação: uma decisão, a reversão dela, e a cobrança do estado
+#
+# Esta é A RÉGUA DA FASE, e ela reproduz a dor original em laboratório. O
+# roteiro está no §9.4 do briefing v2 e é reproduzido aqui com o conteúdo e as
+# esperas que ele especifica.
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f3-superacao.txt --thread-id 2
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ ADAPTAÇÃO DE SINTAXE, DECLARADA. O briefing escreve as esperas em linha
+# própria (`@60`); o parser deste repositório lê `@N <texto>` — a espera é
+# prefixo da mensagem, não uma linha solta. O conteúdo e os tempos são os do
+# briefing; o que mudou é a forma, porque roteiro que não parseia não roda (foi
+# o defeito nº 9 que a bateria da F2 achou, e ele pegou o roteiro da F1
+# inclusive).
+#
+# PRÉ-CONDIÇÕES, e sem elas o resultado não vale nada:
+#
+#   1. `LUCIEN_ENABLED=true` no `.env` de dev.
+#   2. `LUCIEN_MAX_AGE_S` BAIXO (uns 45 s). É ele que faz um lote de 2 ou 3
+#      mensagens ficar devido sozinho — o gatilho por acúmulo pede 12, que esta
+#      bateria nunca vai atingir. **Sem isso os `@60` e `@120` não significam
+#      nada e a bateria dá falso vermelho.**
+#   3. `keyko-dev.service` no ar (é ele que dispara LUCIEN por relógio).
+#   4. `kobe-lucien init` já rodado, senão a leitura corrente vai tentar
+#      mastigar o acervo inteiro em vez de olhar a conversa nova.
+#
+# Conferir tudo de uma vez, antes de rodar:
+#     kobe-lucien --database-url postgresql:///kobe_dev status
+#
+# CUSTO: 4 turnos + ~3 min de relógio de espera. As esperas são o custo, e elas
+# existem porque LUCIEN roda em segundo plano, por acúmulo. **Bateria que
+# pergunta antes de o arquivista ter lido dá falso vermelho** — o briefing diz
+# isso com todas as letras, e o roteiro tem que declarar a espera.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 0. SESSÃO NOVA ────────────────────────────────────────────────────────
+# Ajuda e NÃO isola — achado da F2, e continua valendo aqui: a janela imediata
+# é filtrada por `topic_id`, não por sessão (`bot/memory/working_set.py`). O
+# que isola de verdade é um tópico próprio por execução.
+#
+# Nesta bateria isso importa MAIS que na F2, e por um motivo novo: o agente vai
+# ter acabado de ler, nesta mesma janela, a decisão E a reversão. Ele consegue
+# responder o cenário 3 **de memória**, sem consultar nada — e aí o verde não
+# prova a fase, prova a janela imediata. Ver o critério no cenário 3.
+/nova
+
+# ── 1. ESTABELECE UMA DECISÃO ─────────────────────────────────────────────
+# ESPERADO: uma resposta normal de conversa. Nada de especial acontece aqui —
+# o trabalho é do LUCIEN, atrás, e leva até ~1 minuto.
+decidido: o normalizador de transcrição vai rodar antes de gravar a mensagem
+
+# ── 2. REVERTE A DECISÃO ──────────────────────────────────────────────────
+# A espera de 60 s existe para o LUCIEN ler o cenário 1 ANTES de a reversão
+# chegar. Se as duas caírem no mesmo lote, ele vê a decisão e a reversão juntas
+# e pode registrar só a segunda — o que passaria no cenário 3 e falharia no 4,
+# porque não haveria superação nenhuma para mostrar.
+@60 mudei de ideia sobre o normalizador: ele vai rodar depois de gravar, pra preservar o texto original
+
+# ── 3. COBRA O ESTADO — o cenário que hoje devolve as duas como "em aberto" ─
+# ESPERADO: **UMA** decisão vigente, a segunda (rodar DEPOIS de gravar), com
+# data e origem `#número`.
+#
+# VERMELHO: a primeira aparecer como vigente, **ou as duas lado a lado sem
+# hierarquia**. É exatamente o comportamento de hoje, e é o que a fase existe
+# pra matar.
+#
+# ⚠️ COMO NÃO SE ENGANAR COM UM VERDE FALSO: o agente pode acertar isto de
+# memória, porque as duas mensagens estão na janela imediata dele. O verde só
+# conta se a resposta **mostrar que a ferramenta rodou** — citando o `#número`
+# que o ESTADO traz. Resposta certa sem citação é vermelho, pela mesma regra
+# que já vale na F2.
+@120 qual é a decisão vigente sobre quando o normalizador roda?
+
+# ── 4. COBRA O HISTÓRICO — o que foi superado e por quê ───────────────────
+# ESPERADO: a primeira decisão apresentada como **SUPERADA**, com ponteiro para
+# a que a substituiu (data e `#número` da substituta).
+#
+# VERMELHO: ela não aparecer; ou aparecer sem dizer que foi superada; ou o
+# agente dizer que não houve mudança de ideia.
+#
+# Este cenário é o que distingue "o sistema guardou a última" de "o sistema
+# guardou a MUDANÇA". Só o segundo cura a dor.
+@10 teve alguma decisão sobre o normalizador que a gente voltou atrás?

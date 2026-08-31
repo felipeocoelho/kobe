@@ -1,0 +1,90 @@
+# F3 — a régua: o teste histórico, contra o passado real
+#
+#   KOBE_ENV=dev python infra/dev_inject.py --roteiro tests/roteiros/f3-regua.txt --thread-id 2
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ESTE É O CRITÉRIO DE PRONTO DA MISSÃO INTEIRA, não só da fase. A pergunta é a
+# mesma que o diagnóstico usou em 27/08/2026 contra o Hindsight de produção, e
+# que devolveu **como "em aberto" três coisas que o operador fechou em julho**.
+#
+# CRITÉRIO: decisões **com data e origem**, o que foi **substituído e por quê**,
+# e o que está **de fato aberto**. **ZERO falsos "em aberto".**
+#
+# A CONFERÊNCIA É MANUAL, ITEM A ITEM, e isso não é preguiça: julgar "isto está
+# fechado ou não" não se automatiza, e fingir que sim seria o mesmo tipo de
+# falsa precisão que a fase combate. O relatório da sessão traz a tabela com o
+# `#número` que sustenta cada julgamento.
+#
+# PRÉ-CONDIÇÃO: a reconstrução do passado tem que ter alcançado julho no tópico
+# Dev Kobe. Conferir antes:
+#     kobe-lucien --database-url postgresql:///kobe_dev status
+#     kobe-lucien --database-url postgresql:///kobe_dev reconstruir --ensaio
+# Se ainda faltar passado, o resultado mede uma reconstrução incompleta — o que
+# é um resultado legítimo, mas tem que ser DITO no relatório em vez de virar um
+# vermelho da fase.
+#
+# CUSTO: 1 turno. A conta cara é a reconstrução, que roda antes e à parte.
+# ─────────────────────────────────────────────────────────────────────────────
+
+/nova
+
+# ── A PERGUNTA QUE ORIGINOU A MISSÃO ──────────────────────────────────────
+# ESPERADO, nas três partes:
+#   (a) o que foi DECIDIDO, com data e `#número`;
+#   (b) o que foi SUBSTITUÍDO, com o ponteiro para o que ficou no lugar;
+#   (c) o que está ABERTO — e só o que está mesmo.
+#
+# VERMELHO: qualquer coisa fechada em julho aparecendo como "em aberto". São
+# três, hoje, medidas contra o Hindsight de produção — e é esse número que a
+# fase se propôs a levar a zero.
+#
+# TAMBÉM VERMELHO, e mais fácil de deixar passar: responder certo **sem
+# citação**. Sem `#número` e data não dá para distinguir o que foi lido do que
+# foi lembrado, e essa indistinção é o problema inteiro.
+o que a gente decidiu sobre a arquitetura de borda, e o que ficou em aberto?
+
+# ═════════════════════════════════════════════════════════════════════════
+# O ITEM DE CONFERÊNCIA NOMEADO: O RSYNC
+# ═════════════════════════════════════════════════════════════════════════
+# Este é o melhor caso de teste do acervo inteiro, e ele saiu do próprio piloto
+# desta fase — não foi inventado para o teste.
+#
+# O QUE ACONTECEU DE VERDADE:
+#
+#   16/05/2026 (#440)  "sincronização dev VPS → prod VPS via rsync" era a
+#                      REGRA VIGENTE, e o piloto a gravou corretamente como tal;
+#   12–13/06/2026      o incidente do "Frankenstein": um `rsync --delete` cego
+#                      apagou arquivo sem caminho de volta e congelou o git da
+#                      produção numa tag velha, com o disco repintado por cima;
+#   13/06/2026         vira REGRA DURA invertida — *"deploy é git; rsync não é
+#                      método de deploy de nada"* —, registrada no `CLAUDE.md`
+#                      do Kobe e no §1.12 do `CLAUDE.md` global. O operador
+#                      removeu da máquina os scripts que faziam aquilo.
+#
+# Palavra do operador, 30/08/2026: *"teve um momento em que isso era regra
+# vigente, e a partir de um determinado episódio deixou de ser, passou a ser
+# terminantemente proibido, a ponto de eu ter removido os scripts que faziam
+# isso da máquina. Esse é um exemplo fantástico."*
+#
+# É a régua perfeita porque exercita a fase inteira de uma vez: uma decisão
+# real, datada, que VALEU e depois foi REVERTIDA por um motivo registrado.
+#
+# ── O CRITÉRIO ───────────────────────────────────────────────────────────
+# Depois que a varredura do passado atravessar JUNHO, a linha do rsync tem que
+# estar `superada`, apontando para a decisão de junho, com o motivo.
+#
+# **Se ela sobreviver vigente, a fase falhou a própria régua** — e falhou no
+# exemplo mais gritante do acervo, num assunto em que servir a linha velha como
+# verdade mandaria o agente fazer exatamente o que causou o incidente.
+#
+# Conferir pelos dois lados:
+#     kobe-remember "deploy do dev VPS para o prod VPS" --estado
+#     kobe-lucien --database-url postgresql:///kobe_dev relatorio --dias 1
+#
+# E pela conversa, que é o que esta bateria mede:
+@15 a gente pode sincronizar o dev VPS com o prod VPS usando rsync?
+
+# ESPERADO: um "não" firme, ancorado no ESTADO — com a decisão de junho citada
+# por `#número`, e (idealmente) dizendo que já foi permitido e deixou de ser.
+# VERMELHO: um "sim, pode" ancorado na decisão de maio. É o cenário que prova
+# que o registro sem vigência é PERIGOSO, e não apenas incompleto.

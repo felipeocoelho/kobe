@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """kobe-remember — as FALAS LITERAIS do passado, citadas com data e número.
 
+AS TRÊS CAMADAS (v2, Highlander v3 F3)
+--------------------------------------
+A saída vem em três blocos visualmente separados, e a separação é a informação:
+
+    ESTADO      o que VALE hoje — curado por LUCIEN, com origem e vigência
+    EVIDÊNCIA   o que foi DITO — as falas literais, citadas (é a v1, intacta)
+    PISTAS      o destilado do Hindsight — só quando o estado está magro
+
+São graus de confiança diferentes. A evidência é verdade bruta: aquilo foi dito,
+ponto. O estado é **julgamento** — um modelo leu a evidência e concluiu. Servir
+os dois no mesmo bloco faria o julgamento passar por transcrição, e é exatamente
+essa indistinção que a fase inteira existe para matar.
+
+**O veredito continua sendo da EVIDÊNCIA.** ESTADO não vota nele — nem para
+transformar um "não achei" em "achei", nem o contrário. A única concessão é de
+TEXTO: quando há estado e a evidência não achou a fala, o carimbo diz isso, em
+vez de afirmar que não há nada sobre o assunto (o que seria falso).
+
 O QUE ELE É, E O QUE ELE NÃO É
 -------------------------------
 É o caminho para responder *"o que a gente decidiu sobre X?"* com o que foi
@@ -51,7 +69,6 @@ USO
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -60,17 +77,16 @@ _RAIZ = Path(__file__).resolve().parent.parent.parent
 if str(_RAIZ) not in sys.path:
     sys.path.insert(0, str(_RAIZ))
 
-# Re-exec no python do venv se as deps não estiverem no interpretador atual. O
-# shebang resolve pro python do SISTEMA, que não tem `psycopg` nem `openai`.
-# Conferir TODAS as dependências, não uma delas (conserto de 2026-08-27, F0.2:
-# checar só a primeira deixava a segunda faltando estourar bem mais tarde).
-_VENV_PY = _RAIZ / ".venv" / "bin" / "python"
-if (
-    _VENV_PY.exists()
-    and sys.executable != str(_VENV_PY)
-    and any(importlib.util.find_spec(m) is None for m in ("psycopg", "openai", "dotenv"))
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem lista de dependências: a
+# pergunta é "já estou no venv do projeto?", não "falta algum módulo?". Este
+# helper já teve o bug da lista incompleta em 27/08/2026 (a lista dizia
+# `psycopg`, faltava `httpx`/`openai`).
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
 
 
 LARGURA = 88
@@ -126,6 +142,81 @@ def _topico_atual(db):
         (chat_id, thread_id),
     )
     return linha["id"] if linha else None
+
+
+_ROTULO = {
+    "decision": "DECIDIDO",
+    "open": "ABERTO",
+    "preference": "PREFERÊNCIA",
+    "fact": "FATO",
+}
+_ROTULO_ENCERRADA = {
+    "superada": "SUPERADA",
+    "fechada": "FECHADA",
+    "abandonada": "ABANDONADO",
+}
+
+
+# A confiança e o canal, separados — e a separação foi o conserto de 30/08/2026.
+#
+# Antes, `confidence` media o CANAL (`baixa` para tudo que vinha de áudio) e a
+# exibição era binária: áudio ganhava carimbo de suspeita, texto não ganhava
+# nada. Como o operador usa voz como canal principal, "baixa" saía em 27 de 40
+# linhas do piloto — e um sinal em dois terços das linhas não distingue nada.
+#
+# Agora `confidence` mede CORROBORAÇÃO e os três níveis aparecem, inclusive o
+# `alta` (que antes era código morto). O canal vira metadado neutro, ao lado,
+# porque continua sendo informação útil — só não é mais um julgamento.
+_SELO_CONF = {
+    "alta": "corroborada",
+    "media": "origem única",
+    "baixa": "⚠ trecho de origem ambíguo",
+}
+
+
+def _selo(a) -> str:
+    partes = [_SELO_CONF.get(a.confidence, a.confidence)]
+    if getattr(a, "origem_audio", False):
+        partes.append("origem em áudio")
+    return " · " + " · ".join(partes)
+
+
+def _dia(iso: str) -> str:
+    """Só a data. A hora não ajuda a decidir se algo ainda vale, e a linha do
+    ESTADO precisa caber de olhada."""
+    return _data(iso).split(" ")[0]
+
+
+def _imprimir_estado(e) -> None:
+    """O bloco ESTADO. Cada linha carrega a ORIGEM — é o que a torna conferível,
+    e é a mitigação número um do risco desta fase."""
+    print("═" * LARGURA)
+    print("ESTADO — o que vale hoje (curado por LUCIEN)")
+    print("═" * LARGURA)
+    print()
+    for a in e.vigentes:
+        rotulo = _ROTULO.get(a.kind, a.kind.upper())
+        print(f"  {rotulo:<12} {_dia(a.valid_from)}  {a.statement}")
+        print(f"  {'':<12} ← #{a.source_seq} · {a.topico}{_selo(a)}")
+        print()
+    if e.superadas:
+        print("  ── o que NÃO vale mais ──")
+        print()
+        for a in e.superadas:
+            rotulo = _ROTULO_ENCERRADA.get(a.status, a.status.upper())
+            print(f"  {rotulo:<12} {_dia(a.valid_from)}  {a.statement}")
+            if a.substituta:
+                print(f"  {'':<12} → substituída em {_dia(a.substituta_data or '')} "
+                      f"por: {_cortar(a.substituta, 150)}")
+                print(f"  {'':<12}   (#{a.substituta_seq})")
+            else:
+                fim = _dia(a.valid_to or "")
+                print(f"  {'':<12} → encerrada em {fim} · ← #{a.source_seq}")
+            print()
+    print("  ⚠️  ESTADO é curado por um MODELO, não é fala literal. Cada linha traz")
+    print("     a origem: confira com `kobe-remember --ver <número>` antes de")
+    print("     afirmar ao operador que algo foi decidido.")
+    print()
 
 
 def _imprimir_achados(r) -> None:
@@ -228,6 +319,12 @@ def main(argv=None) -> int:
     ap.add_argument("--ver", type=int, default=None, help="abre a vizinhança de uma mensagem")
     ap.add_argument("--janela", type=int, default=2, help="quantas mensagens em volta do --ver")
     ap.add_argument("--json", action="store_true", help="saída em JSON")
+    ap.add_argument("--estado", action="store_true",
+                    help="SÓ a camada de estado (o que vale hoje)")
+    ap.add_argument("--sem-estado", action="store_true",
+                    help="pula a camada de estado (a saída da v1, exata)")
+    ap.add_argument("--sem-pistas", action="store_true",
+                    help="não consulta o Hindsight nem quando o estado está magro")
     args = ap.parse_args(argv)
 
     assunto = " ".join(args.assunto).strip()
@@ -271,12 +368,65 @@ def main(argv=None) -> int:
         limite=max(1, args.limite),
     )
 
+    # ── A camada de ESTADO ────────────────────────────────────────────────
+    # Depois da evidência de propósito: os `seq` que ela achou viram a perna
+    # mais precisa da busca de estado (uma afirmação nascida de uma mensagem que
+    # a evidência trouxe responde à pergunta por construção).
+    #
+    # Falhar aqui NÃO derruba o comando. Um `kobe-remember` quebrado é pior que
+    # um sem ESTADO — e a produção, até a migration 008 entrar, cai exatamente
+    # neste caminho.
+    estado = None
+    if not args.sem_estado:
+        try:
+            from bot.lucien import consulta
+
+            # Os `seq` da evidência só entram quando ela AFIRMA relevância.
+            # Com `MENÇÃO LITERAL` ela diz o contrário — "a palavra aparece e eu
+            # não consigo confirmar que responde" —, e deixar esses trechos
+            # elegerem estado transformaria uma incerteza declarada numa
+            # afirmação. Achado testando: "campeonato de xadrez" (assunto que
+            # nunca existiu) dava MENÇÃO LITERAL e trazia, pelo caminho da
+            # origem, uma preferência sobre anexo no Telegram.
+            seqs = [a.seq for a in r.achados] if r.veredito == "ACHOU" else []
+            estado = consulta.buscar_estado(
+                db, assunto, topic_id=topic_id,
+                seqs_da_evidencia=seqs,
+                limite=max(1, args.limite),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️  a camada de ESTADO falhou ({type(exc).__name__}: {exc}) — "
+                  "seguindo só com a EVIDÊNCIA.")
+            estado = None
+
+    if args.estado:
+        if estado is None or not estado.disponivel:
+            motivo = estado.erro if estado else "camada indisponível"
+            print(f"ESTADO indisponível — {motivo}")
+            return 0
+        if estado.vazio:
+            print("ESTADO — nada registrado sobre isso ainda.")
+            print()
+            print("Não é o mesmo que 'não há registro': LUCIEN pode ainda não ter")
+            print("lido esta parte da conversa. Rode sem `--estado` para ver a")
+            print("EVIDÊNCIA, que é a fala literal e não depende dele.")
+            return 0
+        _imprimir_estado(estado)
+        return 0
+
     if args.json:
         import json
         from dataclasses import asdict
 
-        print(json.dumps(asdict(r), ensure_ascii=False, indent=2, default=str))
+        saida = {"evidencia": asdict(r)}
+        if estado is not None:
+            saida["estado"] = asdict(estado)
+        print(json.dumps(saida, ensure_ascii=False, indent=2, default=str))
         return 3 if r.veredito == "FALHA" else 0
+
+    tem_estado = bool(estado and estado.disponivel and not estado.vazio)
+    if tem_estado:
+        _imprimir_estado(estado)
 
     if r.veredito == "FALHA":
         print(f"kobe-remember: {r.erro}", file=sys.stderr)
@@ -287,6 +437,28 @@ def main(argv=None) -> int:
             "e por quê.)"
         )
         return 3
+
+    if r.veredito == "SEM_REGISTRO" and tem_estado:
+        # O texto padrão diria *"não há NADA sobre isso"* — e com estado
+        # registrado isso é FALSO. A camada de evidência não achou a FALA; o
+        # assunto existe. Dizer a primeira coisa no lugar da segunda seria a
+        # mesma mentira que este comando existe para não contar.
+        print("═" * LARGURA)
+        print("EVIDÊNCIA — a fala literal")
+        print("═" * LARGURA)
+        print()
+        print(
+            "SEM REGISTRO na fala literal — MAS HÁ ESTADO REGISTRADO (acima).\n"
+            "\n"
+            "O que isto significa: LUCIEN registrou afirmações sobre este assunto,\n"
+            "mas a busca não localizou a conversa de origem com ESTAS palavras.\n"
+            "  · responda pelo ESTADO, citando o `#número` que cada linha traz;\n"
+            "  · diga que não localizou a fala com essas palavras;\n"
+            "  · NÃO diga que não há registro — há, e está logo acima.\n"
+            "Para ver a conversa de origem: `kobe-remember --ver <número>`."
+        )
+        _rodape(r)
+        return 0
 
     if r.veredito == "SEM_REGISTRO":
         parcial = "" if r.sentido_ativo else " PARCIAL"
@@ -356,6 +528,11 @@ def main(argv=None) -> int:
         _rodape(r)
         return 0
 
+    if tem_estado:
+        print("═" * LARGURA)
+        print("EVIDÊNCIA — as falas literais")
+        print("═" * LARGURA)
+        print()
     print(f"{len(r.achados)} trecho(s) do histórico:")
     print()
     _imprimir_achados(r)

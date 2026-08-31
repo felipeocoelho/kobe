@@ -96,12 +96,24 @@ def test_o_helper_existe_e_e_executavel():
     assert os.access(_HELPER, os.X_OK), "o helper precisa do bit de execução"
 
 
-def test_o_reexec_confere_TODAS_as_dependencias():
-    """Conserto de 2026-08-27 (F0.2): checar só a primeira dependência deixava a
-    segunda faltando estourar bem mais tarde, com erro que não diz a causa."""
+def test_o_reexec_nao_depende_de_lista_de_dependencias():
+    """A versão anterior deste teste cobrava que a LISTA de dependências do
+    re-exec citasse `psycopg`, `openai` e `dotenv` — o conserto de 27/08/2026
+    (F0.2), quando conferir só a primeira deixava a segunda estourar tarde.
+
+    **A lista inteira foi aposentada em 30/08/2026 (F3)**, porque ela falhou uma
+    terceira vez, em outro helper: o `kobe-recall-since` conferia `psycopg` e
+    morria em `psycopg_pool`, cegando a janela de frescor de toda run em
+    background. Uma lista que precisa ser mantida à mão vai ficar velha; a
+    pergunta certa é *"já estou no venv do projeto?"*, e ela não tem lista.
+
+    O que se cobra aqui agora é o oposto do que se cobrava antes: que **não**
+    haja lista. A cobrança de que todo helper use `_venv.ensure()` mora em
+    `tests/test_helpers_venv.py`, que vale para todos e não só para este.
+    """
     texto = _HELPER.read_text(encoding="utf-8")
-    for dep in ("psycopg", "openai", "dotenv"):
-        assert dep in texto, f"{dep} fora da conferência de re-exec"
+    assert "from _venv import ensure" in texto and "_ensure_venv(__file__)" in texto
+    assert "find_spec" not in texto, "a lista de dependências voltou"
 
 
 # ── Os quatro desfechos ───────────────────────────────────────────────────

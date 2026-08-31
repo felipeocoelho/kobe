@@ -39,19 +39,14 @@ _BOT_PARENT = Path(__file__).resolve().parent.parent.parent
 if str(_BOT_PARENT) not in sys.path:
     sys.path.insert(0, str(_BOT_PARENT))
 
-# Re-exec no Python do venv do projeto se as deps não estiverem no interpretador
-# atual. O shebang `#!/usr/bin/env python3` resolve pro Python do SISTEMA, que
-# não tem as deps do bot (psycopg etc.) — só o venv (.venv) tem. Idempotente:
-# não re-exec se já somos o venv nem se a dep já está disponível.
-import importlib.util  # noqa: E402
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem lista de dependências: a
+# pergunta é "já estou no venv do projeto?", não "falta algum módulo?".
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
 
-_VENV_PY = _BOT_PARENT / ".venv" / "bin" / "python"
-if (
-    _VENV_PY.exists()
-    and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("psycopg") is None
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+_ensure_venv(__file__)
 
 
 GENERAL_THREAD_ID = 0

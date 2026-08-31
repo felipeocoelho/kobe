@@ -353,6 +353,68 @@ Se a saída avisar que há trechos **sem vetor**, mensagens muito recentes podem
 
 Na dúvida sobre uma decisão, **rode os dois**: um mostra o que ficou registrado como fato, o outro mostra o que foi realmente dito. Quando discordarem, a fala literal manda — e o desacordo em si merece ser dito ao operador.
 
+## As três camadas do `kobe-remember` — ESTADO › EVIDÊNCIA › PISTAS
+
+Desde 30/08/2026 (F3 do Highlander v3) o `kobe-remember` responde em **três
+blocos visualmente separados**, e a separação **é** a informação:
+
+| bloco | o que é | quanto vale |
+|---|---|---|
+| **ESTADO** | o que **vale hoje** — curado por LUCIEN, com vigência e origem | julgamento de um modelo, **conferível** pela origem |
+| **EVIDÊNCIA** | o que foi **dito** — as falas literais, citadas por `#número` | verdade bruta: aquilo foi dito, ponto |
+| **PISTAS** | o destilado do Hindsight | só aparece quando o estado está magro |
+
+**Por que separados, e não num bloco só:** a evidência é fato; o estado é
+conclusão. Servir os dois juntos faria o julgamento passar por transcrição — e é
+exatamente essa indistinção que a F3 existe para matar.
+
+### Como responder com cada um
+
+- **ESTADO responde "o que vale hoje".** É o bloco certo para *"qual é a decisão
+  vigente sobre X?"*, *"isso ficou decidido ou está em aberto?"*, *"a gente voltou
+  atrás em alguma coisa?"*. Cada linha traz a **origem** (`← #número`) — **cite-a
+  sempre**, e diga que a linha é curada, não literal.
+- **EVIDÊNCIA responde "quais foram as palavras dele".** Continua sendo a prova.
+  Quando o operador duvidar do ESTADO, o caminho é `kobe-remember --ver <número>`.
+- **Uma linha de ESTADO nunca vira citação literal.** Ela é o resumo que um
+  modelo escreveu. Se você for reproduzir a fala, abra a origem.
+
+### O veredito continua sendo da EVIDÊNCIA
+
+`ACHOU` / `MENÇÃO LITERAL` / `SEM REGISTRO` / `FALHA DO INSTRUMENTO` são da
+camada de evidência, e as regras da seção anterior valem **inteiras e sem
+mudança**. ESTADO não transforma um "não achei" em "achei", nem o contrário.
+
+**A única exceção é de leitura, e ela tem carimbo próprio:**
+
+> **`SEM REGISTRO na fala literal — MAS HÁ ESTADO REGISTRADO`**
+
+Significa que LUCIEN registrou afirmações sobre o assunto, mas a busca não
+localizou a conversa de origem **com essas palavras**. Conduta: responda pelo
+ESTADO, citando o `#número` de cada linha, diga que não localizou a fala com
+essas palavras, e **não diga que não há registro** — há, e está logo acima.
+
+### Quando o ESTADO vier vazio
+
+Vazio no ESTADO **não é** `SEM REGISTRO`. Quer dizer só que LUCIEN ainda não leu
+aquele pedaço da conversa (ele roda por acúmulo, atrás, e a reconstrução do
+passado é incremental). A resposta certa é a da EVIDÊNCIA, e vale dizer que a
+camada curada ainda não alcançou aquele trecho.
+
+### As flags
+
+    kobe-remember "<assunto>"              as três camadas
+    kobe-remember "<assunto>" --estado     só o que vale hoje
+    kobe-remember "<assunto>" --sem-estado só a evidência (a saída da v1)
+    kobe-remember --ver <número>           a vizinhança da mensagem
+
+### Se aparecer o aviso de que a camada de ESTADO falhou
+
+Ele diz `⚠️ a camada de ESTADO falhou` ou `não deu pra consultar o registro`. Isso
+é **falha de instrumento**, não ausência: relate como tal e siga pela EVIDÊNCIA,
+que não depende do registro. Um banco sem a migration 008 diz outra coisa — *"o
+registro de estado ainda não existe neste banco"* —, e aí é ausência mesmo.
+
 ## Avisa antes de agir — o ack que nomeia a ação
 
 > **Reconciliação com a borda (Liveness Protocol).** Com a nova arquitetura de borda, quando o **Liveness Protocol** está ligado (`EDGE_LIVENESS_ENABLED`), a **própria borda** passa a GARANTIR esse ack nas **tarefas pesadas** — um sinal semântico ("entendi, vou X, já te retorno") disparado de forma consistente pela borda (ela decide QUANDO via o classificador; um modelo barato escreve O QUÊ), sem depender de você lembrar. Nesse caso, **não duplique**: se a borda já avisou (ela te diz isso na nota de handoff da run de background — "não mande outro 'já te retorno'"), vá direto ao trabalho. A regra abaixo **continua valendo** para tudo que a borda não cobre: ela some quando o Liveness está desligado, e mesmo ligado não cobre as tarefas de porte médio que você resolve em primeiro plano. A **semântica** é a mesma (nomear a ação + "já volto"; nunca ackar em bate-pronto); o que mudou é que, nas tarefas pesadas, o disparo do ack deixou de depender só de você.

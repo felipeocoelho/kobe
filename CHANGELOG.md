@@ -4,6 +4,678 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix(f3): a perna de relevância do estado vigente estava MORTA (2026-08-30)
+
+**O defeito mais grave da fase, e ele só apareceu no uso real.** Nenhum teste de
+unidade o pegaria: a função devolvia resultado, sem erro, sem log — só devolvia
+**menos** do que devia, e o que faltava era invisível.
+
+#### O sintoma: a régua da fase falhando no exemplo nomeado pelo operador
+
+Depois de a varredura do passado atravessar o incidente de 12–13/06 (o
+"Frankenstein"), a decisão **"a sincronização dev VPS → prod VPS deve ser feita
+via rsync"** (16/05, `#440`) **continuou vigente**. A decisão que a proibiu
+estava lá, gravada, datada, com o motivo — e as duas conviviam como se nada
+tivesse acontecido.
+
+**O modelo não errou. A afirmação de maio nunca lhe foi mostrada.**
+
+#### A causa, e ela é de uma linha
+
+`store.estado_vigente` selecionava as afirmações que o modelo pode contradizer
+por **recência ∪ casamento por palavra**. O casamento usava
+`plainto_tsquery('portuguese', <texto do lote>)` — e esse construtor liga os
+termos por **E**.
+
+Um lote de 8.000 caracteres virava uma consulta de **859 lexemas em conjunção**.
+Medido: **zero** resultados, enquanto havia **15** afirmações vigentes falando do
+assunto daquele lote. A perna estava morta desde o primeiro dia, e sobrava só a
+recência — que, num tópico com centenas de afirmações, nunca alcança maio.
+
+#### O conserto, em duas pernas — e a primeira tentativa também errou
+
+**Por palavra**, com os radicais do lote ligados por **OU**. A primeira versão
+pegou os radicais mais **raros** do acervo, e isso escolhe *hapax*, não assunto:
+no lote do apagão, os 25 mais raros eram `cifr`, `restoring`, `crypt`, `pem`,
+`decompiled`… e **`rsync` não entrava**, porque com 136 documentos ele não é raro
+o bastante — enquanto o lote inteiro tratava dele. **O que um lote repete é do
+que ele trata**, então agora entram duas listas: os mais **frequentes no lote**
+(que trazem o assunto) e os mais **raros no acervo** (que trazem identificador e
+nome próprio).
+
+Junto veio um segundo erro de aritmética: o corte de banalidade usava
+`MAX(ndoc)` como denominador em vez do **número de documentos**. Isso dava um
+corte de 109 num acervo de 3.600 mensagens — `rsync` (136 documentos, 3,8% do
+acervo) caía fora por um corte calculado sobre a palavra mais comum do acervo.
+Agora é `COUNT(*) FROM messages`, como em `bot/search/query.radicais`.
+
+**Por sentido**, com o vetor do lote. É ela que acha a afirmação escrita com
+outras palavras — e foi ela que resolveu o caso da régua: o lote da reversão
+fala de `git pull`, migrations e manifests, e **não diz "rsync" uma única vez**.
+
+#### A prova, contra o acervo real
+
+Reprocessado o trecho de 09–13/06 do Dev Kobe com a relevância consertada:
+
+```
+#440 · "A sincronização entre dev VPS e prod VPS deve ser feita via rsync"
+  status: superada · vigente de 2026-05-16 até 2026-06-13
+  substituída por #2147 (13/06): "O operador assumiu como erro próprio o uso de
+  rsync e determinou que ele deixe de ser usado para qualquer deploy"
+```
+
+A data de fim é **13/06** — a data do fato, não a da gravação. E a pergunta da
+bateria, pela porta que o operador usa:
+
+> *"a gente pode sincronizar o dev VPS com o prod VPS usando rsync?"*
+
+devolve a decisão de 13/06 como **vigente**, e embaixo, em "o que NÃO vale
+mais", **duas** superações do rsync — a de 16/05 e a de 05/06 —, cada uma com o
+ponteiro para o que ficou no lugar.
+
+**As superações no registro saltaram de 46 para 79** só com o reprocessamento de
+9 lotes.
+
+#### Dois consertos menores, e os dois vieram do mesmo uso real
+
+- **A varredura não parava numa falha que se repete.** Um limite transitório do
+  modelo derrubou **70 lotes seguidos em 4 minutos**, ~3,5 s cada. O desenho
+  segurou o que importava (nada gravado, cursor parado, cada falha registrada),
+  mas o laço **queimou o orçamento inteiro de lotes** contra uma falha que não ia
+  se curar três segundos depois — e as vagas gastas eram as da retomada. Agora
+  para em **3 falhas seguidas**, com espera crescente. Falha **isolada** continua
+  não interrompendo nada.
+- **A mensagem de erro não diagnosticava.** `a CLI saiu com código 1: (sem
+  stderr)` — porque o código levantava no código de saída **antes** de olhar o
+  `stdout`, que era onde vinha o envelope de erro da própria CLI.
+
+**Testes:** 6 novos. Os três da relevância guardam os três erros pelo nome (a
+conjunção, o *hapax*, o termo banal); os três restantes cobrem o freio de falha
+repetida, a falha isolada que não interrompe, e o diagnóstico que sobrevive ao
+stderr vazio. Suíte: **936 sem banco, 1.086 com banco**.
+
+**Reversão:** `git revert`. As afirmações escritas antes do conserto continuam
+válidas — o que falta nelas são as **superações** que a relevância morta impediu.
+Ver a recomendação de refazer a varredura no relatório da fase.
+
+### fix(f3): o teto manda dividir, e a confiança mede corroboração (2026-08-30)
+
+**Operador pediu** — as duas decisões saíram da leitura do piloto de 5 lotes:
+
+> *"eu não queria que nada que fosse relevante ficasse de fora… na minha cabeça
+> eu tinha comentário para 20"*
+
+> *"o fato de vir de áudio precisa ser levado em consideração. Mas não dá pra
+> falar sempre 'veio de áudio, confiança é baixa', em todo e qualquer caso. Eu
+> posso te mandar uma mensagem curta, três palavras — 'sim, plano aprovado' —
+> transcrita sem nenhuma espécie de ambiguidade."*
+
+---
+
+#### 1. O teto por lote: 8 → 20, e o descarte por posição SAI
+
+**O número estava errado e o comportamento estava pior.** O piloto mediu: o
+modelo quis escrever **9 a 15** afirmações por lote de 40 mensagens, e o teto
+(8, chutado no plano) bateu em **5 de 5 lotes**. As excedentes eram cortadas
+**por posição** — a trava não escolhia, e o que se perdia era invisível. Foram 20
+afirmações embora.
+
+O comportamento novo, e ele só é natural porque o cursor não tinha andado:
+
+1. batendo no teto, **nada é gravado** e o cursor não avança;
+2. o lote é **partido ao meio**, e cada metade vira uma rodada própria, com
+   chamada e linha de registro próprias;
+3. a divisão para no **piso de 5 mensagens**. Abaixo disso não é lote grande, é
+   **degeneração** — aí grava-se o que cabe e a recusa T7 fica **barulhenta**:
+   vai ao operador (`LUCIEN_ALERT_CHAT_ID`), não só ao log. É o único caminho em
+   que algo se perde, e ele grita.
+
+As metades são **contíguas e cronológicas** (testado): se não se encaixassem, o
+cursor de uma passaria por cima da outra e o buraco seria permanente. E a
+recursão tem dois freios — o piso e `LUCIEN_DIVISOES_MAX` —, porque um modelo em
+laço viraria uma árvore de chamadas, e cada nó dela custa cota.
+
+**Sobre "1.100 afirmações é registro demais":** não é. O registro é
+**consultado**, não injetado. Quem tem teto de prompt é o boletim da F4.
+
+#### 2. A confiança deixou de medir o canal e passou a medir corroboração
+
+**Três defeitos numa linha só** (`"baixa" if origem.audio else "media"`), todos
+visíveis no piloto:
+
+- ela media o **canal**, não a confiabilidade da afirmação;
+- `alta` **nunca era escrita por ninguém** — nível morto num `CHECK` de três;
+- e como o operador usa áudio como canal principal, "baixa" saiu em **27 de 40**
+  linhas. Um sinal que aparece em dois terços das linhas não distingue nada.
+
+O efeito prático era o pior possível: ou o agente hedgeia tudo — e a F3 não cura
+a doença que existe pra curar —, ou ignora a flag, e a mitigação vira teatro.
+
+A régua nova:
+
+| | quando |
+|---|---|
+| **alta** | há evidência **além** da origem principal (no piloto seriam 35 de 40) |
+| **media** | origem única, sem corroboração |
+| **baixa** | o trecho que **sustenta** a afirmação está ilegível ou ambíguo |
+
+**O canal continua registrado** — sai como metadado neutro (*"origem em áudio"*),
+derivado de `messages.audio_transcribed` na leitura, em vez de copiado para uma
+coluna. Ele só deixou de **ser** a confiança.
+
+Na exibição, os três níveis agora aparecem (`corroborada` · `origem única` ·
+`⚠ trecho de origem ambíguo`), lado a lado com o canal. Antes era binário: áudio
+ganhava carimbo de suspeita e texto não ganhava nada — o canal principal do
+operador nascia de segunda classe.
+
+#### 3. Como LUCIEN decide o rebaixamento — e isto é o centro da mudança
+
+`legibility_doubt` é o **único** juízo de confiança que se pede ao modelo, e o
+código o aceita **só como rebaixamento**. Não existe campo com que ele se
+promova: o princípio da 008 (*"`confidence` é preenchida pelo código, nunca pelo
+modelo"*) continua valendo onde importa.
+
+**A pergunta é por AFIRMAÇÃO, não por mensagem:** *o trecho corrompido é
+justamente o que **sustenta** esta afirmação?* Se a palavra deturpada está longe
+do que sustenta, não rebaixa.
+
+O exemplo no prompt é vivo, e veio do próprio áudio que trouxe esta decisão: a
+transcrição chegou como *"o fato de vídeo e áudio precisa ser levado em
+consideração"*, onde "vídeo" é ruído sobre "de vir de". **Há corrupção literal na
+frase e ela não contamina a afirmação** — o sentido é recuperável e a decisão não
+depende daquela palavra.
+
+O prompt traz os dois lados. Marcar: identificador deturpado dentro do que
+sustenta (o acervo tem *"Raul"* por *"Hal"*, *"DevCube"* por *"Dev Kobe"*,
+*"Koby"*, *"Cade"*), número/data/versão/caminho vindo de áudio, frase truncada,
+antecedente ambíguo sem referente. **Não** marcar: mensagem curta e inequívoca
+(*"sim, plano aprovado"*), ruído fora do que sustenta, termo técnico correto, e —
+explicitamente — **o simples fato de ter vindo por áudio, que sozinho nunca é
+motivo**. Sem o lado negativo escrito, o modelo cai no reflexo de carimbar tudo
+que é voz, e a ressalva vira ruído.
+
+O operador usa áudio por escolha de produto. Um desenho que pune áudio por ser
+áudio contradiz o produto: **o alvo é transcrição ruim, não voz.**
+
+#### 4. O item de conferência do rsync, nomeado na régua
+
+`tests/roteiros/f3-regua.txt` ganha o melhor caso de teste do acervo, e ele saiu
+do próprio piloto: **"sincronização dev VPS → prod VPS via rsync"** foi gravada
+como decisão vigente de **16/05** (`#440`) — e estava certo para maio. Em
+**12–13/06** veio o incidente do "Frankenstein", e em 13/06 a regra se inverteu
+em regra dura: *"deploy é git; rsync não é método de deploy de nada"*.
+
+Exercita a fase inteira de uma vez: uma decisão real, datada, que valeu e foi
+revertida por um motivo registrado. **Se ela sobreviver vigente depois de a
+varredura atravessar junho, a fase falhou a própria régua** — e falhou no
+exemplo em que servir a linha velha mandaria o agente fazer exatamente o que
+causou o incidente.
+
+**Testes:** 20 novos. `tests/test_lucien_divisao.py` (14) cobre a divisão sem
+banco nem modelo — contiguidade, ordem cronológica, convergência, os dois freios
+e o aviso barulhento. Os testes da T6 e da T7 em `test_lucien_store.py` foram
+**reescritos** para as réguas novas, incluindo o que trava a régua velha (origem
+em áudio, corroborada, tem que sair `alta`). Suíte: **932 sem banco, 1.079 com
+banco**.
+
+**Reversão:** `git revert`. Nada de banco — as mudanças são de default, de
+validação e de exibição. O registro escrito sob a régua antiga fica com a
+confiança velha (foi por isso que o piloto foi descartado e refeito).
+
+### docs(claude) + test(f3): a lei das três camadas e os dois roteiros (2026-08-30)
+
+**Operador pediu:** que o `kobe-remember` v2 não quebrasse a v1 — *"os desfechos
+`SEM REGISTRO` / `MENÇÃO LITERAL` / `SEM REGISTRO PARCIAL` / `FALHA DO
+INSTRUMENTO` continuam valendo e continuam sendo lei do `CLAUDE.md`"* — e que os
+dois roteiros da bateria fossem entregues **junto** do plano (§9.6, regra 1).
+
+**Foi feito:**
+
+- **`CLAUDE.md`** ganha a seção das três camadas. Ela **acrescenta** e não
+  reescreve: as regras dos quatro desfechos ficam onde estavam, íntegras, e a
+  seção nova diz que **o veredito continua sendo da EVIDÊNCIA**. A única
+  novidade de conduta é o carimbo `SEM REGISTRO na fala literal — MAS HÁ ESTADO
+  REGISTRADO`, que existe porque, havendo estado, o texto antigo (*"não há nada
+  sobre isso"*) seria falso.
+
+  Também fica escrito o que **vazio no ESTADO não é**: não é `SEM REGISTRO`. Quer
+  dizer que LUCIEN ainda não leu aquele pedaço. Sem essa linha, um bloco vazio
+  viraria uma recusa que ninguém autorizou.
+
+- **`tests/roteiros/f3-superacao.txt`** — a régua da fase, com os quatro cenários
+  e as esperas `@60`/`@120` do briefing. **Uma adaptação de sintaxe, declarada:**
+  o briefing escreve a espera em linha própria e o parser deste repositório lê
+  `@N <texto>`. O conteúdo e os tempos são os do briefing; a forma é a que roda —
+  roteiro que não parseia foi o defeito nº 9 da bateria da F2.
+
+  O roteiro traz as **pré-condições** sem as quais o resultado não vale:
+  `LUCIEN_ENABLED=true`, `LUCIEN_MAX_AGE_S` baixo (é o gatilho por idade que faz
+  um lote de 3 mensagens ficar devido — o de acúmulo pede 12 e nunca dispararia),
+  `keyko-dev` no ar e `kobe-lucien init` rodado.
+
+  E traz um aviso que o briefing não tinha: **o agente pode acertar o cenário 3
+  de memória**, porque a decisão e a reversão estão na janela imediata dele. O
+  verde só conta se a resposta mostrar que a ferramenta rodou — citando o
+  `#número`. É a mesma regra da F2, aplicada a uma armadilha nova.
+
+- **`tests/roteiros/f3-regua.txt`** — o teste histórico, com o critério
+  (**zero falsos "em aberto"**; hoje são três) e a pré-condição de que a
+  reconstrução tenha alcançado julho. Se não tiver, isso é resultado legítimo e
+  tem que ser **dito**, não virar vermelho da fase.
+
+**Testes:** `tests/test_claude_md_regra_remember.py` (9) segue verde sem uma
+alteração — é a prova de que a lei da F2 não foi tocada.
+`tests/test_roteiros_parseiam.py` (19) cobre os dois roteiros novos, e as
+esperas foram conferidas no parser real: `0 · 0 · 60 · 120 · 10`.
+
+**Reversão:** `git revert`. Documentação e arquivos de roteiro; nada executável.
+
+### feat(f3): `kobe-remember` v2 — ESTADO › EVIDÊNCIA › PISTAS (2026-08-30)
+
+**Operador pediu:** *"`kobe-remember` v2 — passa a devolver três camadas
+visualmente separadas: ESTADO (o que vale, curado) › EVIDÊNCIA (as falas
+literais, já existentes na v1) › PISTAS (o destilado do Hindsight, só quando o
+estado estiver magro). Não quebre a v1."*
+
+**Foi feito:**
+
+- **`bot/lucien/consulta.py`** — a leitura do registro, com **quatro pernas**. As
+  três primeiras são as da F2 (literal, palavra, sentido); a quarta é nova e só
+  existe aqui: **as afirmações cuja ORIGEM está entre as mensagens que a
+  evidência achou**. É a mais precisa das quatro — se a evidência trouxe a `#3059`
+  e há uma afirmação nascida dela, ela responde à pergunta por construção.
+
+- **`bot/bin/kobe-remember` v2** — três blocos separados. **O veredito continua
+  sendo da EVIDÊNCIA**: ESTADO não vota nele. A única concessão é de texto, e ela
+  é obrigatória — quando há estado e a evidência não achou a fala, o carimbo diz
+  *"SEM REGISTRO na fala literal — MAS HÁ ESTADO REGISTRADO"*, porque o texto
+  antigo (*"não há nada sobre isso"*) seria **falso**. Flags novas: `--estado`,
+  `--sem-estado`, `--sem-pistas`.
+
+- **`bot/bin/kobe-lucien`** — `init`, `status`, `rodada`, `relatorio`,
+  `reconstruir`, `reverter`. Sem banco default, como o `migrate.py`.
+
+- **`bot/lucien/reconstrucao.py`** — e aqui entrou uma peça que **o plano não
+  previu**: LUCIEN nasce com o cursor em zero e 3.620 mensagens atrás dele. Sem
+  separar as leituras, a fonte incremental gastaria semanas mastigando julho a
+  seis rodadas por hora — e **não veria a conversa de hoje**. Daí os dois
+  cursores da 008 e o `kobe-lucien init`, que finca o marco. Ele mexe nos
+  **dois**: o incremental vai para o topo, e o de reconstrução vai para onde o
+  incremental estava — senão a varredura refaria o trecho que a leitura corrente
+  já processou.
+
+**Quatro defeitos achados TESTANDO com dado real, nenhum vindo de revisão:**
+
+1. **O piso de similaridade herdado da F2 estava errado.** 0,57 foi calibrado
+   sobre `messages` — texto longo e ruidoso. Afirmações são curtas e densas e
+   separam muito melhor. Medido sobre as 40 do piloto, 8 perguntas com resposta e
+   8 sobre assuntos inexistentes:
+
+   | | com resposta | sem resposta | folga |
+   |---|---|---|---|
+   | estado (novo, 0,43) | 0,570 – 0,773 | 0,253 – 0,289 | **+0,281** |
+   | evidência (F2, 0,57) | 0,598 – 0,693 | 0,428 – 0,536 | +0,061 |
+
+   Com 0,57 o limiar caía **exatamente em cima** do verdadeiro-positivo mais
+   fraco: *"o que a gente decidiu sobre o nome dos ambientes"* voltava vazia com
+   a resposta certa a **0,570** no banco.
+
+2. **A perna de palavra estava votando** — regra da F2 que foi replicada pela
+   metade. *"o campeonato de xadrez"*, assunto que nunca existiu, voltava com uma
+   preferência sobre anexo no Telegram: `campeonat` e `xadrez` são raríssimos,
+   mas `decid` não é, e a consulta os unia por `OU`. Agora a palavra **ordena e
+   não elege** — só sentido, literal e origem colocam uma afirmação na resposta.
+
+3. **A perna de origem herdava lixo da evidência.** Com veredito `MENÇÃO
+   LITERAL` a evidência diz *"não consigo confirmar que responde"*; passar
+   aqueles `seq` adiante transformava uma incerteza declarada em afirmação. Os
+   `seq` agora só atravessam quando o veredito é `ACHOU`.
+
+4. **Banco fora era relatado como "a tabela não existe".** `to_regclass` devolve
+   `NULL` para tabela ausente e **não estoura** — então qualquer exceção ali é o
+   Postgres derrubado. Engolir a exceção fazia o comando dizer *"falta a
+   migration 008"* com o banco morto. É a mesma mentira que a fase combate, e a
+   que este sistema já cometeu duas vezes.
+
+**A latência, que era o risco desta mudança.** A camada nova fazia uma **segunda**
+chamada de embedding para a **mesma** pergunta: +0,3 s por comando, resultado bit
+a bit idêntico. Memoizado por processo em `bot/search/embedder.embed_um` (falha
+**não** é cacheada, senão um tropeço de rede condenaria o comando). Medido, 5
+rodadas frias:
+
+    v1, antes           1,55 – 1,88 s
+    v2 sem o memo       1,79 – 2,12 s
+    v2 com o memo       1,59 – 1,65 s
+
+**A camada de ESTADO passou a sair de graça** — e o critério da F2 (3 s) segue
+com folga.
+
+**Calibração completa, 16 perguntas: 8/8 acharam, 8/8 recusaram.**
+
+**Testes:** `tests/test_lucien_consulta.py` (15). Os quatro defeitos acima viraram
+teste, cada um com o caso real no docstring. Suíte inteira: **910 passaram, 141
+puladas**.
+
+**Reversão:** `git revert`. Com `LUCIEN_ENABLED=false` e o registro vazio, a saída
+do `kobe-remember` é a da v1 — os 15 testes de texto da F2 continuam verdes sem
+uma alteração, que é a prova de que a v1 não foi tocada.
+
+### feat(f3): a fonte do LUCIEN no Keyko, e a chave — desligada (2026-08-30)
+
+**Operador pediu:** *"LUCIEN — nova fonte do daemon Keyko (o mesmo que já roda
+`alertas`, `transcripts` e `search-index`). Roda **fora do caminho do turno**, por
+acúmulo, nunca no turno."* E, na aprovação: *"pode criar o keyko-dev, claro.
+Quanto mais a gente deixar igual desenvolvimento e produção, melhor."*
+
+**Foi feito:**
+
+- **`bot/lucien/worker.py`** — uma rodada de ponta a ponta, com **três fronteiras
+  de transação**, cada uma por um motivo:
+  1. a linha da rodada é aberta e **comitada na hora** — se o processo morrer no
+     meio da chamada ao modelo, a rodada fica registrada como não-terminada em
+     vez de sumir;
+  2. a chamada ao modelo acontece **fora de transação** — segurar uma transação
+     por 60 s prenderia recursos do banco à espera de algo que nem é do banco;
+  3. a escrita é uma transação só.
+
+  **A T9 mora aqui:** qualquer falha entre montar o lote e gravar — modelo fora,
+  resposta torta, timeout — descarta a rodada e **NÃO avança o cursor**. O mesmo
+  lote é relido depois. Meia rodada gravada seria um buraco permanente no
+  registro, e ninguém saberia onde.
+
+- **`bot/lucien/source.py`** — a 5ª fonte do Keyko, com **três proibições**, e a
+  primeira é decisão de arquitetura, não economia:
+  1. **nunca devolve `Despertar`** — o despertar acorda um `claude -p` que
+     escreveria ele mesmo no registro, e a F3 existe para que o modelo proponha e
+     o código decida;
+  2. **nunca trabalha dentro do `tick()`** (diferente do coletor de transcripts e
+     do indexador de busca, e a diferença é de ordem de grandeza: aqueles levam
+     milissegundos, uma chamada de modelo leva dezenas de segundos). O Keyko é
+     single-threaded — travar o laço travaria os **Alertas**, onde atraso é falha
+     que o operador vê. O `tick()` faz só a pergunta barata e dispara um processo
+     detached;
+  3. **nunca levanta.**
+
+- **A chave, desligada** (`LUCIEN_ENABLED=false`). Com ela off a fonte **não é
+  registrada** — não basta existir e não fazer nada: uma fonte que aparece no log
+  de inicialização sem trabalhar faz *"quem o Keyko está observando"* deixar de
+  ser verdade.
+
+- **`keyko-dev.service` instalado e no ar** (autorizado pelo operador), a partir
+  do template que já existia. `TRANSCRIPT_COLLECTOR_ENABLED` fica `false` em dev,
+  por causa do aviso de origem compartilhada do `.env.example` — `~/.claude/projects`
+  é do host e é um só. **Efeito colateral bom:** o índice de busca de dev passa a
+  se manter sozinho, o que fecha o item 5 do "o que fica na sua mão" da F2
+  (*"não há keyko-dev instalado: em dev o índice não se mantém sozinho"*).
+
+**Testes:** `tests/test_lucien_source.py`, 16 cenários. As três proibições têm
+teste próprio; a chave desligada é provada em dois níveis (a fonte não é
+construída **e**, se for construída por engano, o `tick()` não abre conexão); e o
+registro do Keyko é conferido nos dois estados. Mais os casos chatos que derrubam
+daemon: banco fora, consulta falhando, conexão vazando, `.env` com valor torto
+(`LUCIEN_BATCH_MIN=doze` cai no padrão em vez de estourar) e valor absurdo
+(`LUCIEN_INTERVAL_S=0` é contido pelo piso).
+
+Suíte inteira: **896 passaram, 139 puladas**.
+
+**Reversão:** `LUCIEN_ENABLED=false` (já é o default) desliga tudo sem tocar em
+banco. Para tirar o `keyko-dev` do ar: `systemctl --user disable --now
+keyko-dev.service` — ele é unidade de **desenvolvimento**, não existe em produção,
+e a produção segue com o `keyko.service` de sempre.
+
+### feat(f3): o núcleo do LUCIEN — o modelo propõe, o código decide (2026-08-30)
+
+**Operador pediu:** o LUCIEN da F3 — *"ele lê o que entrou de novo e faz DUAS
+perguntas: que afirmações duráveis isto estabelece? e — a que hoje não existe em
+lugar nenhum — alguma delas contradiz, fecha ou abandona alguma das que já
+valem?"*
+
+**Por quê:** é a segunda pergunta que cura a dor. Hoje nada no Kobe registra que
+um assunto fechou, e por isso decisões de julho voltam à mesa como se estivessem
+em aberto.
+
+**A decisão de arquitetura, e ela é a fase inteira:** o briefing declara a F3
+como *"a única fase onde um modelo escreve estado que eu depois sirvo como se
+fosse conhecido"*. A resposta deste código é uma só — **o modelo não escreve no
+banco**. Ele recebe um lote e devolve JSON; quem escreve é `store.aplicar`, que
+valida campo por campo. É o mesmo princípio que o `CLAUDE.md` já aplica aos
+Alertas: *"a lógica determinística é do CÓDIGO; o modelo só é invocado para
+LINGUAGEM"*.
+
+Por isso LUCIEN **não** usa o `Despertar` do Keyko: aquele caminho acorda um
+`claude -p` que escreveria ele mesmo — o modelo com a caneta na mão.
+
+**Foi feito:**
+
+- **`bot/lucien/store.py`** — a **única** porta de escrita do registro. Nove
+  travas, e nenhuma confia no modelo:
+
+  | | o que ela impede |
+  |---|---|
+  | **T1** | citar uma mensagem que não estava no lote mostrado |
+  | **T2** | superar/encerrar uma afirmação que não lhe foi mostrada, ou já mudada na mesma rodada |
+  | **T3** | superação sem motivo escrito |
+  | **T4** | vocabulário fora do enum, texto fora do tamanho |
+  | **T5** | `valid_from` da gravação em vez da data do fato |
+  | **T6** | origem de áudio entrando com confiança normal |
+  | **T7** | um lote virar 30 afirmações |
+  | **T8** | releitura do mesmo lote duplicar |
+  | **T9** | resposta torta gravar metade (fica no worker) |
+
+  **A T1 é a que sustenta a fase.** O banco já garante que a mensagem citada
+  existe; a T1 garante que **o modelo a viu**. Sem ela, uma citação plausível de
+  um assunto que o modelo conhece de outro lugar entraria com cara de origem
+  conferida — e origem conferida é o que faz o agente servir a linha como fato.
+
+  Conexão própria e transação de verdade (a ponte do bot é um pool em
+  autocommit): criar a afirmação nova, fechar a que ela supera, gravar os eventos
+  e avançar o cursor **ou acontece inteiro, ou não acontece**. Um registro com a
+  superação gravada e a substituta ausente diria que uma decisão foi revogada por
+  nada.
+
+- **`bot/lucien/prompts.py`** — o contrato. Não se pergunta ao modelo nada que o
+  código saiba melhor: a data sai do `created_at` da origem, a confiança sai de
+  `audio_transcribed`, e a afirmação a superar é indicada por **apelido**
+  (`E1`, `E2`…) e não por UUID — um UUID quase-certo é indistinguível de um certo
+  até a chave estrangeira estourar; um `E9` que não existe é recusado sem
+  ambiguidade.
+
+- **`bot/lucien/brain.py`** — a chamada e o parser. Pela **assinatura**, zero de
+  API paga. Isolada como a F0.5 ensinou (cwd neutro, `CLAUDE_CONFIG_DIR`
+  temporário, `CLAUDE_SECURESTORAGE_CONFIG_DIR` vazio) para não disparar os hooks
+  e plugins do operador dentro de uma chamada de LLM.
+
+  O parser aceita **três formas** (envelope da CLI, bloco cercado, JSON cru)
+  porque o formato de saída era a premissa mais frágil do plano. E ele **levanta**
+  em vez de devolver vazio: um JSON truncado parseado com tolerância viraria
+  "nada durável", o cursor avançaria, e o pedaço da conversa se perderia **para
+  sempre, sem rastro**. Este sistema já transformou falha de instrumento em "não
+  há registro" duas vezes; `CerebroIndisponivel` existe para isso não ter uma
+  terceira.
+
+**Duas medições que mudaram o código, feitas na hora:**
+
+1. **O contrato de saída da CLI (risco R1 do plano, que eu tinha declarado como
+   não-verificado): CONFIRMADO.** `claude -p --output-format json` devolve um
+   envelope com metadados e a resposta em `result`, e o parser leu.
+2. **O contexto por chamada: 43.039 → 13.154 tokens**, com `--tools ""`,
+   `--strict-mcp-config` e um `--system-prompt` curto. São 70% a menos, e a
+   chamada seguinte leu os 13k do **cache** e criou zero — ou seja, uma
+   reconstrução de ~145 chamadas seguidas paga o prefixo **uma vez**. Foi o que
+   tornou a varredura do passado inteiro viável em cota, e não só em teoria.
+
+**Testes:** **47 novos**, nenhum deles chamando modelo.
+
+- `tests/test_lucien_store.py` (28) — cada trava é uma tentativa de fazer o
+  LUCIEN escrever o que não deveria, com a asserção de que **não passou**. A
+  proposta é construída à mão, que é exatamente como um modelo alucinando a
+  entregaria. Tudo em transação revertida.
+- `tests/test_lucien_brain.py` (19) — 5 respostas boas e 6 tortas; as tortas
+  **levantam**, incluindo a truncada, que é a perigosa.
+
+**E o smoke com conversa de verdade** (8 mensagens reais do tópico AMBIENTE DEV,
+15 mil caracteres): o modelo devolveu 4 afirmações, **zero recusas**, e a
+conferência linha a linha contra o banco mostrou origem dentro do lote e
+`valid_from` igual à data da mensagem de origem em todas. Uma delas foi um
+`open` correto — *"lista de oito defeitos aguardando decisão do operador"*.
+Rodada revertida; nada ficou gravado.
+
+**Reversão:** `git revert`. Nenhuma escrita em banco fora de teste revertido;
+nada ligado (a chave vem no commit seguinte, desligada).
+
+### feat(f3): migration 008 — o registro de estado (2026-08-30)
+
+**Operador pediu:** a F3 do Highlander v3 — *"as tabelas do registro de estado,
+com vigência (`valid_from`/`valid_to`), ponteiro de substituição, e origem
+obrigatória em toda linha. Sem origem, a linha não entra."*
+
+**Por quê:** a dor original do projeto, na palavra dele em 27/08/2026: *"quando
+eu pedia para retomar o assunto, existiam coisas que já tinham sido discutidas,
+sobre as quais decisões já haviam sido tomadas, e que você retomava como questões
+em aberto."* Medido no diagnóstico: perguntando ao Hindsight de produção *"o que
+já foi decidido sobre a arquitetura de borda?"*, ele devolveu **como "em aberto"
+três coisas fechadas em julho**.
+
+A causa raiz, em uma frase de banco: a memória é um **log de INSERT sem UPDATE e
+sem tombstone**. Registra todo pedido, nunca registra que o pedido foi
+respondido, e não tem como um fato novo invalidar um velho. **Falta o
+`valid_from`/`valid_to`** — uma dimensão de mudança lenta que nunca foi modelada.
+
+**Foi feito** — cinco tabelas novas, nenhuma alteração em tabela existente:
+
+- **`lucien_claims`** — uma linha = uma afirmação durável, com vigência, ponteiro
+  de substituição e **origem obrigatória**. `valid_from` recebe a data do FATO
+  (o `created_at` da mensagem de origem), nunca a da gravação: a reconstrução do
+  passado vai criar, numa madrugada de agosto, afirmações que passaram a valer em
+  julho. Com `NOW()`, o registro inteiro nasceria dizendo que tudo foi decidido no
+  dia em que foi catalogado — a mesma classe de mentira que a fase existe para
+  matar.
+- **`lucien_claim_evidence`** — as outras mensagens que sustentam a afirmação. É
+  tabela e não `BIGINT[]` de propósito: array não tem chave estrangeira, e um
+  número de mensagem que não existe é exatamente o que não pode entrar.
+- **`lucien_events`** — a imagem ANTERIOR de cada mudança (`before`). É o que faz
+  `kobe-lucien reverter` ser possível, e é o caminho de volta de uma superação
+  errada — o modo de falha mais caro desta fase, porque ela **esconde** uma
+  decisão que continua valendo.
+- **`lucien_runs`** — o que cada rodada viu e fez, com `claims_rejected`. Essa
+  coluna é a mais importante da tabela: se o modelo começar a inventar origem,
+  ela sobe e **alguém enxerga**. Recusa silenciosa é o mesmo defeito, do outro
+  lado.
+- **`lucien_cursor`** — até onde se leu, por (escopo, tópico). O cursor **não
+  avança quando a rodada falha**, então falha de modelo ou de rede vira releitura
+  e não buraco permanente.
+
+**A decisão de desenho que sustenta a fase:** `source_message_id` é `NOT NULL`
+com chave estrangeira para `messages`. Origem obrigatória deixa de ser convenção
+e vira **restrição de integridade** — mesma lógica do `work_sessions.system_id`
+da F1. Há uma segunda trava, esta no código (vem no commit seguinte): o `seq`
+citado tem que estar **no lote que foi mostrado ao modelo**. O banco garante que
+a mensagem existe; o código garante que o modelo a viu.
+
+Mais quatro `CHECK` que o esquema do briefing deixava passar: vigência e
+`valid_to` não podem discordar; o ponteiro de substituição só existe em quem foi
+substituído; nada substitui a si mesmo; e os quatro vocabulários (`kind`,
+`status`, `confidence`, `created_by`) são fechados.
+
+**Nada é específico de um tópico.** Regra do operador de 30/08: *"nada que a
+gente vai construir é específico do Dev Kobe"*. O registro é global **com coluna
+de tópico** (decisão E5).
+
+**Testes:** `tests/test_state_registry_schema.py`, 24 cenários — 9 sobre o
+arquivo (rodam em clone limpo, sem banco) e 15 sobre o banco, cada um numa
+transação revertida. As travas foram **exercitadas, não prometidas**: origem
+ausente, origem inventada, vigente-com-`valid_to`, superada-sem-`valid_to`,
+auto-substituição e os quatro enums — **todas recusadas pelo banco**; e o caminho
+feliz funciona (senão a tabela seria impossível de escrever). Suíte inteira:
+**860 passaram, 112 puladas**. Migration aplicada em **`kobe_dev`** (alvo
+conferido antes de cada comando), reaplicação inofensiva, `compat_gate` verde.
+Referência regenerada — o diff é **puramente aditivo**: entrou a `008` na lista
+de versões e as cinco tabelas; **nenhum campo de ambiente mudou** (collation,
+`data_checksums`, encoding e fuso seguem idênticos), então o portão de produção
+não vira vermelho por causa disto.
+
+**Reversão:** `LUCIEN_ENABLED=false` — as cinco tabelas ficam **inertes**, nada é
+apagado, e nada muda no prompt do turno (a F3 é consultada sob demanda, não
+injetada). Para desfazer no banco de desenvolvimento, é preciso remover as cinco
+tabelas (`lucien_cursor`, `lucien_events`, `lucien_claim_evidence`,
+`lucien_claims`, `lucien_runs`, nesta ordem, por causa das chaves estrangeiras),
+tirar a linha `008` de `schema_migrations` e regenerar a referência. Em produção
+a 008 ainda **não foi aplicada** — é ato do agente principal.
+
+### fix(helpers): o re-exec no venv deixa de conferir uma LISTA de dependências (2026-08-30)
+
+**Operador pediu:** consertar o `bot/bin/kobe-recall-since`, que quebrava no
+runtime do agente com `No module named 'psycopg_pool'` — *"de forma que funcione
+por caminho relativo, de qualquer cwd, sem venv ativo"* —, e conferir o mesmo
+defeito latente em `kobe-work-session` e `kobe-collect-transcripts`.
+
+**Por quê:** `kobe-recall-since` é o comando que o protocolo de run em background
+manda o agente rodar para ler a **janela de frescor** — o que o operador disse
+DEPOIS que o pedido foi despachado. Ele quebrado significa que **toda run de
+background perdia a chance de ver um follow-up ou um "deixa pra lá"**. Um
+mecanismo de segurança desarmado, e em silêncio: `No module named 'psycopg_pool'`
+não se lê como *"a janela de frescor está cega"*.
+
+A causa imediata era o shebang `#!/usr/bin/env python3` (o Python do SISTEMA,
+que tem `psycopg` e não tem `psycopg_pool`). A causa **de desenho** é outra, e é
+ela que foi corrigida: cada helper tinha um guarda próprio que decidia o re-exec
+conferindo uma **lista de dependências** — e a lista envelhece sozinha, sem
+ninguém mexer nela, quando o helper passa a importar mais uma coisa. **É a
+terceira vez que este mesmo defeito aparece:**
+
+| quando | helper | a lista dizia | faltava de verdade |
+|---|---|---|---|
+| 27/08/2026 (F0.2) | `kobe-reflect` | `psycopg` | `httpx` |
+| 27/08/2026 (F0.2) | `kobe-remember` | `psycopg` | `openai`, `dotenv` |
+| **30/08/2026 (F3)** | **`kobe-recall-since`** | `psycopg` | **`psycopg_pool`** |
+
+**Foi feito:**
+
+- **`bot/bin/_venv.py`** — o preâmbulo, num lugar só, **sem lista**. A pergunta
+  deixa de ser *"falta alguma dependência?"* e passa a ser *"já estou no venv do
+  projeto?"*. Não há lista para ficar velha, então o bug não volta por
+  esquecimento: um helper que passe a usar uma biblioteca nova amanhã já está
+  coberto hoje.
+- Quatro garantias, cada uma nascida de um modo de falha real: âncora em
+  `__file__` (funciona por caminho relativo, de qualquer cwd); sentinela no
+  ambiente contra laço de `exec`; **nunca levanta** (um preâmbulo que derruba o
+  `kobe-notify` seria pior que a doença); e **só troca o interpretador de quem é
+  o programa em execução**, nunca de quem apenas **importa** o helper.
+- Convertidos: `kobe-recall-since`, `kobe-await-response`, `kobe-normalize-report`,
+  `kobe-work-session`, `kobe-collect-transcripts`, `kobe-reflect`,
+  `kobe-remember`, `kobe-alerta` e `kobe-integrations` (este não tinha guarda
+  nenhum — funcionava por sorte). `_kobe_topic._garantir_psycopg` passa a usar o
+  mesmo caminho, mantendo o re-exec **tardio**.
+- **`kobe-notify` e `kobe-attach` NÃO foram tocados, de propósito.** Eles são o
+  canal com o operador e são stdlib-pura no caminho comum; fazê-los depender do
+  venv trocaria um defeito raro por um pior — o relatório não chegar. O teste
+  cobra deles exatamente o contrário.
+- **`tests/test_helpers_venv.py`** — a trava. Lê os arquivos e recusa (a) lista
+  de dependências de volta, (b) `os.execv` reimplementado num helper, (c) helper
+  com dependência de terceiros sem `_venv.ensure()`. Roda **sem banco e sem
+  rede**, em todo `pytest`.
+- `tests/test_kobe_remember.py` — o teste que cobrava a lista completa passa a
+  cobrar o oposto: que não haja lista.
+
+**Testes:** suíte inteira **847 passaram, 101 puladas** (dev VPS, `kobe_dev`).
+Os três helpers nomeados pelo operador foram exercitados **no caminho real** —
+`/usr/bin/python3`, cwd `/tmp`, e também por caminho relativo sem venv ativo:
+`kobe-recall-since` voltou a ler a janela (50 mensagens num tópico real de dev,
+antes `No module named 'psycopg_pool'`); `kobe-collect-transcripts status` e
+`kobe-work-session systems` responderam contra o banco; `kobe-remember "rsync"`
+(o de mais dependências) citou `#3584`/`#3599`. `kobe-notify` foi testado
+rodando **no python do sistema, de `/tmp`** — o canal segue de pé.
+
+Dois defeitos do próprio conserto foram achados testando, e viraram teste: o
+re-exec incondicional **trocava o interpretador do pytest** ao carregar um
+helper como módulo (a suíte morria em 38% com `rc=1` e sem uma linha de erro —
+que é como um `execve` se parece de fora), e um `python -c` não tem script em
+disco para re-executar.
+
+**Reversão:** `git revert` do commit. Os helpers voltam ao guarda por lista —
+com o defeito junto. Nada de banco, nada de estado, nada de configuração: a
+mudança é só de código de inicialização de script.
+
 ### test(f2): a bateria executada — 8 cenários, 8 verdes, e 10 defeitos achados no caminho (2026-08-30)
 
 **Operador pediu:** o §3.4 do briefing — *"toda sessão Coder escreve um plano de

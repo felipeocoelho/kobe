@@ -44,7 +44,6 @@ havia só uma falha.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -54,41 +53,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Re-exec sob o venv do projeto quando as deps não estão no interpretador atual
-# — o shebang resolve pro python do SISTEMA, que não tem `psycopg`. Mesmo padrão
-# do `kobe-reflect`, e pela mesma razão: sem isto o helper morre com
-# `ModuleNotFoundError` justamente no caminho em que o dispatcher o chama.
-# Confere TODAS as deps, não uma: esta VPS tem `psycopg` no python do sistema e
-# não tem as outras, então olhar só uma daria falso "está tudo bem".
+# O interpretador certo — ver `bot/bin/_venv.py`.
 #
-# O venv é procurado em DOIS lugares, e a ordem importa. Diferente dos outros
-# helpers, este roda também de dentro de uma **worktree do Coder** — que é uma
-# árvore de trabalho do repositório, e onde `.venv/` **não existe** (é
-# gitignorado). Procurar só na raiz derivada do arquivo faria o helper não
-# re-executar ali e morrer com `ModuleNotFoundError: psycopg_pool` (medido).
-# `$KOBE_HOME` aponta pra instalação, que é onde o venv de fato mora.
-def _find_venv_python() -> Path | None:
-    candidatos = []
-    kobe_home = (os.environ.get("KOBE_HOME") or "").strip()
-    if kobe_home:
-        candidatos.append(Path(kobe_home).expanduser() / ".venv" / "bin" / "python")
-    candidatos.append(_REPO_ROOT / ".venv" / "bin" / "python")
-    for c in candidatos:
-        if c.exists():
-            return c
-    return None
+# Aqui morava um guarda com uma LISTA de dependências. A lista funcionava, mas
+# era frágil por desenho: bastava este helper passar a usar uma biblioteca nova
+# para o bug voltar. `_venv.ensure()` não pergunta o que falta — pergunta se já
+# estamos no venv do projeto, e vai pra lá se não estivermos.
+#
+# O caso da WORKTREE do Coder continua coberto, e é por isso que ele importa:
+# lá `.venv/` não existe (é gitignorado), e `_venv` cai em `$KOBE_HOME`.
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
 
-
-_VENV_PY = _find_venv_python()
-if (
-    _VENV_PY is not None
-    and sys.executable != str(_VENV_PY)
-    and any(
-        importlib.util.find_spec(dep) is None
-        for dep in ("psycopg", "psycopg_pool", "dotenv")
-    )
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+_ensure_venv(__file__)
 
 from bot import work_catalog as wc  # noqa: E402
 

@@ -80,4 +80,27 @@ def build_sources(
                 "source search-index NÃO registrada (SEARCH_INDEX_ENABLED off)"
             )
 
+    # LucienSource — 5ª fonte (gatilho por acúmulo: o registro de estado da F3).
+    # Como as duas anteriores, NUNCA devolve despertar — e aqui isso é decisão
+    # de arquitetura, não de economia: o despertar acordaria um `claude -p` que
+    # ESCREVERIA ele mesmo no registro, e a F3 inteira existe para que o modelo
+    # proponha e o código decida. LUCIEN dispara um worker detached, que chama o
+    # modelo e valida a resposta antes de gravar.
+    #
+    # Ela também não faz o trabalho dentro do `tick()`, diferente das fontes de
+    # transcript e de busca: uma chamada de modelo leva dezenas de segundos, e o
+    # Keyko é single-threaded — travar o laço travaria os ALERTAS, onde atraso é
+    # falha que o operador vê.
+    try:
+        from bot.lucien.source import build as build_lucien
+    except ImportError:
+        logger.exception("LucienSource indisponível — pacote bot.lucien faltando?")
+    else:
+        lucien = build_lucien(kobe_home=kobe_home, bot_token=bot_token)
+        if lucien is not None:
+            sources.append(lucien)
+            logger.info("source registrada: lucien")
+        else:
+            logger.info("source lucien NÃO registrada (LUCIEN_ENABLED off)")
+
     return sources

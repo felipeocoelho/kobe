@@ -35,19 +35,17 @@ _KOBE_HOME = Path(__file__).resolve().parent.parent.parent
 if str(_KOBE_HOME) not in sys.path:
     sys.path.insert(0, str(_KOBE_HOME))
 
-# Re-exec no Python do venv do projeto se as deps não estiverem no interpretador
-# atual. O shebang `#!/usr/bin/env python3` resolve pro Python do SISTEMA, que
-# não tem as deps do bot (psycopg etc.) — só o venv (.venv) tem. Idempotente:
-# não re-exec se já somos o venv nem se a dep já está disponível.
-import importlib.util  # noqa: E402
+# O interpretador certo. Ver `bot/bin/_venv.py`: aqui morava um guarda com uma
+# LISTA de dependências (`psycopg`), e a lista estava incompleta — este helper
+# importa `bot.db`, que importa `psycopg_pool`, que o Python do sistema NÃO tem.
+# Sintoma medido em 30/08/2026: `No module named 'psycopg_pool'`, e com ele a
+# janela de frescor de toda run de background cega, em silêncio.
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
 
-_VENV_PY = _KOBE_HOME / ".venv" / "bin" / "python"
-if (
-    _VENV_PY.exists()
-    and sys.executable != str(_VENV_PY)
-    and importlib.util.find_spec("psycopg") is None
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+_ensure_venv(__file__)
 
 
 def _fmt(msg: dict) -> str:

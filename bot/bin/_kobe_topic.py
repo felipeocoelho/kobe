@@ -63,23 +63,26 @@ def _garantir_psycopg() -> None:
     if importlib.util.find_spec("psycopg") is not None:
         return
 
-    venv_py = PROJECT_ROOT / ".venv" / "bin" / "python"
-    if venv_py.exists() and sys.executable != str(venv_py):
-        # `execv` substitui o processo: o que estiver em buffer de saída e não
-        # foi descarregado some. Fora de um terminal a saída é bufferizada por
-        # bloco, então isso não é hipotético.
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os.execv(str(venv_py), [str(venv_py), *sys.argv])
+    # `execv` substitui o processo: o que estiver em buffer de saída e não foi
+    # descarregado some. Fora de um terminal a saída é bufferizada por bloco,
+    # então isso não é hipotético.
+    sys.stdout.flush()
+    sys.stderr.flush()
 
-    # Sem venv pra onde ir. Melhor um erro que diz o que fazer do que um
-    # `ModuleNotFoundError` cru vindo de dentro de uma função de resolução
-    # de tópico — quem chamou `--topic` não vai adivinhar a ligação.
+    from _venv import ensure, venv_do_projeto
+
+    ensure()  # não volta, no caminho normal
+
+    # Voltou: não havia venv pra onde ir (ou o `exec` falhou). Melhor um erro
+    # que diz o que fazer do que um `ModuleNotFoundError` cru vindo de dentro de
+    # uma função de resolução de tópico — quem chamou `--topic` não vai
+    # adivinhar a ligação.
     raise LookupError(
         "`--topic` precisa do pacote `psycopg`, que não está disponível neste "
-        f"python ({sys.executable}) e não achei o venv do projeto em "
-        f"{venv_py}. Rode o helper pelo python do venv, ou use o endereçamento "
-        "por env (KOBE_CHAT_ID/KOBE_THREAD_ID), que não toca no banco."
+        f"python ({sys.executable}) e não achei o venv do projeto "
+        f"({venv_do_projeto()}). Rode o helper pelo python do venv, ou use o "
+        "endereçamento por env (KOBE_CHAT_ID/KOBE_THREAD_ID), que não toca no "
+        "banco."
     )
 
 

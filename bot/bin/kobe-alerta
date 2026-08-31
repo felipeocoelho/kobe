@@ -47,10 +47,16 @@ from pathlib import Path
 # do venv é symlink pro interpretador base, então resolver o caminho do
 # binário colapsa os dois e quebraria a detecção.
 _ROOT = Path(__file__).resolve().parent.parent.parent
-_VENV_DIR = _ROOT / ".venv"
-_VENV_PY = _VENV_DIR / "bin" / "python"
-if _VENV_PY.is_file() and Path(sys.prefix).resolve() != _VENV_DIR.resolve():
-    os.execv(str(_VENV_PY), [str(_VENV_PY), __file__, *sys.argv[1:]])
+
+# O interpretador certo — ver `bot/bin/_venv.py`. Este helper já usava a forma
+# certa (comparar `sys.prefix`, não conferir uma lista de módulos); o que muda é
+# ela deixar de estar duplicada aqui e passar a ter um lugar só.
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
 
 import json  # noqa: E402
 
