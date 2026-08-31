@@ -21,9 +21,21 @@
 #      mensagens ficar devido sozinho — o gatilho por acúmulo pede 12, que esta
 #      bateria nunca vai atingir. **Sem isso os `@60` e `@120` não significam
 #      nada e a bateria dá falso vermelho.**
-#   3. `keyko-dev.service` no ar (é ele que dispara LUCIEN por relógio).
-#   4. `kobe-lucien init` já rodado, senão a leitura corrente vai tentar
-#      mastigar o acervo inteiro em vez de olhar a conversa nova.
+#   3. `LUCIEN_INTERVAL_S` BAIXO (uns 30 s) — **descoberto na execução de
+#      30/08/2026, o roteiro não pedia**. Ele NÃO é a cadência das rodadas: é de
+#      quanto em quanto tempo o Keyko PERGUNTA se há lote devido. No default de
+#      300 s, a decisão do cenário 1 e a reversão do cenário 2 caem no MESMO
+#      lote — LUCIEN vê as duas juntas, registra só a segunda, o cenário 3 passa
+#      e o cenário 4 dá **falso vermelho** por não haver superação nenhuma para
+#      mostrar. O `@60` só significa alguma coisa se alguém perguntar dentro dos
+#      60 s.
+#   4. `keyko-dev.service` no ar (é ele que dispara LUCIEN por relógio).
+#   5. `kobe-lucien init` já rodado, senão a leitura corrente vai tentar
+#      mastigar o acervo inteiro em vez de olhar a conversa nova. ⚠️ **Rodar o
+#      `init` uma SEGUNDA vez, com o cursor incremental já no topo, apaga o
+#      backlog de reconstrução em silêncio** — bug aberto de 30/08/2026, ver
+#      `user-data/knowledge/kobe/pendencias/bugs.md`. Confira o `status` antes e
+#      depois.
 #
 # Conferir tudo de uma vez, antes de rodar:
 #     kobe-lucien --database-url postgresql:///kobe_dev status

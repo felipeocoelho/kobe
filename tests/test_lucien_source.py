@@ -67,11 +67,20 @@ def test_ligada_a_fonte_existe_e_se_chama_lucien(monkeypatch):
     assert s is not None and s.nome == "lucien"
 
 
-def test_a_chave_e_desligada_no_env_de_exemplo():
-    """*"Nasce atrás de chave, desligada"* — regra dura da fase. Ligar é ato do
-    operador, separado de publicar o código."""
+def test_a_chave_e_ligada_no_env_de_exemplo_e_diz_como_desligar():
+    """A fase NASCEU desligada — *"ligar é ato do operador, separado de publicar
+    o código"* — e o operador ligou, em 30/08/2026, mandando que fosse o padrão
+    de todos os ambientes, repo público inclusive.
+
+    O que este teste guarda mudou junto, e continua sendo o mesmo valor: a chave
+    não pode ficar IMPLÍCITA. Um default que só existe no código é um default
+    que ninguém lê antes de instalar. Então o `.env.example` tem que declarar a
+    chave **e** dizer como sair dela — porque quem herda um default ligado
+    precisa achar o caminho de volta sem ler o fonte."""
     env = (RAIZ / ".env.example").read_text(encoding="utf-8")
-    assert "LUCIEN_ENABLED=false" in env
+    assert "LUCIEN_ENABLED=true" in env
+    assert "LUCIEN_ENABLED=false" not in env
+    assert "Para desligar" in env
 
 
 def test_a_chave_desligada_faz_o_tick_nao_tocar_no_banco(monkeypatch):

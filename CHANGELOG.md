@@ -4,6 +4,56 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### chore(f3): LUCIEN nasce LIGADO — o default vira `true` em todo ambiente (2026-08-30)
+
+Ordem do operador: *"liga o Lucien, quero isso padrão em todos os ambientes,
+repo público inclusive caso aplicável"*. A fase nasceu atrás de chave e desligada
+de propósito — **publicar o código e ligar a chave são atos separados**, e o
+segundo é dele. Ele acabou de exercer o segundo.
+
+**O que muda:** `LUCIEN_ENABLED=true` no `.env.example`, que é o arquivo que uma
+instalação nova copia. Os quatro ambientes ficam iguais: dev VPS, prod VPS, repo
+dev e repo público.
+
+**Por que isto é seguro num instalador, e não só na VPS de quem mandou ligar:**
+instalação nova **não tem passado para ler**. LUCIEN lê por acúmulo, com teto por
+hora, e o que ele lê é conversa que ainda não existe. A conta cara do sistema é a
+**reconstrução** do histórico (`kobe-lucien reconstruir`) — e ela é um comando à
+parte, rodado à mão, que esta chave **nunca** dispara.
+
+**Como sair:** `LUCIEN_ENABLED=false` e reiniciar o Keyko. A fonte deixa de ser
+registrada, as cinco tabelas ficam inertes, e nada do que já foi escrito é
+apagado. O `.env.example` agora **diz isso no próprio bloco** — porque quem
+herda um default ligado precisa achar o caminho de volta sem ler o fonte.
+
+**O teste que guardava o default mudou de lado, e continua guardando o mesmo
+valor.** `test_a_chave_e_desligada_no_env_de_exemplo` virou
+`test_a_chave_e_ligada_no_env_de_exemplo_e_diz_como_desligar`: o que ele protege
+não era o `false`, era a chave não ficar **implícita**. Default que só existe no
+código é default que ninguém lê antes de instalar.
+
+**Reversão:** `LUCIEN_ENABLED=false` nos `.env` e `revert` deste commit para o
+`.env.example`.
+
+#### A bateria conversacional da F3 rodou, e passou — com um conserto no roteiro
+
+`tests/roteiros/f3-superacao.txt` rodou em dev com LUCIEN ligado. Cenário 3
+devolveu **uma** decisão vigente (`#3637`), citada; cenário 4 devolveu a anterior
+(`#3636`) como **superada**, com ponteiro para a substituta e data. É a régua da
+fase, e ela fechou verde.
+
+**A 1ª execução foi abortada por uma pré-condição que o roteiro não tinha.**
+`LUCIEN_INTERVAL_S` (default 300 s) não é a cadência das rodadas — é de quanto em
+quanto tempo o Keyko *pergunta* se há lote devido. Com ele no default, a decisão
+e a reversão caem no **mesmo lote**: LUCIEN vê as duas juntas, registra só a
+segunda, o cenário 3 passa e o cenário 4 dá **falso vermelho** por não haver
+superação para mostrar. A pré-condição entrou no roteiro, com o porquê.
+
+**O que a bateria ainda NÃO cobre:** `tests/roteiros/f3-regua.txt`, o teste
+histórico contra o passado real. Ele exige que a reconstrução tenha atravessado
+julho, e a reconstrução é comando à parte.
+
+
 ### fix(f3): a perna de relevância do estado vigente estava MORTA (2026-08-30)
 
 **O defeito mais grave da fase, e ele só apareceu no uso real.** Nenhum teste de

@@ -72,3 +72,12 @@ build/
 
 # Scripts locais de conveniência do mantenedor (não vai pra repo)
 claude.sh
+
+# O `.claude/` desta instalação — gerado, local, e com nome de plugin PRIVADO
+# dentro. `.claude/agents/*.md` são symlinks que o bot refaz a cada startup, um
+# por plugin instalado (`plugins/private/flow/...` inclusive); `settings.local.json`
+# é configuração da máquina. Não estava ignorado, e em 30/08/2026 entrou por
+# acidente num `git add -A` — foi retirado antes do push, mas o modo de falha é
+# claro: um `add -A` distraído publica no repo PÚBLICO a lista de plugins
+# privados desta instalação.
+.claude/

@@ -38,10 +38,12 @@ tópicos; o registro é global, com coluna de tópico (decisão E5).
 
 A CHAVE
 -------
-`LUCIEN_ENABLED=false` no `.env.example`. Desligado, a fonte **não é registrada**
-no Keyko (não basta ela existir e não fazer nada — uma fonte que aparece no log
-de inicialização sem trabalhar faz "quem o Keyko está observando" deixar de ser
-verdade) e as cinco tabelas ficam inertes.
+`LUCIEN_ENABLED=true` no `.env.example` desde 30/08/2026 — nasceu `false` e o
+operador mandou ligar por padrão em todos os ambientes, e isso é seguro numa
+instalação nova porque instalação nova não tem passado para ler. Desligado, a
+fonte **não é registrada** no Keyko (não basta ela existir e não fazer nada —
+uma fonte que aparece no log de inicialização sem trabalhar faz "quem o Keyko
+está observando" deixar de ser verdade) e as cinco tabelas ficam inertes.
 """
 
 from __future__ import annotations
