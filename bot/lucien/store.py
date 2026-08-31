@@ -10,8 +10,8 @@ uma afirmação errada no meio de uma conversa.
 Então: **`aplicar()` é o único lugar do Kobe que insere em `lucien_claims`.**
 O `kobe-lucien reverter` também passa por aqui. O modelo nunca toca no banco.
 
-AS NOVE TRAVAS
---------------
+AS DEZ TRAVAS
+-------------
 Nenhuma delas confia no modelo, e todas são contáveis — o que uma trava recusa
 vira `Recusa` no resultado e `claims_rejected` na linha da rodada.
 
@@ -25,6 +25,8 @@ vira `Recusa` no resultado e `claims_rejected` na linha da rodada.
     T8  dedupe contra o que já vale.
     T9  (em `worker.py`) resposta torta descarta a rodada inteira e NÃO avança
         o cursor.
+    T10 posição do operador (`decision`/`open`/`preference`) tem que vir do
+        OPERADOR — fala do agente sem nenhuma fala dele sustentando é recusada.
 
 A T1 é a que sustenta a fase. O banco já garante que a mensagem citada existe
 (chave estrangeira); a T1 garante que **o modelo a viu**. Sem ela, uma citação
@@ -71,6 +73,11 @@ logger = logging.getLogger("kobe.lucien.store")
 # registro ganharia a mesma afirmação duas vezes. O número é arbitrário e fixo —
 # é só um nome para o cadeado.
 LOCK_ID = 0x1AC1E4
+
+# Os tipos que são POSIÇÃO DO OPERADOR, e por isso passam pela T10. `fact` não
+# está aqui: o agente descrevendo como o sistema funciona é origem legítima de
+# fato — o que ele não pode é decidir, preferir ou abrir pendência no lugar dele.
+POSICOES_DO_OPERADOR = {"decision", "open", "preference"}
 
 
 def conectar(conninfo: str):
@@ -522,6 +529,50 @@ def _criar(cx, lote: Lote, p: ClaimProposta, por_seq: dict[int, Mensagem],
         ))
         return None
 
+    # A evidência extra: só os `seq` que estavam no lote. Calculada aqui porque
+    # a T10 (abaixo) e a T6 (confiança) dependem dela.
+    extras = {
+        int(s) for s in p.evidence_seqs
+        if _inteiro(s) and int(s) in por_seq and int(s) != origem.seq
+    }
+
+    # T10 — POSIÇÃO DO OPERADOR TEM QUE VIR DO OPERADOR.
+    #
+    # `decision`, `open` e `preference` são posições dele. O agente não decide,
+    # não tem preferência e não abre pendência sozinho — ele propõe, explica,
+    # pergunta. `fact` fica de fora da trava de propósito: o agente descrevendo
+    # como o sistema funciona é origem legítima de fato.
+    #
+    # O CASO MEDIDO, na bateria `f3-superacao`: LUCIEN registrou como pendência
+    # em aberto uma pergunta do PRÓPRIO agente — os três caminhos para o
+    # normalizador que ele ofereceu (`#3639`), e que o operador nunca pediu nem
+    # aceitou. A linha voltava no bloco "o que vale hoje", com `← #número` e
+    # cara de conferível. É o falso positivo com mais autoridade que esta fase
+    # pode produzir: quem lê o ESTADO o serve como conhecido.
+    #
+    # A PORTA QUE FICA ABERTA, e ela é o caso real: quando a substância está na
+    # fala do agente e o operador APROVOU ("pode", "fechado"), basta a mensagem
+    # dele estar em `evidence_seqs` — que é o que o prompt manda fazer. A trava
+    # não pergunta quem escreveu a frase; pergunta se **o operador está na
+    # conversa que a sustenta**.
+    #
+    # ASSIMÉTRICA DE PROPÓSITO: na dúvida, não registra. Uma decisão que ficou
+    # de fora reaparece na próxima conversa e é recuperável; uma proposta do
+    # agente virando estado vigente só é descoberta quando alguém agir sobre
+    # ela. E a recusa é CONTADA (vira `Recusa`, entra em `claims_rejected` e
+    # aparece no `relatorio`) — trava que descarta em silêncio é o mesmo defeito
+    # da origem inventada, visto do outro lado.
+    if p.kind in POSICOES_DO_OPERADOR and origem.role != "user":
+        if not any(por_seq[s].role == "user" for s in extras):
+            r.recusas.append(Recusa(
+                trava="T10",
+                motivo=f"[{p.kind}] nasceu de fala do agente (#{origem.seq}) e "
+                       "nenhuma mensagem do operador a sustenta — proposta do "
+                       "agente que ele não aceitou COM PALAVRAS não é estado",
+                trecho=p.statement[:120],
+            ))
+            return None
+
     # T8 — dedupe. Rodar de novo sobre o mesmo assunto não pode duplicar.
     chave = (slug(p.subject), _chave_dedupe(p.statement))
     if chave in ja_vale:
@@ -534,13 +585,6 @@ def _criar(cx, lote: Lote, p: ClaimProposta, por_seq: dict[int, Mensagem],
 
     # T5 — a data do FATO.
     valid_from = origem.created_at
-
-    # A evidência extra: só os `seq` que estavam no lote. Calculada ANTES do
-    # INSERT porque é ela que define a confiança (T6).
-    extras = {
-        int(s) for s in p.evidence_seqs
-        if _inteiro(s) and int(s) in por_seq and int(s) != origem.seq
-    }
 
     # T6 — a confiança sai de CORROBORAÇÃO, não do canal.
     #

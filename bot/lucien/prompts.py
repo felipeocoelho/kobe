@@ -29,6 +29,19 @@ A INSTRUÇÃO MAIS IMPORTANTE DO PROMPT
 garantia é a trava T1 em `store.py`, que descarta o que não estiver. Ela existe
 para que o modelo **acerte** em vez de ser recusado: uma trava que dispara muito
 gasta cota e enche o relatório de ruído.
+
+O CRITÉRIO DE *SPEECH ACT* (31/08/2026), E POR QUE ELE TAMBÉM TEM TRAVA
+------------------------------------------------------------------------
+Medido na bateria `f3-superacao`: LUCIEN registrou como **pendência em aberto**
+uma pergunta do **próprio agente** — os três caminhos para o normalizador que o
+agente ofereceu e que o operador nunca pediu nem aceitou (`#3639`). O registro
+passou a servir, no bloco *"o que vale hoje"*, uma oferta do agente com cara de
+posição do operador.
+
+`O_QUE_E_DURAVEL` ganhou o critério explícito — pergunta não é decisão, silêncio
+não é aceite, fala do agente não é posição do operador — e a **T10** em
+`store.py` o sustenta em código, pelo mesmo princípio das outras nove: o prompt
+faz o modelo acertar, a trava garante quando ele não acerta.
 """
 
 from __future__ import annotations
@@ -127,6 +140,32 @@ explorada, opinião de passagem, relato do que aconteceu num turno, saudação,
 pedido pontual que já foi atendido ali mesmo. Na dúvida, NÃO registre — o
 registro de estado é curto de propósito, e uma linha a mais custa mais que uma
 linha a menos.
+
+QUEM FALOU, E QUE TIPO DE FALA FOI — LEIA ANTES DE ESCREVER QUALQUER CLAIM
+--------------------------------------------------------------------------
+Cada mensagem abaixo vem marcada com **operador** ou **agente**. Isso não é
+enfeite: `decision`, `open` e `preference` são POSIÇÕES DO OPERADOR. O agente
+não decide, não tem preferência, e não abre pendência sozinho.
+
+  · **Pergunta não é decisão.** Nem a do operador ("será que a gente devia
+    mudar X?"), nem a do agente. Pergunta é pergunta.
+  · **Proposta do agente que o operador não aceitou COM PALAVRAS não é estado.**
+    O agente oferecer três caminhos não cria pendência nenhuma: cria uma oferta.
+    Só existe pendência se o OPERADOR disse que está esperando decidir.
+  · **Silêncio não é aceite.** Nem mudar de assunto, nem "deixa eu pensar", nem
+    o operador não ter respondido a proposta. Nada disso é aprovação.
+  · **Fala do agente não é posição do operador.** O agente explicando como o
+    sistema funciona pode virar `fact`. O agente sugerindo, propondo, opinando
+    ou perguntando **não vira nada**.
+
+Quando a substância está na fala do agente e o operador a ACEITOU ("pode",
+"fechado", "é isso"), a afirmação é legítima — e aí cite a mensagem do operador
+em `evidence_seqs`, porque é ela que sustenta a decisão.
+
+**A trava é assimétrica: na dúvida sobre quem estabeleceu aquilo, NÃO
+registre.** Uma decisão que ficou de fora aparece de novo na próxima conversa.
+Uma proposta sua virando "o que vale hoje" só é descoberta quando alguém agir
+com base nela.
 
 A SEGUNDA PERGUNTA É A QUE MAIS IMPORTA, e é a que hoje não existe em lugar
 nenhum: alguma coisa dita aqui CONTRADIZ, FECHA ou ABANDONA alguma das que já

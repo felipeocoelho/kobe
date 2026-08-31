@@ -86,11 +86,22 @@ def _garantir_psycopg() -> None:
     )
 
 
-def read_dotenv(keys: set[str]) -> dict[str, str]:
+def read_dotenv(keys: set[str], *, prefixo: str | None = None) -> dict[str, str]:
     """Lê chaves específicas do `.env` do projeto (parser mínimo, stdlib).
 
     Primeiro consulta `os.environ` (caso o serviço já exporte), depois faz
     fallback pro arquivo. Ignora comentários e tira aspas do valor.
+
+    `prefixo` pede **toda** chave que comece por ele (`LUCIEN_`), e não só as
+    nomeadas em `keys`. Existe porque uma lista de chaves é uma lista para ficar
+    desatualizada — é o mesmo erro que `_venv.py` documenta ter cometido três
+    vezes com listas de dependências. Quem carrega a configuração de um
+    subsistema quer a configuração dele inteira, não a que alguém lembrou de
+    listar. Com `prefixo`, o arquivo é sempre lido (não há como saber pelo
+    ambiente quais chaves *existiriam* nele).
+
+    O ambiente do processo continua vencendo o arquivo, sempre: quem exportou a
+    variável na mão quis aquilo.
     """
     found: dict[str, str] = {}
     for k in keys:
@@ -98,7 +109,7 @@ def read_dotenv(keys: set[str]) -> dict[str, str]:
         if v:
             found[k] = v
     missing = keys - found.keys()
-    if not missing:
+    if not missing and not prefixo:
         return found
     env_path = PROJECT_ROOT / ".env"
     if not env_path.is_file():
@@ -110,8 +121,9 @@ def read_dotenv(keys: set[str]) -> dict[str, str]:
                 continue
             key, _, val = line.partition("=")
             key = key.strip()
-            if key in missing:
-                found[key] = val.strip().strip("'").strip('"')
+            if key in missing or (prefixo and key.startswith(prefixo)):
+                # Do ambiente, se lá houver; do arquivo, se não.
+                found[key] = os.environ.get(key) or val.strip().strip("'").strip('"')
     except OSError:
         pass
     return found

@@ -58,6 +58,26 @@ Continua valendo o princípio: um ESTADO errado é **pior** que uma evidência
 errada — a evidência vem com a fala junto e quem lê julga; o estado vem curado e
 o agente serve como se fosse conhecido. Na dúvida, esta camada mostra de menos.
 
+A JANELA DE ECO, E POR QUE ELA TAMBÉM VALE AQUI — 31/08/2026
+--------------------------------------------------------------
+A camada de EVIDÊNCIA ignora por padrão os últimos 90 s (`JANELA_ECO_S`, com
+`--agora` para desligar) por um motivo mecânico: **o bot grava a mensagem do
+operador em `messages` ANTES de rodar o turno**. Sem a janela, a busca acha a
+própria pergunta e responde com ela.
+
+Esta camada não tinha esse mecanismo, e o buraco é pior aqui do que lá: uma
+afirmação nascida da mensagem que o operador acabou de mandar voltava, no mesmo
+turno, dentro do bloco *"o que vale hoje"*, **com carimbo de curado e origem
+citada**. Uma dúvida de trinta segundos atrás parecendo decisão vigente e
+conferível é exatamente o falso positivo com mais autoridade que este sistema
+pode produzir.
+
+Agora a janela é a mesma da evidência — literalmente, `bot.search.query.
+JANELA_ECO_S`, uma fonte só — e `--agora` desliga as duas juntas. O filtro é
+pela data da **mensagem de origem** (`source_message_id` é `NOT NULL`, então
+sempre há data), e a saída **diz quantas afirmações a janela cobre**: esconder
+em silêncio é o mesmo defeito visto do outro lado.
+
 QUANDO O REGISTRO NÃO EXISTE
 -----------------------------
 Um banco anterior à migration 008 (a produção, hoje) não tem estas tabelas. Isso
@@ -117,6 +137,11 @@ class ResultadoEstado:
     disponivel: bool = True
     erro: Optional[str] = None
     sentido_ativo: bool = True
+    # A janela de eco aplicada (0 = desligada, `--agora`) e quantas afirmações
+    # ela cobre. O segundo número sai na tela: esconder em silêncio é o mesmo
+    # defeito de outro lado.
+    janela_eco_s: float = 0.0
+    ignoradas_pelo_eco: int = 0
 
     @property
     def vazio(self) -> bool:
@@ -177,8 +202,15 @@ def buscar_estado(
     topic_id=None,
     seqs_da_evidencia: Optional[Iterable[int]] = None,
     limite: int = 8,
+    janela_eco: Optional[float] = None,
 ) -> ResultadoEstado:
-    """As afirmações que respondem à pergunta. **Nunca levanta.**"""
+    """As afirmações que respondem à pergunta. **Nunca levanta.**
+
+    `janela_eco` em segundos: afirmações cuja mensagem de ORIGEM é mais nova que
+    isso ficam de fora (ver o cabeçalho). `None` usa a mesma janela da camada de
+    evidência — uma fonte só, para as duas camadas não divergirem em silêncio.
+    `0` desliga, que é o que `kobe-remember --agora` faz.
+    """
     r = ResultadoEstado()
     try:
         montado = existe(db)
@@ -213,6 +245,29 @@ def buscar_estado(
     filtro_topico = " AND c.topic_id = %s" if topic_id else ""
     p_topico = [topic_id] if topic_id else []
 
+    # ── A janela de eco, nas quatro pernas ─────────────────────────────────
+    # Filtro no SQL (e não depois, em Python) porque o relógio que decide é o do
+    # banco, o mesmo que a camada de evidência usa. O que se perde ao filtrar
+    # cedo — saber QUAIS caíram — a contagem abaixo devolve, e é a mesma
+    # semântica de `ignoradas_pelo_eco` de lá: quantas a janela cobre.
+    r.janela_eco_s = float(q.JANELA_ECO_S if janela_eco is None else (janela_eco or 0.0))
+    filtro_eco = ""
+    p_recorte = list(p_topico)
+    if r.janela_eco_s > 0:
+        filtro_eco = " AND m.created_at <= NOW() - make_interval(secs => %s)"
+        p_recorte.append(r.janela_eco_s)
+        try:
+            r.ignoradas_pelo_eco = int(db.scalar(
+                "SELECT COUNT(*) FROM lucien_claims c"
+                " JOIN messages m ON m.id = c.source_message_id"
+                " WHERE m.created_at > NOW() - make_interval(secs => %s)"
+                + filtro_topico,
+                [r.janela_eco_s, *p_topico],
+            ) or 0)
+        except Exception:  # noqa: BLE001 — diagnóstico não derruba a consulta
+            r.ignoradas_pelo_eco = 0
+    filtro = filtro_topico + filtro_eco
+
     # ── Perna 4 primeiro: a mais precisa, e a que não depende das palavras ──
     #
     # ⚠️ Ela HERDA a força do veredito da evidência, e é quem chama que decide se
@@ -227,9 +282,9 @@ def buscar_estado(
         try:
             _juntar(db.query(
                 f"SELECT {_CAMPOS}{_DE}"
-                f" WHERE c.source_seq = ANY(%s){filtro_topico}"
+                f" WHERE c.source_seq = ANY(%s){filtro}"
                 " ORDER BY c.valid_from DESC LIMIT %s",
-                [seqs, *p_topico, limite * 2],
+                [seqs, *p_recorte, limite * 2],
             ), "origem")
         except Exception:  # noqa: BLE001
             logger.exception("estado: a perna de origem falhou")
@@ -240,9 +295,9 @@ def buscar_estado(
         for t in toks[:5]:
             _juntar(db.query(
                 f"SELECT {_CAMPOS}{_DE}"
-                f" WHERE (c.statement ILIKE %s OR c.subject ILIKE %s){filtro_topico}"
+                f" WHERE (c.statement ILIKE %s OR c.subject ILIKE %s){filtro}"
                 " ORDER BY c.valid_from DESC LIMIT %s",
-                [f"%{t}%", f"%{t}%", *p_topico, limite],
+                [f"%{t}%", f"%{t}%", *p_recorte, limite],
             ), "literal")
     except Exception:  # noqa: BLE001
         logger.exception("estado: a perna literal falhou")
@@ -254,9 +309,9 @@ def buscar_estado(
             consulta = " | ".join(sorted(pesos, key=lambda w: -pesos[w])[:8])
             _juntar(db.query(
                 f"SELECT {_CAMPOS}{_DE}"
-                f" WHERE c.search_tsv @@ to_tsquery('portuguese', %s){filtro_topico}"
+                f" WHERE c.search_tsv @@ to_tsquery('portuguese', %s){filtro}"
                 " ORDER BY c.valid_from DESC LIMIT %s",
-                [consulta, *p_topico, limite],
+                [consulta, *p_recorte, limite],
             ), "palavra")
     except Exception:  # noqa: BLE001
         logger.exception("estado: a perna de palavra falhou")
@@ -267,10 +322,10 @@ def buscar_estado(
         _juntar(db.query(
             f"SELECT {_CAMPOS}, 1 - (c.embedding <=> %s::vector) AS cos{_DE}"
             f" WHERE c.embedding IS NOT NULL"
-            f"   AND 1 - (c.embedding <=> %s::vector) >= %s{filtro_topico}"
+            f"   AND 1 - (c.embedding <=> %s::vector) >= %s{filtro}"
             " ORDER BY cos DESC LIMIT %s",
             [embedder.para_sql(vetor), embedder.para_sql(vetor), cfg.piso_cos(),
-             *p_topico, limite],
+             *p_recorte, limite],
         ), "sentido", cos_de="cos")
     except embedder.EmbeddingIndisponivel as exc:
         r.sentido_ativo = False
@@ -291,10 +346,18 @@ def buscar_estado(
     ids_vigentes = [a.id for a in r.vigentes]
     if ids_vigentes:
         try:
+            # A janela de eco vale aqui também: a superada aparece na tela com o
+            # mesmo peso de curada, e uma nascida há trinta segundos teria o
+            # mesmo problema. (Sem o filtro de tópico: a substituída pode ser de
+            # outro tópico, e escondê-la deixaria a linha "→ substituída por"
+            # sem o par.)
             ligadas = db.query(
                 f"SELECT {_CAMPOS}{_DE} WHERE c.superseded_by = ANY(%s)"
-                " ORDER BY c.valid_to DESC LIMIT %s",
-                [ids_vigentes, limite * SUPERADAS_POR_VIGENTE],
+                + (filtro_eco if r.janela_eco_s > 0 else "")
+                + " ORDER BY c.valid_to DESC LIMIT %s",
+                [ids_vigentes,
+                 *([r.janela_eco_s] if r.janela_eco_s > 0 else []),
+                 limite * SUPERADAS_POR_VIGENTE],
             )
             for l in ligadas:
                 if str(l["id"]) not in {a.id for a in encerradas}:

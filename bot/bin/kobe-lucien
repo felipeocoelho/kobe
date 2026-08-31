@@ -30,6 +30,13 @@ O BANCO NÃO TEM DEFAULT, DE PROPÓSITO
 `DATABASE_URL` ou `--database-url`. Apontar para o banco errado tem que custar um
 ato explícito — o `migrate.py` já segue essa regra, e já houve caso de comando
 rodado da pasta de dev acertar o banco de produção.
+
+A CONFIGURAÇÃO VEM DO `.env`; O DESTINO, NÃO
+---------------------------------------------
+As chaves `LUCIEN_*` são carregadas do `.env` do projeto (ambiente do processo
+vence o arquivo) e o `status` **diz de onde leu** cada afirmação que faz sobre o
+estado do sistema. `DATABASE_URL` fica deliberadamente fora desse carregamento —
+ver `_carregar_config_do_projeto()`.
 """
 
 from __future__ import annotations
@@ -72,6 +79,71 @@ def _home() -> str:
     return os.environ.get("KOBE_HOME") or str(_RAIZ)
 
 
+# ── A configuração, e de onde ela veio ────────────────────────────────────
+#
+# ESTE HELPER DIZIA "DESLIGADA" COM A CHAVE LIGADA — 30/08/2026
+# --------------------------------------------------------------
+# Ele lia `LUCIEN_ENABLED` do ambiente do PROCESSO e não carregava o `.env` do
+# projeto. Rodado de um shell qualquer — que é exatamente como se roda um
+# comando de diagnóstico — imprimia `chave LUCIEN_ENABLED: DESLIGADA` com a
+# chave ligada no arquivo e a fonte registrada no Keyko (conferido: o
+# `journalctl` mostrava `source registrada: lucien` no mesmo minuto).
+#
+# É o pior lugar possível para esse erro: `status` existe justamente para *dar
+# voz ao silêncio* — distinguir "LUCIEN parou" de "não havia nada novo". Um
+# diagnóstico que erra a primeira linha manda o operador investigar problema que
+# não existe, ou confirma um falso "está desligado, pode mexer".
+#
+# O CONSERTO TEM DUAS METADES, E A SEGUNDA É A QUE IMPORTA MAIS
+# --------------------------------------------------------------
+# 1. carregar o `.env` do projeto, como os outros helpers já fazem;
+# 2. **dizer de onde leu**. Afirmação sobre o estado do sistema sai com
+#    procedência, que é a regra da casa — e é o que salva o caso em que o
+#    `.env` do projeto não é o do ambiente que se está diagnosticando.
+#
+# `DATABASE_URL` FICA DE FORA, DE PROPÓSITO
+# ------------------------------------------
+# O cabeçalho deste arquivo declara que não há banco default porque "apontar
+# pro banco errado tem que custar um ato explícito", e o `bugs.md` que pede este
+# conserto lembra que já houve comando rodado da pasta de dev acertando o banco
+# de produção. Então: carrega-se **configuração**, nunca o **destino**.
+
+PREFIXO_CONFIG = "LUCIEN_"
+
+# Preenchido por `_carregar_config_do_projeto()`: chave → de onde ela veio.
+_FONTE: dict[str, str] = {}
+
+
+def _carregar_config_do_projeto() -> dict[str, str]:
+    """Põe as chaves `LUCIEN_*` do `.env` no ambiente, sem pisar no que já veio
+    exportado, e guarda a procedência de cada uma."""
+    try:
+        from _kobe_topic import read_dotenv
+    except Exception:  # noqa: BLE001 — diagnóstico não pode derrubar o helper
+        return {}
+    try:
+        do_arquivo = read_dotenv(set(), prefixo=PREFIXO_CONFIG)
+    except Exception:  # noqa: BLE001
+        return {}
+    novas = {}
+    for chave, valor in do_arquivo.items():
+        if os.environ.get(chave):
+            _FONTE[chave] = "ambiente do processo"
+        else:
+            os.environ[chave] = valor
+            _FONTE[chave] = f"{_RAIZ / '.env'}"
+            novas[chave] = valor
+    return novas
+
+
+def _fonte(chave: str) -> str:
+    if chave in _FONTE:
+        return _FONTE[chave]
+    if os.environ.get(chave):
+        return "ambiente do processo"
+    return f"não achei — nem no ambiente, nem em {_RAIZ / '.env'}"
+
+
 def _dia(v) -> str:
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -107,11 +179,22 @@ def _idade(v) -> str:
 
 
 def cmd_init(args) -> int:
+    """Finca o marco — e MOSTRA o que o backlog de reconstrução era antes e
+    ficou depois.
+
+    O antes/depois não é enfeite: o defeito que este comando teve até 31/08/2026
+    era **silencioso e parecia sucesso** — a segunda execução punha o cursor de
+    reconstrução no topo e o backlog inteiro sumia com cara de trabalho
+    terminado. Um comando que mexe em cursor tem que dizer o que fez com o
+    trabalho pendente, senão quem lê a saída não tem como saber.
+    """
     from bot.lucien import reconstrucao, store
 
     cx = store.conectar(_url(args))
     try:
-        marcos = reconstrucao.fincar_marco(cx)
+        antes = reconstrucao.planejar(cx)
+        marcos = reconstrucao.fincar_marco(cx, refincar=args.refincar)
+        depois = reconstrucao.planejar(cx)
         if not args.ensaio:
             cx.commit()
         print(
@@ -119,11 +202,30 @@ def cmd_init(args) -> int:
             f"{len(marcos)} tópico(s):"
         )
         for m in marcos:
-            print(f"  {m['topico']:<24} até #{m['topo']}  ({m['mensagens']} mensagens)")
+            if m["refincado"]:
+                nota = f"· reconstrução REFINCADA em #{m['ja_lido']}"
+            elif m["tem_cursor_reconstrucao"]:
+                nota = f"· reconstrução preservada em #{m['reconstruido_ate']}"
+            else:
+                nota = "· reconstrução intocada (varre desde o começo)"
+            print(f"  {m['topico']:<24} até #{m['topo']}  "
+                  f"({m['mensagens']} mensagens) {nota}")
+        print()
+        print(f"backlog a reconstruir: {antes.mensagens} mensagem(ns) antes → "
+              f"{depois.mensagens} depois.")
+        if depois.mensagens < antes.mensagens:
+            print("  ⚠️  o backlog ENCOLHEU — foi o `--refincar`, e ele é o único "
+                  "caminho que faz isso.")
         print()
         print("Daqui pra frente a leitura corrente acompanha a conversa nova.")
         print("O que ficou para trás é trabalho da reconstrução:")
         print("    kobe-lucien reconstruir --ensaio")
+        if not args.refincar:
+            print()
+            print("(O cursor de RECONSTRUÇÃO não foi tocado — de propósito. Ele só "
+                  "sobe quando a varredura de fato lê. Se você sabe que o passado "
+                  "anterior ao cursor incremental já foi lido, `--refincar` diz "
+                  "isso por escrito.)")
         return 0
     finally:
         cx.close()
@@ -143,7 +245,12 @@ def cmd_status(args) -> int:
             print("o registro de estado NÃO existe neste banco (falta a migration 008).")
             return 3
 
-        print(f"chave LUCIEN_ENABLED: {'ligada' if cfg.habilitado() else 'DESLIGADA'}")
+        # A procedência sai junto, sempre. Este comando afirma o estado do
+        # sistema; afirmação sem fonte é o que fez ele dizer DESLIGADA com a
+        # chave ligada no arquivo.
+        print(f"chave LUCIEN_ENABLED: "
+              f"{'ligada' if cfg.habilitado() else 'DESLIGADA'}"
+              f"  (fonte: {_fonte('LUCIEN_ENABLED')})")
         cur.execute(
             "SELECT status, COUNT(*) n FROM lucien_claims GROUP BY status ORDER BY 1"
         )
@@ -380,6 +487,12 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("init", help="finca o marco 'daqui pra frente'")
     p.add_argument("--ensaio", action="store_true", help="mostra e não grava")
+    p.add_argument(
+        "--refincar", action="store_true",
+        help="ATO EXPLÍCITO: também põe o cursor de reconstrução onde o "
+             "incremental está, declarando que o passado anterior a ele já foi "
+             "lido. ENCOLHE o backlog — sem a flag, `init` não toca nesse cursor.",
+    )
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("status", help="o registro está vivo? LUCIEN rodou?")
@@ -410,6 +523,12 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_reverter)
 
     args = ap.parse_args(argv)
+    # ANTES de despachar: as chaves `LUCIEN_*` do `.env` entram no ambiente.
+    # Vale para todos os subcomandos, não só o `status` — `rodada` e
+    # `reconstruir` rodados à mão caíam nos defaults do código enquanto o `.env`
+    # dizia outra coisa (modelo, tamanho de lote), que é a mesma divergência
+    # silenciosa vista de outro ângulo. O destino do banco continua de fora.
+    _carregar_config_do_projeto()
     return args.func(args)
 
 

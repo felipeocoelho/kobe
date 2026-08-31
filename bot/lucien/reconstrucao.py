@@ -116,45 +116,75 @@ def planejar(cx, *, topic_id: Optional[str] = None) -> Plano:
     return Plano(topicos=linhas)
 
 
-def fincar_marco(cx) -> list[dict]:
-    """Põe o cursor incremental no `seq` mais alto de cada tópico — e o de
-    reconstrução onde o incremental estava.
+def fincar_marco(cx, *, refincar: bool = False) -> list[dict]:
+    """Põe o cursor incremental no `seq` mais alto de cada tópico. **Só ele.**
 
-    **Os dois, e não só um.** O invariante que se quer é que cada mensagem seja
-    lida exatamente uma vez, por exatamente uma das duas leituras. Chamando de
-    `C` a posição atual do cursor incremental e de `M` o topo do tópico:
+    O invariante que se quer é que cada mensagem seja lida exatamente uma vez,
+    por exatamente uma das duas leituras. Chamando de `C` a posição atual do
+    cursor incremental e de `M` o topo do tópico:
 
         já lido pela leitura corrente   (0, C]
         a reconstruir                   (C, M]
         leitura corrente daqui pra frente   (M, ∞)
 
-    Se o cursor de reconstrução ficasse em zero, a varredura refaria `(0, C]` —
-    trecho que a leitura corrente já processou. A T8 (dedupe) seguraria as
-    duplicatas, mas a cota gasta não volta. Num sistema recém-instalado `C` é
-    zero e nada muda; o caso em que isto morde é o de sempre — alguém rodou uma
-    passada antes de fincar o marco.
+    O ATO QUE ESTA FUNÇÃO NÃO FAZ MAIS, E POR QUE — 31/08/2026
+    -----------------------------------------------------------
+    Ela também punha o cursor de RECONSTRUÇÃO em `C`, para que a varredura não
+    refizesse `(0, C]` — trecho que a leitura corrente já teria processado. A
+    intenção era boa e o efeito, na segunda execução, era **apagar o passado a
+    reconstruir em silêncio**: com o incremental já no topo, `C` É o topo, o
+    intervalo `(C, M]` vira vazio e `planejar()` passa a responder *"nada
+    pendente"* — com a mesma cara de quem terminou o trabalho. Visto ao vivo em
+    30/08/2026, ligando o LUCIEN: o backlog de 3.595 mensagens do dev sumiu num
+    `init` rodado como pré-condição de um roteiro.
 
-    Idempotente e **nunca anda para trás** (o `GREATEST` do `_avancar_cursor`),
-    então rodar de novo depois de meses não faz LUCIEN pular conversa.
+    E a docstring de então **prometia idempotência**, o que fazia quem lesse
+    rodar de novo com confiança. Era verdade para o cursor incremental (o
+    `GREATEST` do `_avancar_cursor` nunca anda para trás) e falsa para o outro,
+    onde andar para a frente É o dano.
+
+    Não bastava "só gravar se ainda não existir": a produção escapou justamente
+    porque lá o cursor de reconstrução **nunca chegou a ser criado** (o
+    incremental estava em zero na primeira fincada, e a guarda `if ja_lido > 0`
+    segurou). Uma regra baseada em existência deixaria a bomba armada para o
+    `init` seguinte. O invariante que sobra é o mais forte e o mais simples:
+
+        **o cursor de reconstrução nunca sobe por obra do `init`.**
+        Ele só sobe quando a reconstrução de fato leu.
+
+    Quem quiser o efeito antigo pede por escrito, com `refincar=True` — e aí é
+    ato explícito de quem sabe que aquele `(0, C]` já foi lido. Sem ele, o preço
+    é a varredura reler `(0, C]`: **cota gasta, nunca registro perdido** (a T8
+    segura a duplicata). É a assimetria certa para um comando cujo modo de falha
+    era silencioso e parecia sucesso.
     """
     cur = cx.cursor()
     cur.execute(
         "SELECT t.id AS topic_id, COALESCE(t.current_name,'(sem nome)') AS topico,"
         "       MAX(m.seq) AS topo, COUNT(m.id) AS mensagens,"
-        "       COALESCE(c.last_seq, 0) AS ja_lido"
+        "       COALESCE(c.last_seq, 0) AS ja_lido,"
+        "       COALESCE(r.last_seq, 0) AS reconstruido_ate,"
+        "       (r.topic_id IS NOT NULL) AS tem_cursor_reconstrucao"
         "  FROM topics t JOIN messages m ON m.topic_id = t.id"
         "  LEFT JOIN lucien_cursor c"
         "    ON c.topic_id = t.id AND c.scope = 'incremental'"
+        "  LEFT JOIN lucien_cursor r"
+        "    ON r.topic_id = t.id AND r.scope = 'reconstruction'"
         " WHERE m.role IN ('user','assistant')"
-        " GROUP BY t.id, t.current_name, c.last_seq ORDER BY 4 DESC"
+        " GROUP BY t.id, t.current_name, c.last_seq, r.topic_id, r.last_seq"
+        " ORDER BY 4 DESC"
     )
     marcos = cur.fetchall()
+    saida = []
     for m in marcos:
         alvo = str(m["topic_id"])
-        if int(m["ja_lido"]) > 0:
+        d = dict(m)
+        d["refincado"] = bool(refincar and int(m["ja_lido"]) > 0)
+        if d["refincado"]:
             store._avancar_cursor(cx, "reconstruction", alvo, int(m["ja_lido"]))
         store._avancar_cursor(cx, "incremental", alvo, int(m["topo"]))
-    return [dict(m) for m in marcos]
+        saida.append(d)
+    return saida
 
 
 def rodar(

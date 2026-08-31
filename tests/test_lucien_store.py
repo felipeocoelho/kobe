@@ -67,17 +67,25 @@ def lote(cx) -> Lote:
     Vem do banco de verdade porque a chave estrangeira de origem é `NOT NULL` —
     não há como testar a trava com identificador inventado, que é justamente o
     ponto.
+
+    **As duas são do OPERADOR**, e isso passou a importar em 31/08/2026 com a
+    T10: uma `decision` nascida de fala do agente sem nenhuma fala dele
+    sustentando é recusada. Os testes deste arquivo exercitam as OUTRAS travas —
+    a proposta deles tem que ser legítima em tudo mais, senão eles passariam a
+    medir a T10 por acidente. (No acervo real, a mensagem de texto mais recente
+    é quase sempre do agente; a fixture antiga pegava justamente essa.)
     """
     cur = cx.cursor()
     cur.execute(
         "SELECT id, seq, topic_id, role, content, created_at, audio_transcribed"
-        "  FROM messages WHERE audio_transcribed = false"
+        "  FROM messages WHERE audio_transcribed = false AND role = 'user'"
         " ORDER BY seq DESC LIMIT 1"
     )
     texto = cur.fetchone()
     cur.execute(
         "SELECT id, seq, topic_id, role, content, created_at, audio_transcribed"
-        "  FROM messages WHERE audio_transcribed = true AND topic_id = %s"
+        "  FROM messages WHERE audio_transcribed = true AND role = 'user'"
+        "   AND topic_id = %s"
         " ORDER BY seq DESC LIMIT 1",
         (texto["topic_id"],),
     )
@@ -113,9 +121,20 @@ def _proposta(lote: Lote, **kw) -> Proposta:
 
 
 def _vigentes(cx, topic_id):
+    """As vigentes que **esta transação** criou — não as que já estavam no banco.
+
+    O recorte por `run_id` de uma rodada `model='teste'` entrou em 31/08/2026: as
+    rodadas de teste só existem dentro da transação revertida, então isto isola o
+    teste do acervo. Sem ele, um banco de integração que já tenha afirmações no
+    tópico faz `assert not _vigentes(...)` falhar por **resíduo**, e `[0]`
+    devolver a afirmação errada. Aconteceu com o `kobe_dev` depois da bateria da
+    F3: `test_T1_origem_fora_do_lote_e_descartada` acusava gravação que não
+    houve.
+    """
     cur = cx.cursor()
     cur.execute(
         "SELECT * FROM lucien_claims WHERE topic_id=%s AND status='vigente'"
+        "   AND run_id IN (SELECT id FROM lucien_runs WHERE model = 'teste')"
         " ORDER BY valid_from",
         (topic_id,),
     )
@@ -529,7 +548,163 @@ def test_encerramento_de_apelido_nao_mostrado_e_recusado(cx, lote, rodada):
 # ── O cursor ──────────────────────────────────────────────────────────────
 
 
+# ── T10 — posição do operador tem que vir do OPERADOR ─────────────────────
+#
+# O CASO MEDIDO, e ele é o motivo desta trava existir: na bateria
+# `f3-superacao`, LUCIEN registrou como **pendência em aberto** uma pergunta do
+# PRÓPRIO agente — os três caminhos para o normalizador que o agente ofereceu
+# (`#3639`) e que o operador nunca pediu nem aceitou. A linha voltava no bloco
+# "o que vale hoje", com `← #número` e cara de conferível.
+#
+# É o falso positivo com mais autoridade que esta fase pode produzir: a
+# evidência vem com a fala junto e quem lê julga; o estado vem curado e o agente
+# o serve como conhecido.
+
+
+@pytest.fixture
+def lote_com_agente(cx) -> Lote:
+    """Um lote real com as DUAS vozes: uma fala do agente e uma do operador."""
+    cur = cx.cursor()
+    cur.execute(
+        "SELECT id, seq, topic_id, role, content, created_at, audio_transcribed"
+        "  FROM messages WHERE role = 'assistant' ORDER BY seq DESC LIMIT 1"
+    )
+    agente = cur.fetchone()
+    if agente is None:
+        pytest.skip("acervo de teste sem fala do agente")
+    cur.execute(
+        "SELECT id, seq, topic_id, role, content, created_at, audio_transcribed"
+        "  FROM messages WHERE role = 'user' AND topic_id = %s AND seq < %s"
+        " ORDER BY seq DESC LIMIT 1",
+        (agente["topic_id"], agente["seq"]),
+    )
+    operador = cur.fetchone()
+    if operador is None:
+        pytest.skip("acervo de teste sem fala do operador antes da do agente")
+
+    msgs = [
+        Mensagem(seq=int(m["seq"]), id=str(m["id"]), role=m["role"],
+                 created_at=m["created_at"], content=m["content"] or "",
+                 audio=bool(m["audio_transcribed"]))
+        for m in (operador, agente)
+    ]
+    return Lote(topic_id=str(agente["topic_id"]), topico_nome="teste", mensagens=msgs)
+
+
+def _do_agente(lote: Lote) -> int:
+    return max(m.seq for m in lote.mensagens if m.role == "assistant")
+
+
+def _do_operador(lote: Lote) -> int:
+    return max(m.seq for m in lote.mensagens if m.role == "user")
+
+
+@pytest.mark.parametrize("kind", ["decision", "open", "preference"])
+def test_T10_posicao_do_operador_nascida_de_fala_do_agente_e_recusada(
+    cx, lote_com_agente, kind
+):
+    """Proposta do agente que o operador não aceitou COM PALAVRAS não é estado.
+
+    O agente não decide, não prefere e não abre pendência sozinho — ele propõe,
+    explica, pergunta.
+    """
+    lote = lote_com_agente
+    rodada = store.abrir_rodada(cx, mode="incremental", topic_id=lote.topic_id,
+                                lote=lote, model="teste")
+    r = store.aplicar(
+        cx, lote,
+        _proposta(lote, kind=kind, source_seq=_do_agente(lote), evidence_seqs=[]),
+        run_id=rodada,
+    )
+    assert r.criadas == 0
+    assert [x.trava for x in r.recusas] == ["T10"]
+    assert "não é estado" in r.recusas[0].motivo
+    assert not _vigentes(cx, lote.topic_id)
+
+
+def test_T10_a_recusa_e_CONTADA_na_linha_da_rodada(cx, lote_com_agente):
+    """Trava que descarta em silêncio é o mesmo defeito da origem inventada,
+    visto do outro lado. Se o modelo estiver propondo posição no lugar do
+    operador, isso tem que aparecer no `relatorio`."""
+    lote = lote_com_agente
+    rodada = store.abrir_rodada(cx, mode="incremental", topic_id=lote.topic_id,
+                                lote=lote, model="teste")
+    r = store.aplicar(
+        cx, lote,
+        _proposta(lote, kind="open", source_seq=_do_agente(lote), evidence_seqs=[]),
+        run_id=rodada,
+    )
+    store.fechar_rodada(cx, rodada, r)
+    cur = cx.cursor()
+    cur.execute("SELECT claims_rejected FROM lucien_runs WHERE id = %s", (rodada,))
+    assert cur.fetchone()["claims_rejected"] == 1
+
+
+def test_T10_com_a_fala_do_operador_na_evidencia_a_afirmacao_ENTRA(cx, lote_com_agente):
+    """A porta que fica aberta, e é o caso real: a substância está na fala do
+    agente e o operador aprovou ("pode", "fechado"). A trava não pergunta quem
+    escreveu a frase — pergunta se o operador está na conversa que a sustenta."""
+    lote = lote_com_agente
+    rodada = store.abrir_rodada(cx, mode="incremental", topic_id=lote.topic_id,
+                                lote=lote, model="teste")
+    r = store.aplicar(
+        cx, lote,
+        _proposta(lote, kind="decision", source_seq=_do_agente(lote),
+                  evidence_seqs=[_do_operador(lote)]),
+        run_id=rodada,
+    )
+    assert r.criadas == 1 and not r.recusas
+    assert len(_vigentes(cx, lote.topic_id)) == 1
+
+
+def test_T10_FATO_dito_pelo_agente_continua_entrando(cx, lote_com_agente):
+    """`fact` fica de fora da trava de propósito: o agente descrevendo como o
+    sistema funciona é origem legítima de fato. O que ele não pode é decidir,
+    preferir ou abrir pendência no lugar do operador."""
+    lote = lote_com_agente
+    rodada = store.abrir_rodada(cx, mode="incremental", topic_id=lote.topic_id,
+                                lote=lote, model="teste")
+    r = store.aplicar(
+        cx, lote,
+        _proposta(lote, kind="fact", source_seq=_do_agente(lote), evidence_seqs=[]),
+        run_id=rodada,
+    )
+    assert r.criadas == 1 and not r.recusas
+
+
+def test_T10_decisao_do_operador_passa_sem_evidencia_nenhuma(cx, lote_com_agente):
+    """A trava é assimétrica: ela só olha para o que nasceu do agente. A fala do
+    operador continua bastando sozinha."""
+    lote = lote_com_agente
+    rodada = store.abrir_rodada(cx, mode="incremental", topic_id=lote.topic_id,
+                                lote=lote, model="teste")
+    r = store.aplicar(
+        cx, lote,
+        _proposta(lote, kind="decision", source_seq=_do_operador(lote),
+                  evidence_seqs=[]),
+        run_id=rodada,
+    )
+    assert r.criadas == 1 and not r.recusas
+
+
+def _fixar_cursor(cx, topic_id, valor: int) -> None:
+    """Põe o cursor num valor EXATO — `_avancar_cursor` só sobe (`GREATEST`).
+
+    Necessário porque o banco de integração é um acervo vivo: o cursor real do
+    tópico pode já estar acima do lote, e aí "avançou até o fim do lote" seria
+    medido contra um número que a rodada não escreveu. Dentro da transação
+    revertida, como tudo aqui.
+    """
+    cx.cursor().execute(
+        "INSERT INTO lucien_cursor (scope, topic_id, last_seq)"
+        " VALUES ('incremental', %s, %s)"
+        " ON CONFLICT (scope, topic_id) DO UPDATE SET last_seq = EXCLUDED.last_seq",
+        (topic_id, valor),
+    )
+
+
 def test_o_cursor_avanca_ate_o_fim_do_lote(cx, lote, rodada):
+    _fixar_cursor(cx, lote.topic_id, (lote.de_seq or 1) - 1)
     store.aplicar(cx, lote, _proposta(lote), run_id=rodada)
     cur = cx.cursor()
     cur.execute("SELECT last_seq FROM lucien_cursor WHERE scope='incremental'"
@@ -540,6 +715,7 @@ def test_o_cursor_avanca_ate_o_fim_do_lote(cx, lote, rodada):
 def test_o_cursor_nao_anda_para_tras(cx, lote, rodada):
     """Duas rodadas fora de ordem (uma reconstrução lenta terminando depois de
     uma incremental) não podem fazer o sistema reler o que já leu."""
+    _fixar_cursor(cx, lote.topic_id, (lote.de_seq or 1) - 1)
     store.aplicar(cx, lote, _proposta(lote), run_id=rodada)
     store._avancar_cursor(cx, "incremental", lote.topic_id, lote.ate_seq - 1000)
     cur = cx.cursor()

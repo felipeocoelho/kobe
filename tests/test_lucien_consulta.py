@@ -49,12 +49,17 @@ _URL = os.getenv("KOBE_TEST_DATABASE_URL", "")
 class _DbFalso:
     """Devolve o que lhe mandarem devolver, por trecho da consulta."""
 
-    def __init__(self, por_trecho=None, existe=True):
+    def __init__(self, por_trecho=None, existe=True, contagem=0):
         self.por_trecho = por_trecho or {}
         self._existe = existe
+        self._contagem = contagem
         self.consultas = []
+        self.escalares = []
 
     def scalar(self, sql, params=()):
+        self.escalares.append(sql)
+        if "COUNT(*)" in sql:
+            return self._contagem
         return self._existe
 
     def query(self, sql, params=()):
@@ -208,6 +213,62 @@ def test_sem_seq_da_evidencia_a_perna_de_origem_nao_roda():
     assert not any("source_seq = ANY" in s for s in db.consultas)
 
 
+# ── Defeito 4: a camada ESTADO não tinha janela de eco ────────────────────
+#
+# A camada de EVIDÊNCIA ignora os últimos 90 s porque o bot grava a mensagem do
+# operador em `messages` ANTES de rodar o turno — sem isso a busca acha a
+# própria pergunta. Esta camada não tinha o mecanismo, e aqui o buraco é pior:
+# uma afirmação nascida da mensagem que ele acabou de mandar voltava, no mesmo
+# turno, dentro de "o que vale hoje", COM CARIMBO DE CURADO e origem citada.
+
+
+def _pernas_no_sql(db):
+    return [s for s in db.consultas if " FROM lucien_claims c" in s]
+
+
+def test_a_janela_de_eco_entra_em_TODAS_as_pernas():
+    from bot.search import query as q
+
+    db = _DbFalso()
+    r = consulta.buscar_estado(db, "compat_gate", seqs_da_evidencia=[3059])
+
+    assert r.janela_eco_s == q.JANELA_ECO_S, "a janela não é a mesma da evidência"
+    pernas = _pernas_no_sql(db)
+    assert pernas, "nenhuma perna rodou — o teste não prova nada"
+    for sql in pernas:
+        assert "make_interval(secs =>" in sql, f"perna sem janela de eco: {sql[:80]}"
+
+
+def test_agora_desliga_a_janela_nas_duas_camadas():
+    """`kobe-remember --agora` passa `janela_eco=0` — e aí a camada mostra
+    inclusive o que acabou de ser dito, que é o que ele pediu."""
+    db = _DbFalso()
+    r = consulta.buscar_estado(db, "compat_gate", seqs_da_evidencia=[3059],
+                               janela_eco=0.0)
+
+    assert r.janela_eco_s == 0.0
+    for sql in _pernas_no_sql(db):
+        assert "make_interval(secs =>" not in sql
+
+
+def test_a_saida_DIZ_quantas_a_janela_cobriu():
+    """Esconder em silêncio é o mesmo defeito visto do outro lado. A evidência
+    já reporta o que a janela cobre; esta camada passou a reportar também."""
+    db = _DbFalso(contagem=3)
+    r = consulta.buscar_estado(db, "qualquer coisa")
+
+    assert r.ignoradas_pelo_eco == 3
+    assert any("COUNT(*)" in s for s in db.escalares)
+
+
+def test_a_contagem_nao_e_feita_com_a_janela_desligada():
+    db = _DbFalso(contagem=3)
+    r = consulta.buscar_estado(db, "qualquer coisa", janela_eco=0.0)
+
+    assert r.ignoradas_pelo_eco == 0
+    assert not any("COUNT(*)" in s for s in db.escalares)
+
+
 # ── Contra o banco de verdade ─────────────────────────────────────────────
 
 
@@ -295,3 +356,98 @@ def test_falha_de_embedding_NAO_e_cacheada(monkeypatch):
         embedder.embed_um("pergunta")
     assert embedder.embed_um("pergunta")[0] == 0.2
     embedder._CACHE_PERGUNTA.clear()
+
+
+# ── A janela de eco contra dado real ──────────────────────────────────────
+
+
+@pytest.fixture
+def db_tx():
+    """A ponte real amarrada a UMA conexão em transação, sempre revertida.
+
+    Mesmo padrão de `tests/test_db_integration.py`: herda `KobeDB` e troca só o
+    `_attempt`, então os verbos e a normalização de tipos são os de produção. O
+    que muda é onde a consulta roda — e que **nada disto sobrevive ao teste**,
+    que é o que permite inserir uma mensagem "de agora" sem sujar o acervo.
+    """
+    if not _URL:
+        pytest.skip("KOBE_TEST_DATABASE_URL não definida")
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from bot.db import KobeDB, _normalize_row
+
+    class _PonteEmTransacao(KobeDB):
+        def __init__(self, conn):
+            self._conn = conn  # sem super().__init__: nada de pool aqui
+
+        def _attempt(self, sql, params):
+            with self._conn.cursor() as cur:
+                cur.execute(sql, tuple(params) if params else None)
+                if cur.description is None:
+                    return []
+                return [_normalize_row(l) for l in cur.fetchall()]
+
+    conn = psycopg.connect(_URL, row_factory=dict_row, autocommit=False)
+    try:
+        yield _PonteEmTransacao(conn)
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+# Um identificador de propósito: a perna literal só procura o que PARECE
+# identificador (`_RE_IDENT` em `bot/search/query.py`) — uma palavra inventada
+# sem `_` não seria achada por perna nenhuma sem o serviço de embedding, e o
+# teste mediria o vazio.
+_MARCA = "zz_eco_teste"
+
+
+@pytest.fixture
+def afirmacao_recem_nascida(db_tx):
+    """Uma mensagem de AGORA e uma afirmação nascida dela — o cenário exato do
+    defeito: o operador acabou de falar e o LUCIEN já registrou."""
+    base = db_tx.query(
+        "SELECT session_id, topic_id FROM messages ORDER BY seq DESC LIMIT 1"
+    )
+    if not base:
+        pytest.skip("acervo de teste vazio")
+    msg = db_tx.execute(
+        "INSERT INTO messages (session_id, topic_id, role, content)"
+        " VALUES (%s, %s, 'user', %s) RETURNING id, seq, topic_id",
+        [base[0]["session_id"], base[0]["topic_id"],
+         f"e o {_MARCA}, a gente decide como?"],
+    )[0]
+    db_tx.execute(
+        "INSERT INTO lucien_claims (topic_id, subject, subject_slug, statement,"
+        " kind, valid_from, source_message_id, source_seq)"
+        " VALUES (%s, %s, %s, %s, 'open', NOW(), %s, %s)",
+        [msg["topic_id"], f"o {_MARCA}", _MARCA,
+         f"Ficou em aberto como o {_MARCA} deve ser resolvido, pendente de decisão.",
+         msg["id"], msg["seq"]],
+    )
+    return msg
+
+
+def test_afirmacao_recem_nascida_NAO_volta_como_o_que_vale_hoje(
+    db_tx, afirmacao_recem_nascida
+):
+    """O defeito, em teste: sem a janela, a dúvida de trinta segundos atrás
+    voltava no mesmo turno com carimbo de curado e origem citada."""
+    r = consulta.buscar_estado(db_tx, _MARCA)
+
+    assert not any(_MARCA in a.statement for a in r.vigentes), (
+        "a afirmação recém-nascida voltou como 'o que vale hoje' — o defeito voltou"
+    )
+    assert r.ignoradas_pelo_eco >= 1, "escondeu e não contou — o outro defeito"
+
+
+def test_com_agora_a_recem_nascida_APARECE(db_tx, afirmacao_recem_nascida):
+    """A janela esconde por padrão, não censura: `--agora` mostra tudo. Se este
+    teste falhar junto com o de cima, o que se provou foi que a busca não acha
+    nada — e aí o de cima não provaria coisa nenhuma."""
+    r = consulta.buscar_estado(db_tx, _MARCA, janela_eco=0.0)
+
+    assert any(_MARCA in a.statement for a in r.vigentes)
+    assert r.ignoradas_pelo_eco == 0

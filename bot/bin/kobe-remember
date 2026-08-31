@@ -216,6 +216,12 @@ def _imprimir_estado(e) -> None:
     print("  ⚠️  ESTADO é curado por um MODELO, não é fala literal. Cada linha traz")
     print("     a origem: confira com `kobe-remember --ver <número>` antes de")
     print("     afirmar ao operador que algo foi decidido.")
+    if getattr(e, "ignoradas_pelo_eco", 0):
+        # O mesmo aviso da evidência, pelo mesmo motivo: a janela esconde, e
+        # esconder em silêncio é o defeito que ela existe para não cometer.
+        print(f"  ℹ️  a janela de eco cobre {e.ignoradas_pelo_eco} afirmação(ões) "
+              f"nascida(s) nos últimos {int(e.janela_eco_s)}s — inclusive o que "
+              "acabou de ser dito neste turno. Use `--agora` para incluí-las.")
     print()
 
 
@@ -311,8 +317,9 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--agora",
         action="store_true",
-        help="inclui os últimos segundos (por padrão a janela de eco os ignora — "
-        "a pergunta que você acabou de fazer não é registro do passado)",
+        help="inclui os últimos segundos, nas DUAS camadas (por padrão a janela "
+        "de eco os ignora — a pergunta que você acabou de fazer não é registro "
+        "do passado, nem vira 'o que vale hoje')",
     )
     ap.add_argument("--desde", default=None, help="só a partir desta data (ISO)")
     ap.add_argument("--ate", default=None, help="só até esta data (ISO)")
@@ -389,10 +396,16 @@ def main(argv=None) -> int:
             # nunca existiu) dava MENÇÃO LITERAL e trazia, pelo caminho da
             # origem, uma preferência sobre anexo no Telegram.
             seqs = [a.seq for a in r.achados] if r.veredito == "ACHOU" else []
+            # A MESMA janela de eco da evidência, e `--agora` desliga as duas
+            # juntas. Sem isto, uma afirmação nascida da mensagem que o operador
+            # acabou de mandar volta no mesmo turno dentro de "o que vale hoje",
+            # com carimbo de curado — o falso positivo mais autoritário que este
+            # comando pode produzir.
             estado = consulta.buscar_estado(
                 db, assunto, topic_id=topic_id,
                 seqs_da_evidencia=seqs,
                 limite=max(1, args.limite),
+                janela_eco=0.0 if args.agora else q.JANELA_ECO_S,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️  a camada de ESTADO falhou ({type(exc).__name__}: {exc}) — "

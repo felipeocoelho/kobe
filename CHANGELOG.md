@@ -4,6 +4,209 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix(f3): janela de eco na camada ESTADO, e critério de *speech act* na escrita (2026-08-31)
+
+**Operador pediu:** consertar o terceiro achado do LUCIEN — *"a camada ESTADO
+não tem janela de eco, e não distingue declaração de pergunta"* — **com a trava
+de código**, não só com instrução de prompt (era a decisão em aberto do plano;
+ele escolheu a recomendação).
+
+São duas frentes independentes, e as duas entram aqui porque são o mesmo defeito
+visto de dois lados: **o registro afirmando posição que o operador não tomou.**
+
+#### (a) LEITURA — a janela de eco, que só a evidência tinha
+
+A camada de EVIDÊNCIA ignora por padrão os últimos 90 s (`JANELA_ECO_S`, com
+`--agora` para desligar) por um motivo mecânico: **o bot grava a mensagem do
+operador em `messages` ANTES de rodar o turno**. Sem isso, a busca acha a própria
+pergunta e responde com ela.
+
+A camada ESTADO não tinha esse mecanismo, e aqui o buraco é pior: uma afirmação
+nascida da mensagem que o operador acabou de mandar voltava, no mesmo turno,
+dentro do bloco *"o que vale hoje"*, **com carimbo de curado e origem citada**.
+Uma dúvida de trinta segundos atrás parecendo decisão vigente e conferível é o
+falso positivo com mais autoridade que esta fase pode produzir.
+
+- `buscar_estado()` ganhou `janela_eco`, com a **mesma constante da evidência**
+  (`bot.search.query.JANELA_ECO_S` — uma fonte só, para as duas não divergirem
+  em silêncio). Filtro pela data da **mensagem de origem**, nas quatro pernas e
+  também nas superadas ligadas.
+- `kobe-remember --agora` desliga **as duas camadas juntas**.
+- E a saída **diz quantas a janela cobriu** (`ℹ️ a janela de eco cobre N
+  afirmação(ões) nascida(s) nos últimos 90s`). Esconder em silêncio é o mesmo
+  defeito visto do outro lado — a evidência já reportava isso.
+
+#### (b) ESCRITA — pergunta não é decisão, e fala do agente não é posição do operador
+
+Medido na bateria `f3-superacao`: LUCIEN registrou como **pendência em aberto**
+uma pergunta do **próprio agente** — os três caminhos para o normalizador que o
+agente ofereceu (`#3639`) e que o operador nunca pediu nem aceitou. Fui conferir
+no banco de dev antes de escrever uma linha: das três afirmações lá, essa é a
+única com origem em fala do agente, e é exatamente essa.
+
+- **Prompt** (`O_QUE_E_DURAVEL`): critério explícito de *speech act* — `decision`,
+  `open` e `preference` são posições DO OPERADOR; pergunta não é decisão;
+  proposta do agente que ele não aceitou **com palavras** não é estado; silêncio,
+  "deixa eu pensar" e mudar de assunto **não são aceite**. Trava assimétrica
+  declarada: na dúvida, **não registre**.
+- **Trava T10** (`store.py`, e agora são dez): afirmação de `decision`, `open` ou
+  `preference` nascida de fala do agente **sem nenhuma fala do operador
+  sustentando** (origem ou evidência) é **recusada**. `fact` fica de fora de
+  propósito — o agente descrevendo como o sistema funciona é origem legítima de
+  fato.
+- **A porta que fica aberta é o caso real:** quando a substância está na fala do
+  agente e o operador aprovou ("pode", "fechado"), basta a mensagem dele estar em
+  `evidence_seqs` — que é o que o prompt manda fazer. A trava não pergunta quem
+  escreveu a frase; pergunta se **o operador está na conversa que a sustenta**.
+- **A recusa é CONTADA** (vira `Recusa`, entra em `claims_rejected` e aparece no
+  `relatorio`). Trava que descarta em silêncio é o mesmo defeito da origem
+  inventada, visto do outro lado.
+
+Assimétrica de propósito: uma decisão que ficou de fora reaparece na próxima
+conversa; uma proposta do agente virando estado vigente só é descoberta quando
+alguém agir sobre ela. **Nada do que já está gravado é alterado** — a trava vale
+para escrita nova.
+
+#### Dois consertos de teste que a T10 expôs (aprovados no plano)
+
+- `_vigentes()` passou a recortar pelo `run_id` de uma rodada `model='teste'`, que
+  só existe dentro da transação revertida. Sem isso, um banco de integração com
+  afirmações no tópico fazia `assert not _vigentes(...)` falhar por **resíduo** —
+  era o teste `test_T1_...` acusando uma gravação que não houve.
+- A fixture `lote` passou a pegar **duas mensagens do operador**. No acervo real
+  a mensagem de texto mais recente é quase sempre do agente, e com a T10 os
+  testes das outras nove travas passariam a medir a T10 por acidente. Na mesma
+  linha, os dois testes de cursor passaram a **fixar** o ponto de partida: o
+  cursor real do tópico pode estar acima do lote, e `GREATEST` faria "avançou até
+  o fim do lote" ser medido contra um número que a rodada não escreveu.
+
+**Testes:** `tests/test_lucien_consulta.py` +8 (4 de unidade sobre as quatro
+pernas e a contagem; 2 de integração com **dado inserido e transação revertida**:
+uma mensagem de agora e uma afirmação nascida dela, que **não** volta como "o que
+vale hoje" e **volta** com `--agora`); `tests/test_lucien_store.py` +7 sobre a
+T10 (os três tipos recusados, a recusa contada em `claims_rejected`, a evidência
+do operador liberando, `fact` isento e a decisão do operador intocada). Removendo
+o filtro de eco do código, os dois testes da janela quebram. Suíte: **947
+passando + 164 pulados** sem banco; **1111 passando, 0 pulados** contra
+`postgresql:///kobe_dev` — inclusive o teste de integração que estava vermelho
+antes desta sessão. Fumaça na CLI: `kobe-remember --estado` contra o banco de
+dev responde igual.
+**Nenhum comando tocou o banco de produção.**
+
+**Reversão:** `git revert` deste commit. Sem schema, sem migration, sem dado
+convertido: a leitura volta a não filtrar e a T10 deixa de existir. As
+afirmações escritas enquanto ela valia continuam válidas — ela só recusa, nunca
+grava.
+
+### fix(f3): `kobe-lucien` lê a chave no `.env` e **diz de onde leu** (2026-08-31)
+
+**Operador pediu:** consertar o segundo dos três achados do LUCIEN —
+*"`kobe-lucien status` diz DESLIGADA com a chave ligada (não lê o `.env`)"*.
+
+**Por quê:** o helper lia `LUCIEN_ENABLED` do ambiente do **processo**. Rodado
+de um shell qualquer — que é exatamente como se roda um comando de diagnóstico —
+imprimia `chave LUCIEN_ENABLED: DESLIGADA` com a chave ligada no arquivo e a
+fonte registrada no Keyko (conferido em 30/08/2026: o `journalctl` mostrava
+`source registrada: lucien` no mesmo minuto). É o pior lugar possível para esse
+erro: `status` existe justamente para **dar voz ao silêncio** — distinguir
+"LUCIEN parou" de "não havia nada novo". Errar a primeira linha manda o operador
+investigar problema que não existe, ou confirma um falso *"está desligado, pode
+mexer"*.
+
+**Foi feito:**
+
+- `_kobe_topic.read_dotenv()` ganhou leitura **por prefixo**: `read_dotenv(set(),
+  prefixo="LUCIEN_")` traz a configuração inteira do subsistema. Por prefixo e
+  não por lista de chaves de propósito — lista é o que fica desatualizada, e é o
+  mesmo erro que `_venv.py` documenta ter cometido três vezes com listas de
+  dependências. O modo antigo (por lista) não mudou de comportamento.
+- `kobe-lucien` carrega as chaves `LUCIEN_*` do `.env` **antes de despachar
+  qualquer subcomando**. Vale para `rodada` e `reconstruir` também: rodados à
+  mão, eles caíam nos defaults do código (modelo, tamanho de lote) enquanto o
+  `.env` dizia outra coisa — a mesma divergência silenciosa, de outro ângulo.
+- O ambiente do processo **vence** o arquivo: quem exportou na mão quis aquilo.
+- `status` passa a imprimir a **procedência**: `chave LUCIEN_ENABLED: ligada
+  (fonte: /caminho/.env)` · `(fonte: ambiente do processo)` · `DESLIGADA (fonte:
+  não achei — nem no ambiente, nem em /caminho/.env)`.
+
+**`DATABASE_URL` ficou deliberadamente FORA do carregamento.** O cabeçalho do
+helper declara que não há banco default porque "apontar pro banco errado tem que
+custar um ato explícito", e o próprio `bugs.md` que pede este conserto lembra que
+já houve comando rodado da pasta de dev acertando o banco de produção. Carrega-se
+**configuração**, nunca o **destino** — e há teste guardando isso, porque é o
+jeito óbvio de este conserto virar um bug pior que o que ele consertou.
+
+**Testes:** `tests/test_lucien_helper_env.py`, 7 testes **sem banco e sem rede**
+(`.env` sintético em `tmp_path`), cobrindo: prefixo traz a config inteira e só
+ela; ambiente vence arquivo; leitura por lista inalterada; procedência nos três
+casos (arquivo, ambiente, ausente); e `DATABASE_URL` fora — com o `_url()` ainda
+saindo com código 2. Fumaça na CLI contra o banco de dev, nos três caminhos: com
+`.env` local (`fonte: …/.env`, `ligada`), com a chave exportada por cima
+(`DESLIGADA (fonte: ambiente do processo)`) e sem nenhum dos dois (`não achei`).
+Suíte completa sem banco: **943 passando + 155 pulados**.
+**Nenhum comando tocou o banco de produção.**
+
+**Reversão:** `git revert` deste commit. Não há schema, migração nem estado
+persistido envolvidos — o conserto é leitura de arquivo de configuração.
+
+### fix(f3): `kobe-lucien init` não encolhe mais o backlog de reconstrução (2026-08-31)
+
+**Operador pediu:** consertar o primeiro dos três achados do LUCIEN catalogados
+em `bugs.md` — *"`init` rodado DUAS VEZES apaga o passado a reconstruir, em
+silêncio"* (severidade alta).
+
+**Por quê:** `fincar_marco()` punha dois cursores — o incremental no topo do
+tópico e o de reconstrução onde o incremental estava. Na segunda execução isso
+apagava o backlog: com o incremental já no topo, o intervalo `(C, M]` vira vazio
+e `planejar()` passa a responder **"nada pendente"**, com a mesma cara de quem
+terminou o trabalho. Nenhum modelo foi chamado, nada foi escrito, e o passado
+sumiu da vista. Visto ao vivo em 30/08/2026: o `status` do dev dizia `3595
+mensagens · ~95 lotes`, um `init` rodado como pré-condição de roteiro passou a
+dizer `nada pendente`. E a docstring **prometia idempotência** — verdade para o
+cursor incremental (o `GREATEST` nunca anda para trás), falsa para o outro, onde
+andar para a frente É o dano.
+
+**Foi feito:**
+
+- `fincar_marco()` passa a mexer **só no cursor incremental**. O cursor de
+  reconstrução nunca sobe por obra do `init` — ele só sobe quando a varredura de
+  fato lê.
+- O efeito antigo vira **`kobe-lucien init --refincar`**: ato explícito de quem
+  sabe que o passado anterior ao cursor incremental já foi lido.
+- `cmd_init` passa a imprimir o **antes/depois do backlog** e, por tópico, o que
+  fez com o cursor de reconstrução (`intocada` · `preservada em #N` ·
+  `REFINCADA em #N`). Um comando que mexe em cursor tem que dizer o que fez com
+  o trabalho pendente — o defeito era ser silencioso.
+- A docstring mentirosa foi reescrita, com o registro do que ela prometia.
+
+**A correção sugerida no `bugs.md` não bastava, e é o ponto do conserto.**
+*"Só gravar se ainda não existir"* segura o dev (lá o cursor de reconstrução
+existe), mas **na produção ele nunca chegou a ser criado** — o incremental
+estava em zero na primeira fincada e a guarda `if ja_lido > 0` segurou. Uma
+regra por existência deixaria a bomba armada para o `init` seguinte. O
+invariante que sobra é mais forte e mais simples, e é o que os testes exercitam.
+
+O preço de não usar `--refincar` no caso legítimo (alguém rodou uma passada
+antes de fincar o marco) é a varredura reler `(0, C]`: **cota gasta, nunca
+registro perdido** — a T8 (dedupe) segura a duplicata. É a assimetria certa para
+um comando cujo modo de falha era silencioso e parecia sucesso.
+
+**Testes:** `tests/test_lucien_reconstrucao.py`, 5 testes de integração
+(transação revertida no teardown), **passando** contra `postgresql:///kobe_dev`
+— incluindo o que o operador pediu por nome: rodar `init` duas (e três) vezes
+**não** encolhe o backlog. Provados por **mutação**: devolvendo o comportamento
+antigo ao código, 2 dos 5 falham; restaurado, todos passam. Suíte completa sem
+banco: **936 passando + 155 pulados** (baseline 936 + 150 — os 5 novos pulam sem
+`KOBE_TEST_DATABASE_URL`, como manda a praxe dos testes de integração da fase, e
+passam com ela). Fumaça na CLI contra o banco
+de dev, em `--ensaio`: `init` mantém o backlog em 3605 e `init --refincar` o leva
+a 0 com o aviso em voz alta. Banco de dev conferido depois: intacto.
+**Nenhum comando tocou o banco de produção.**
+
+**Reversão:** `git revert` deste commit. Nada de schema mudou (o conserto é
+lógica de cursor sobre a tabela `lucien_cursor` que já existia), então não há
+migration a desfazer nem estado de banco a reparar.
+
 ### chore(f3): LUCIEN nasce LIGADO — o default vira `true` em todo ambiente (2026-08-30)
 
 Ordem do operador: *"liga o Lucien, quero isso padrão em todos os ambientes,
