@@ -179,20 +179,59 @@ def lote_devido(linha: dict, *, agora: Optional[datetime] = None) -> bool:
     return (agora - mais_antiga).total_seconds() >= cfg.idade_maxima_s()
 
 
-def marco_incremental(cx, topic_id: str) -> Optional[int]:
-    """Onde o cursor incremental foi fincado neste tópico — o `kobe-lucien init`.
+def marco_reconstrucao(cx, topic_id: str) -> int:
+    """O teto da reconstrução neste tópico: o marco fincado pelo `kobe-lucien init`.
 
-    É o limite superior da reconstrução: ela varre o passado ATÉ aqui e para. Sem
-    esse teto, a varredura passaria por cima do que a leitura corrente já está
-    fazendo, e as duas gastariam cota no mesmo trecho.
+    É o limite superior da varredura do passado — ela lê ATÉ aqui e para. Sem
+    esse teto, ela passaria por cima do que a leitura corrente já está fazendo, e
+    as duas gastariam cota no mesmo trecho.
+
+    LIA O CURSOR INCREMENTAL ATÉ 31/08/2026, E ERA ISSO QUE FAZIA O ALVO FUGIR
+    ---------------------------------------------------------------------------
+    O teto era o cursor `incremental` — que **anda com a conversa**. Então o fim
+    da varredura corria para a frente enquanto ela lia: cada mensagem que a
+    leitura corrente processava entrava também na conta do que faltava
+    reconstruir, e o "pendente" nunca chegava a zero enquanto houvesse conversa.
+    Agora o teto é o escopo `marco`, que é fincado uma vez e não se mexe.
+
+    DEVOLVE ZERO, NUNCA `None` — E A DIFERENÇA IMPORTA
+    ---------------------------------------------------
+    Sem marco, não há passado declarado, e a resposta certa é "não há nada a
+    varrer". Devolvendo `None` o chamador montaria o lote **sem limite superior**
+    (é o que `montar_lote` faz com `teto_seq=None`), e a varredura sairia lendo
+    a conversa inteira, inclusive a de hoje. Zero faz o lote sair vazio: falha
+    fechada em vez de aberta.
     """
     cur = cx.cursor()
     cur.execute(
-        "SELECT last_seq FROM lucien_cursor WHERE scope='incremental' AND topic_id=%s",
+        "SELECT last_seq FROM lucien_cursor WHERE scope='marco' AND topic_id=%s",
         (topic_id,),
     )
     linha = cur.fetchone()
-    return int(linha["last_seq"]) if linha else None
+    return int(linha["last_seq"]) if linha else 0
+
+
+def fincar_marco_cursor(cx, topic_id: str, last_seq: int) -> bool:
+    """Grava o marco deste tópico **se ele ainda não existir**. Diz se gravou.
+
+    `DO NOTHING` e não o `GREATEST` do `_avancar_cursor`, e a diferença é o
+    conserto inteiro: os outros dois escopos marcam PROGRESSO e sobem conforme se
+    lê, então andar para a frente é o que eles existem para fazer. O marco marca
+    uma FRONTEIRA declarada — *"daqui pra trás é passado"* —, e uma fronteira que
+    anda não é fronteira.
+
+    Sem esta regra, um `init` rodado meses depois empurraria o marco para o topo
+    de hoje e **inflaria** o backlog com tudo que a leitura corrente já leu:
+    cota gasta relendo trecho já lido. É o mesmo mal do defeito original, no
+    sentido contrário — e é por isso que a fincada é uma vez só.
+    """
+    cur = cx.cursor()
+    cur.execute(
+        "INSERT INTO lucien_cursor (scope, topic_id, last_seq) VALUES ('marco',%s,%s)"
+        " ON CONFLICT (scope, topic_id) DO NOTHING",
+        (topic_id, last_seq),
+    )
+    return cur.rowcount > 0
 
 
 def montar_lote(cx, topic_id: str, *, scope: str = "incremental",

@@ -4,6 +4,175 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix(lucien): a varredura do passado avisa quando morre — parada normal continua muda (2026-08-31)
+
+**Operador pediu:** que a varredura pare de morrer calada.
+
+**Por quê:** a reconstrução tem um freio — N falhas seguidas do modelo e ela para
+sozinha (`falhas_seguidas_max`). **O freio está certo**: três timeouts seguidos é
+sinal de provedor instável, e insistir contra isso queima as vagas de lote que a
+retomada vai precisar. O defeito era ela parar **em silêncio**. Aconteceu duas
+vezes em 31/08/2026 — às 11:28, no lote 48, e de novo às 14:32, no lote 29 — e
+nas duas o operador só descobriu porque perguntou outra coisa. **Uma varredura de
+horas que para e não avisa é indistinguível de uma que está rodando**, que é o
+mesmo mal que o `kobe-lucien status` existe para curar: um agendador que para não
+produz erro, produz silêncio.
+
+**Foi feito:**
+
+- **`bot/lucien/aviso.py` (novo)** — o único caminho pelo qual LUCIEN fala com o
+  operador. É o corpo do antigo `worker._gritar`, mudado de lugar sem mudança de
+  comportamento: mesmo destino **declarado** (`LUCIEN_ALERT_CHAT_ID`), mesmo
+  prefixo, mesma regra de nunca derrubar quem chamou. Eram dois lugares
+  precisando da mesma coisa (a degeneração da T7 e a varredura), e duas cópias da
+  regra de destino é como uma delas acaba divergindo em silêncio. `_gritar`
+  virou uma linha delegando.
+- **`rodar()` distingue parada normal de anormal**, e a distinção é o conserto:
+
+  | parada | avisa? |
+  |---|---|
+  | bateu o teto de lotes | **não** — é a varredura terminando o que foi mandada fazer |
+  | backlog esgotado | **não** — é o objetivo da coisa |
+  | falha isolada | **não** — soluço de rede não é sintoma |
+  | freio de falhas seguidas | **sim** |
+  | exceção não tratada | **sim**, e a exceção continua subindo |
+  | cadeado do banco tomado | **sim** — a passada acabou antes da hora por causa externa |
+
+  Alarme que dispara ao terminar o trabalho é ruído, e ruído tem o mesmo destino
+  do silêncio: ser ignorado. A varredura roda com teto por desenho, então ela
+  bate no teto quase sempre — avisar ali ensinaria o operador a não ler o canal.
+- **O aviso diz o que o operador precisa para decidir:** que parou, por quê,
+  quantos lotes fez, quanto falta, e que **é retomável** (o cursor não andou).
+  O "quanto falta" é um `SELECT` agrupado, sem modelo — e é **opcional**: se ele
+  falhar, o aviso sai sem essa parte. Um aviso de parada que estoura ao montar a
+  própria mensagem seria uma segunda falha em cima da primeira, e a que importa
+  é a primeira.
+- **Na exceção, o aviso sai ANTES do `raise`** — porque o `raise` pode ser a
+  última coisa que o processo faz. E a exceção continua sendo exceção: engolir o
+  erro para poder avisar trocaria um defeito por outro.
+- **O motivo é encurtado em 200 caracteres no aviso (`MOTIVO_MAXIMO`) — achado
+  no smoke, não previsto no plano.** Rodando a varredura de verdade contra um
+  modelo inexistente, o erro da CLI veio com o envelope JSON junto: ~700
+  caracteres de `usage`, `session_id` e `cache_creation` para dizer *"modelo não
+  reconhecido"*. Despejar isso num chat é o mesmo que não avisar, porque ninguém
+  lê. O motivo inteiro continua no `logger.warning`, que é onde trace pertence.
+- **Sem `LUCIEN_ALERT_CHAT_ID` o aviso vai só para o log, e isso é caso
+  esperado** — não erro. A varredura roda de um shell qualquer, e um aviso que
+  não tem para onde ir não pode virar uma segunda fonte de crash. Mantida a
+  regra do destino declarado, **sem** fallback para `KOBE_CHAT_ID`: escolher um
+  tópico por conta própria faria uma mensagem de saúde do sistema cair numa
+  conversa qualquer, o que é pior que não mandar.
+- **Nota de contexto que o briefing supunha diferente:** a varredura **não** roda
+  pelo daemon Keyko. A fonte do Keyko dispara a leitura corrente
+  (`worker --uma-rodada`); `reconstrucao.rodar()` tem um único chamador em todo o
+  repo, o `kobe-lucien reconstruir`. E o helper já carrega as chaves `LUCIEN_*`
+  do `.env` antes de despachar (conserto `a79ed94`), então o aviso funciona de
+  qualquer shell sem exportar nada.
+
+**Testes:** `tests/test_lucien_divisao.py`, +8 (27 no arquivo), todos sem banco e
+sem rede. Cobrem os três gatilhos que avisam, os três casos que **não** avisam, o
+aviso que sobrevive à falha da própria medição, e o encurtamento. Conferido que
+provam algo, **nas duas direções**: forçando o alarme a disparar sempre, os três
+testes de "não avisa" ficam vermelhos; forçando-o a nunca disparar, os três de
+"avisa" ficam vermelhos. Smoke de ponta a ponta no `kobe_dev`: varredura real
+contra um modelo inexistente, freio disparado em 2 falhas, aviso montado com o
+"quanto falta" correto (4 mensagens · 1 lote), **exit 0 sem canal declarado** — e
+o envio de verdade pelo Telegram exercitado à parte. Suíte: **1.126 passados**,
+`pytest tests`.
+
+**Reversão:** `git revert` deste commit. Nada de schema, nada de migration, nada
+de estado — o commit só acrescenta um módulo e um caminho de aviso. Revertido, a
+varredura volta a parar em silêncio (o comportamento anterior), sem nenhum outro
+efeito.
+
+### feat(lucien): o marco da reconstrução passa a ser GRAVADO — o teto parou de fugir pra frente (2026-08-31)
+
+**Operador pediu:** consertar o achado que ficou de fora da F3 por exigir
+migration — *"o marco da reconstrução é derivado, não gravado; o alvo foge pra
+frente"*.
+
+**Por quê:** a varredura do passado lia de zero até um teto por tópico, e esse
+teto não estava gravado em lugar nenhum: era o cursor `incremental` **lido na
+hora** — o cursor que anda com a conversa. Em linguagem de banco, em vez de
+fincar um snapshot no `init`, a rotina relia o `last_seq` corrente a cada
+iteração, e o fim da tabela fugia enquanto ela lia. Cada mensagem que a leitura
+corrente processava entrava também na conta do que faltava reconstruir, e o
+número de "pendente" nunca chegava a zero enquanto houvesse conversa
+acontecendo. **O estrago era de cota, não de dado** — a T8 (dedupe) segura a
+duplicata, então o pior caso era reler lote já lido e pagar o modelo de novo.
+
+**Foi feito:**
+
+- **`infra/migrations/009_lucien_marco.sql`** — a restrição
+  `lucien_cursor_scope_check` passa a aceitar um terceiro escopo, `marco`, e um
+  backfill copia cada cursor `incremental` existente para ele. Aditiva e
+  idempotente: a restrição é removida com `IF EXISTS` antes de ser recriada
+  (`ADD CONSTRAINT` não tem `IF NOT EXISTS` no Postgres), e o backfill é
+  `ON CONFLICT DO NOTHING`. Reaplicada duas vezes à mão num banco de apoio, sem
+  erro e sem efeito.
+- **A OUTRA restrição da 008 ficou como está.** `lucien_runs_mode_check` é sobre
+  o **modo da rodada**, e nenhuma rodada roda com modo `marco` — fincar um marco
+  não é ler um lote. Alargá-la seria afrouxar uma garantia sem ganho.
+- **O backfill copia o valor CORRENTE do incremental, de propósito.** O marco
+  original desses bancos nunca foi gravado, então não há como recuperá-lo.
+  Copiar o que existe hoje congela o teto exatamente onde ele está: o backlog
+  logo depois da migration é numericamente **igual** ao de logo antes — não
+  encolhe (que seria repetir o achado 1 da F3) e não cresce. A migration **não
+  devolve** a cota já comprometida; ela para a sangria. Medido no `kobe_dev`:
+  3.605 mensagens antes, 3.605 depois, nos 8 tópicos.
+- **`planejar()`** calcula `(reconstruction, marco]` — intervalo fixo, que
+  converge. Tópico **sem** marco produz backlog zero, que é a mesma semântica de
+  antes para o tópico onde o `init` nunca rodou.
+- **`store.marco_incremental()` → `store.marco_reconstrucao()`**, lendo o escopo
+  novo. E devolvendo **`0`, nunca `None`**: `montar_lote` trata `teto_seq=None`
+  como "sem limite superior", então a versão antiga fazia a varredura de um
+  tópico sem cursor sair lendo a conversa inteira, inclusive a de hoje. Falha
+  aberta que virou falha fechada — buraco latente achado ao mexer, fechado junto.
+- **`store.fincar_marco_cursor()`** grava com `ON CONFLICT DO NOTHING`, e não com
+  o `GREATEST` do `_avancar_cursor`. A diferença é o conserto inteiro: os outros
+  dois escopos marcam **progresso** e sobem conforme se lê; o marco marca uma
+  **fronteira declarada**, e fronteira que anda não é fronteira. Sem essa regra,
+  um `init` rodado meses depois empurraria o marco para o topo de hoje e
+  **inflaria** o backlog com tudo que a leitura corrente já leu — o mesmo mal do
+  defeito original, no sentido contrário.
+- **`init` ficou enfim idempotente por inteiro.** A F3 curou a perna que
+  encolhia; esta cura a que inflaria. E ele agora **relata** o marco de cada
+  tópico e se ele já existia — a lição do achado 1: comando que mexe em cursor e
+  não diz o que fez tem modo de falha silencioso.
+- **`kobe-lucien status`** passa a contar o escopo `marco` para decidir se diz
+  *"o marco ainda NÃO foi fincado"*. Contar o incremental ali afirmaria que a
+  fronteira foi declarada num banco onde só a leitura corrente rodou — a mesma
+  confusão entre progresso e fronteira, de outro ângulo.
+- **Docstrings corrigidas junto**, não depois: o cabeçalho de `reconstrucao.py`
+  afirmava *"ela lê de zero até o cursor incremental daquele tópico"*, que este
+  commit torna falso.
+- **`tests/fixtures/schema_expected.json` regenerada** de um banco de apoio novo
+  (`kobe_ref_009`), erguido do zero por `provision_db.py` + `migrate.py up` — o
+  caminho documentado. O diff tem exatamente duas linhas: a `009` na lista e a
+  restrição alargada.
+
+**Testes:** `tests/test_lucien_reconstrucao.py`, +5 testes de integração (10 no
+arquivo). O central é
+`test_o_backlog_nao_cresce_quando_a_leitura_corrente_anda`: finca o marco no
+meio do acervo, faz o cursor incremental subir até o topo — o trabalho normal da
+leitura corrente — e exige que o backlog **não mude**. Conferido que ele prova
+algo: apontando `planejar()` de volta para o escopo `incremental`, ele e o
+`test_sem_marco_nao_ha_backlog_mesmo_com_cursor_incremental` ficam **vermelhos**
+(1.934 ≠ 0), e voltam ao verde com o código correto. Migration reaplicada duas
+vezes à mão num banco de apoio (idempotência). Smoke no `kobe_dev`:
+`kobe-lucien status` e `kobe-lucien init --ensaio`, backlog 3.605 → 3.605 e marco
+preservado nos 8 tópicos. Suíte: **1.116 passados**, `pytest tests`.
+
+**Reversão:** `git revert` deste commit desfaz o código. O banco precisa de dois
+passos, **nesta ordem** (a restrição antiga recusa as linhas novas): restaurar
+`lucien_cursor_scope_check` com os dois valores originais (`incremental`,
+`reconstruction`) e, antes disso, remover as linhas de `lucien_cursor` onde
+`scope = 'marco'`. Reverter é seguro: sem o marco o código volta a dizer *"marco
+não fincado"* e a varredura fica sem o que fazer — **nenhuma afirmação já
+gravada é afetada**, e a migration nunca apagou nada. Um banco que fique com a
+`009` aplicada e o código revertido também não quebra: a restrição só está mais
+larga do que o código usa.
+
 ### fix(f3): janela de eco na camada ESTADO, e critério de *speech act* na escrita (2026-08-31)
 
 **Operador pediu:** consertar o terceiro achado do LUCIEN — *"a camada ESTADO

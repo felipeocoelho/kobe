@@ -24,7 +24,8 @@
     "005",
     "006",
     "007",
-    "008"
+    "008",
+    "009"
   ],
   "tables": {
     "contacts": {
@@ -615,7 +616,7 @@
         },
         {
           "name": "lucien_cursor_scope_check",
-          "definition": "CHECK ((scope = ANY (ARRAY['incremental'::text, 'reconstruction'::text])))"
+          "definition": "CHECK ((scope = ANY (ARRAY['incremental'::text, 'reconstruction'::text, 'marco'::text])))"
         },
         {
           "name": "lucien_cursor_topic_id_fkey",

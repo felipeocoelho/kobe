@@ -231,3 +231,227 @@ def test_o_erro_da_CLI_carrega_o_stdout_quando_o_stderr_vem_vazio(monkeypatch):
     with pytest.raises(brain.CerebroIndisponivel) as exc:
         brain.chamar("oi", kobe_home="/tmp")
     assert "rate_limit" in str(exc.value), "o diagnóstico se perdeu de novo"
+
+
+# ── A varredura que morria calada ─────────────────────────────────────────
+#
+# O freio acima está certo, e o defeito era outro: ela parava e **não avisava**.
+# Aconteceu duas vezes em 31/08/2026 (às 11:28 no lote 48, e às 14:32 no lote
+# 29) e nas duas o operador só soube porque perguntou outra coisa. Uma varredura
+# de horas que para em silêncio é indistinguível de uma que está rodando.
+#
+# A linha que estes testes defendem é a distinção: **parada normal é muda,
+# parada anormal fala**. Um alarme que dispara ao terminar o trabalho é ruído, e
+# ruído tem o mesmo destino do silêncio — ser ignorado.
+
+
+@pytest.fixture
+def varredura(monkeypatch):
+    """A varredura com o mundo externo desligado, e os avisos capturados."""
+    from bot.lucien import reconstrucao
+
+    avisos = []
+    monkeypatch.setattr(reconstrucao.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(reconstrucao.store, "conectar",
+                        lambda url: type("C", (), {"close": lambda s: None})())
+    monkeypatch.setattr(reconstrucao.aviso, "avisar",
+                        lambda home, motivo: avisos.append(motivo) or True)
+    # O "quanto falta" do aviso é opcional e tem caminho próprio de falha —
+    # aqui ele sai de cena para que os testes falem só sobre o gatilho.
+    monkeypatch.setattr(reconstrucao, "planejar",
+                        lambda cx, topic_id=None: reconstrucao.Plano())
+    monkeypatch.setattr(reconstrucao, "_proximo_topico", lambda cx: "t")
+    monkeypatch.setattr(reconstrucao, "_falta", lambda cx, t: True)
+    return avisos
+
+
+def test_o_freio_de_falhas_seguidas_AVISA_o_operador(monkeypatch, varredura):
+    """O caso dos dois incidentes de 31/08. Parar está certo; parar calado, não."""
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setenv("LUCIEN_FALHAS_SEGUIDAS", "3")
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada",
+                        lambda **kw: ResultadoDaRodada(erro="rate_limit"))
+
+    reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=90, pausa_s=0)
+
+    assert len(varredura) == 1, "a varredura parou pelo freio e não avisou ninguém"
+    texto = varredura[0]
+    assert "PAROU" in texto
+    assert "3 falhas seguidas" in texto, "o aviso não diz POR QUE parou"
+    assert "rate_limit" in texto, "o aviso não carrega o erro que causou a parada"
+    assert "3 lote(s)" in texto, "o aviso não diz quantos lotes foram feitos"
+    assert "RETOMÁVEL" in texto, "o aviso não diz que rodar de novo continua daqui"
+
+
+def test_bater_o_teto_de_lotes_NAO_avisa(monkeypatch, varredura):
+    """Terminar o trabalho não é ocorrência. Alarme aqui viraria ruído diário —
+    a varredura roda com teto por desenho, então ela bate no teto quase sempre."""
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada",
+                        lambda **kw: ResultadoDaRodada(criadas=1))
+
+    rs = reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=4, pausa_s=0)
+
+    assert len(rs) == 4
+    assert varredura == [], "avisou numa parada normal — isso é ruído"
+
+
+def test_backlog_esgotado_NAO_avisa(monkeypatch, varredura):
+    """Acabar o passado a reconstruir é o objetivo da coisa, não um incidente."""
+    from bot.lucien import reconstrucao
+
+    monkeypatch.setattr(reconstrucao, "_proximo_topico", lambda cx: None)
+
+    rs = reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=10, pausa_s=0)
+
+    assert rs == []
+    assert varredura == [], "avisou porque o trabalho acabou"
+
+
+def test_falha_ISOLADA_nao_avisa_nem_interrompe(monkeypatch, varredura):
+    """Soluço de rede não é sintoma. Avisar a cada um deles ensinaria o operador
+    a ignorar o canal — e aí o aviso que importa também é ignorado."""
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setenv("LUCIEN_FALHAS_SEGUIDAS", "3")
+    n = {"i": 0}
+
+    def _alternada(**kw):
+        n["i"] += 1
+        return ResultadoDaRodada(erro="soluço") if n["i"] % 2 == 0 else ResultadoDaRodada(criadas=1)
+
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada", _alternada)
+
+    rs = reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=10, pausa_s=0)
+
+    assert len(rs) == 10
+    assert varredura == []
+
+
+def test_o_cadeado_tomado_AVISA(monkeypatch, varredura):
+    """Outra rodada segurando o cadeado interrompe a passada por causa externa.
+
+    Não é falha e não é fim de trabalho: é uma varredura que fez menos do que
+    foi mandada fazer, e quem mandou precisa saber disso.
+    """
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada",
+                        lambda **kw: ResultadoDaRodada(erro="outra rodada já está acontecendo"))
+
+    reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=10, pausa_s=0)
+
+    assert len(varredura) == 1
+    assert "cadeado" in varredura[0]
+
+
+def test_excecao_nao_tratada_AVISA_e_continua_subindo(monkeypatch, varredura):
+    """O silêncio mais completo dos três: quem rodou de um shell já fechado não
+    vê nem o traceback. O aviso sai, e a exceção continua sendo exceção — engolir
+    o erro para poder avisar trocaria um defeito por outro."""
+    from bot.lucien import reconstrucao
+
+    def _explode(**kw):
+        raise RuntimeError("o banco sumiu no meio")
+
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada", _explode)
+
+    with pytest.raises(RuntimeError):
+        reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=10, pausa_s=0)
+
+    assert len(varredura) == 1
+    assert "erro não tratado" in varredura[0]
+    assert "o banco sumiu no meio" in varredura[0]
+
+
+def test_o_aviso_sai_mesmo_se_o_quanto_falta_estourar(monkeypatch, varredura):
+    """O "quanto falta" é enfeite útil, não pré-requisito.
+
+    Um aviso de parada que estoura ao montar a própria mensagem seria uma segunda
+    falha em cima da primeira — e a que o operador precisa ver é a primeira.
+    """
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setenv("LUCIEN_FALHAS_SEGUIDAS", "1")
+
+    def _sem_banco(cx, topic_id=None):
+        raise RuntimeError("conexão morta")
+
+    monkeypatch.setattr(reconstrucao, "planejar", _sem_banco)
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada",
+                        lambda **kw: ResultadoDaRodada(erro="timeout"))
+
+    reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=5, pausa_s=0)
+
+    assert len(varredura) == 1, "o aviso morreu junto com a medição do que falta"
+    assert "PAROU" in varredura[0]
+    assert "Falta" not in varredura[0], "prometeu um número que não conseguiu medir"
+
+
+# ── O canal do aviso: destino declarado, e a falta dele é caso esperado ────
+
+
+def test_o_aviso_nao_despeja_o_envelope_de_erro_inteiro_no_chat(monkeypatch, varredura):
+    """Achado no smoke de 31/08/2026, rodando a varredura de verdade.
+
+    O erro da CLI do modelo vem com o envelope JSON junto — 700 caracteres de
+    `usage`, `session_id` e `cache_creation` para dizer *"modelo não
+    reconhecido"*. O aviso é uma mensagem de chat: despejar isso ali é o mesmo
+    que não avisar, porque ninguém lê. O motivo inteiro continua no log, que é
+    onde trace pertence.
+    """
+    from bot.lucien import reconstrucao
+    from bot.lucien.models import ResultadoDaRodada
+
+    monkeypatch.setenv("LUCIEN_FALHAS_SEGUIDAS", "1")
+    envelope = "unrecognized_model " + ("x" * 900)
+    monkeypatch.setattr(reconstrucao.worker, "uma_rodada",
+                        lambda **kw: ResultadoDaRodada(erro=envelope))
+
+    reconstrucao.rodar(conninfo="x", kobe_home="/tmp", max_lotes=5, pausa_s=0)
+
+    texto = varredura[0]
+    assert len(texto) < 400, f"o aviso saiu com {len(texto)} caracteres — é um log, não um aviso"
+    assert "unrecognized_model" in texto, "cortou tanto que perdeu o diagnóstico"
+    assert "…" in texto, "cortou sem dizer que cortou"
+
+
+def test_sem_destino_declarado_o_aviso_vai_so_pro_log(monkeypatch, tmp_path):
+    """Sem `LUCIEN_ALERT_CHAT_ID` não há para onde mandar — e isso NÃO pode virar
+    uma segunda fonte de crash em cima da falha que se queria relatar.
+
+    Escolher um tópico por conta própria seria pior que não mandar: a mensagem
+    de saúde do sistema cairia numa conversa qualquer, e quem devia receber
+    continuaria sem saber.
+    """
+    from bot.lucien import aviso
+
+    monkeypatch.delenv("LUCIEN_ALERT_CHAT_ID", raising=False)
+    chamadas = []
+    monkeypatch.setattr(aviso.subprocess, "run", lambda *a, **k: chamadas.append(a))
+
+    assert aviso.avisar(str(tmp_path), "parei") is False
+    assert chamadas == [], "tentou mandar sem destino declarado"
+
+
+def test_o_telegram_fora_do_ar_nao_derruba_quem_chamou(monkeypatch, tmp_path):
+    """O que foi gravado já está gravado."""
+    from bot.lucien import aviso
+
+    monkeypatch.setenv("LUCIEN_ALERT_CHAT_ID", "-100123")
+    (tmp_path / "bot" / "bin").mkdir(parents=True)
+    (tmp_path / "bot" / "bin" / "kobe-notify").write_text("#!/bin/sh\n")
+
+    def _estoura(*a, **k):
+        raise OSError("rede fora")
+
+    monkeypatch.setattr(aviso.subprocess, "run", _estoura)
+
+    assert aviso.avisar(str(tmp_path), "parei") is False

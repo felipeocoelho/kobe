@@ -60,7 +60,7 @@ import sys
 from typing import Optional
 
 from bot import lucien as cfg
-from bot.lucien import brain, store
+from bot.lucien import aviso, brain, store
 from bot.lucien.models import Lote, Proposta, ResultadoDaRodada
 
 logger = logging.getLogger("kobe.lucien.worker")
@@ -180,40 +180,13 @@ def _processar(cx, lote: Lote, *, kobe_home: str, modo: str, scope: str,
 
 
 def _gritar(kobe_home: str, motivo: str) -> None:
-    """O aviso que sai do log e vai ao operador.
+    """O aviso de degeneração da T7, pelo caminho de aviso do LUCIEN.
 
-    Só com destino **declarado** (`LUCIEN_ALERT_CHAT_ID`), pela mesma razão do
-    coletor da F1: escolher um tópico por conta própria faria uma mensagem de
-    saúde do sistema cair numa conversa qualquer, o que é pior que não mandar.
-    Falhar em avisar nunca derruba a rodada — o que foi gravado já está gravado.
+    O corpo mora em `bot/lucien/aviso.py` desde 31/08/2026: a varredura do
+    passado passou a precisar do mesmo canal para não morrer calada, e duas
+    cópias da regra de destino é como uma delas acaba divergindo em silêncio.
     """
-    import subprocess
-
-    chat_id = (os.environ.get("LUCIEN_ALERT_CHAT_ID") or "").strip()
-    if not chat_id:
-        logger.warning(
-            "lucien: T7 no piso e sem LUCIEN_ALERT_CHAT_ID — o aviso ficou só "
-            "no log: %s", motivo,
-        )
-        return
-    helper = os.path.join(kobe_home, "bot", "bin", "kobe-notify")
-    if not os.path.isfile(helper):
-        logger.warning("lucien: %s não existe — aviso não enviado", helper)
-        return
-    env = dict(os.environ)
-    env["KOBE_CHAT_ID"] = chat_id
-    thread = (os.environ.get("LUCIEN_ALERT_THREAD_ID") or "").strip()
-    if thread:
-        env["KOBE_THREAD_ID"] = thread
-    else:
-        env.pop("KOBE_THREAD_ID", None)
-    try:
-        subprocess.run(
-            [helper, f"⚠️ [lucien] {motivo}"], env=env, timeout=30,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
-    except Exception:  # noqa: BLE001 — falhar em avisar não derruba a rodada
-        logger.exception("lucien: falha ao enviar o aviso de degeneração")
+    aviso.avisar(kobe_home, motivo)
 
 
 def _partir(lote: Lote) -> Optional[list[Lote]]:
@@ -273,8 +246,10 @@ def uma_rodada(
 
             # A reconstrução para no marco fincado pelo `kobe-lucien init`.
             # Sem isso ela passaria por cima do que a leitura corrente já faz, e
-            # as duas gastariam cota no mesmo trecho.
-            teto = store.marco_incremental(cx, topic_id) if scope == "reconstruction" else None
+            # as duas gastariam cota no mesmo trecho. O marco é GRAVADO (escopo
+            # `marco`) desde 31/08/2026 — antes ele era o cursor incremental lido
+            # na hora, e o teto fugia para a frente junto com a conversa.
+            teto = store.marco_reconstrucao(cx, topic_id) if scope == "reconstruction" else None
             lote = store.montar_lote(cx, topic_id, scope=scope, teto_seq=teto)
             if limite_mensagens:
                 lote.mensagens = lote.mensagens[:limite_mensagens]

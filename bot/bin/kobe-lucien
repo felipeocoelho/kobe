@@ -13,7 +13,13 @@ OS SEIS COMANDOS, E POR QUE CADA UM EXISTE
     relatorio     o que LUCIEN escreveu no período, com a origem de cada linha.
                   É mitigação declarada da fase, não conveniência: um modelo que
                   escreve estado tem que ser auditável por quem lê o estado.
-    reconstruir   a varredura do passado, com teto de lotes e ensaio.
+    reconstruir   a varredura do passado, com teto de lotes e ensaio. Quando ela
+                  para por motivo ANORMAL (falhas seguidas do modelo, erro não
+                  tratado, cadeado tomado), avisa o operador em vez de morrer
+                  calada — uma varredura de horas que para em silêncio é
+                  indistinguível de uma que está rodando. Bater o teto de lotes
+                  ou acabar o backlog não é anormal e não vira alarme. O destino
+                  do aviso é `LUCIEN_ALERT_CHAT_ID`; sem ele, vai só pro log.
     reverter      desfaz UM evento, pela imagem anterior guardada.
 
 POR QUE `reverter` E NÃO UM `UPDATE` À MÃO
@@ -208,8 +214,15 @@ def cmd_init(args) -> int:
                 nota = f"· reconstrução preservada em #{m['reconstruido_ate']}"
             else:
                 nota = "· reconstrução intocada (varre desde o começo)"
+            # O marco é a fronteira "daqui pra trás é passado", e ela é fincada
+            # UMA vez. Dizer qual é, e se já existia, é o que permite conferir
+            # que a segunda execução não mexeu no alvo da varredura.
+            if m["marco_ja_existia"]:
+                marca = f"marco #{m['marco_seq']} (já existia)"
+            else:
+                marca = f"marco #{m['marco_seq']} FINCADO agora"
             print(f"  {m['topico']:<24} até #{m['topo']}  "
-                  f"({m['mensagens']} mensagens) {nota}")
+                  f"({m['mensagens']} mensagens) · {marca} {nota}")
         print()
         print(f"backlog a reconstruir: {antes.mensagens} mensagem(ns) antes → "
               f"{depois.mensagens} depois.")
@@ -295,7 +308,12 @@ def cmd_status(args) -> int:
             print(f"reconstrução pendente: {plano.mensagens} mensagens em "
                   f"{len(plano.topicos)} tópico(s) — ~{plano.lotes} lote(s)")
         else:
-            cur.execute("SELECT COUNT(*) n FROM lucien_cursor WHERE scope='incremental'")
+            # Conta o escopo `marco`, não o `incremental`: quem responde pela
+            # fronteira é ele desde a migration 009. Contar o incremental aqui
+            # diria "o marco foi fincado" para um banco onde a leitura corrente
+            # rodou e o marco nunca foi declarado — que é justamente a confusão
+            # entre progresso e fronteira que aquele conserto desfez.
+            cur.execute("SELECT COUNT(*) n FROM lucien_cursor WHERE scope='marco'")
             if not cur.fetchone()["n"]:
                 print("reconstrução: o marco ainda NÃO foi fincado — rode `kobe-lucien init`")
             else:
