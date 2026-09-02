@@ -59,6 +59,7 @@ class Config:
     # teto e sinal de consolidação. Off = comportamento de hoje (USER.md só
     # entra se o agente o ler). Ver bot/memory/curated_core.py.
     curated_core_enabled: bool
+    boletim_enabled: bool
     # Sinais de grounding baratos (Highlander Frente 1.1): injeta no prompt o
     # que muda com o tempo e o agente senão narraria de memória — hoje, há
     # quanto tempo foi a última troca neste tópico (anti-confabulação temporal
@@ -271,6 +272,10 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         # e grounding são puro-cômputo (no-op gracioso se faltar arquivo/histórico);
         # hindsight é best-effort (se o serviço estiver fora, falha rápido e segue).
         curated_core_enabled=_parse_bool(os.getenv("CURATED_CORE_ENABLED", "true")),
+        # Nasce LIGADO — decisão do operador em 01/09/2026 ("com certeza nasce
+        # ligado"). É seguro em instalação nova porque lá não existe boletim
+        # nenhum: sem arquivo, o bloco é ausente e o prompt é o de sempre.
+        boletim_enabled=_parse_bool(os.getenv("BOLETIM_ENABLED", "true")),
         grounding_signals_enabled=_parse_bool(os.getenv("GROUNDING_SIGNALS_ENABLED", "true")),
         background_state_gate_enabled=_parse_bool(
             os.getenv("BACKGROUND_STATE_GATE_ENABLED", "true")

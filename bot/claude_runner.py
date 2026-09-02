@@ -481,6 +481,7 @@ def build_prompt(
     sala_ativa_info: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
     curated_core: Optional[str] = None,
+    boletim: Optional[str] = None,
     grounding_signals: Optional[str] = None,
     background_state: Optional[str] = None,
     durable_memory: Optional[str] = None,
@@ -557,6 +558,18 @@ def build_prompt(
     if curated_core:
         parts.append("")
         parts.append(curated_core)
+
+    # Boletim do tópico (Highlander v3, F4): o registro de estado que LUCIEN
+    # apurou atrás, projetado em disco e lido daqui de graça — sem consulta, sem
+    # modelo, sem rede. Vem logo depois do núcleo curado porque a ordem se lê
+    # como frase: quem é o operador -> o que o agente sabe -> **o que vale hoje
+    # NESTE tópico** -> o resto do contexto dinâmico.
+    #
+    # Ele é RECORTE, não índice, e o próprio bloco diz isso no rodapé: ausência
+    # aqui não é ausência no registro.
+    if boletim:
+        parts.append("")
+        parts.append(boletim)
 
     if sala_ativa_info:
         parts.append("")

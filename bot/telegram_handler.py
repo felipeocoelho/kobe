@@ -46,6 +46,7 @@ from bot.mission_control import sala_dispatch as mission_control_sala
 from bot.alertas.context import render_alertas_abertos
 from bot.memory import (
     get_immediate_messages,
+    load_boletim,
     load_curated_core,
     render_background_state,
     render_grounding_signals,
@@ -1074,6 +1075,17 @@ async def _handle_user_text(
         else None
     )
 
+    # Boletim do tópico (F4): leitura de UM arquivo do disco, chaveado pelo
+    # `topic_id` que já está em escopo desde a L859 — nenhuma consulta nova. É
+    # a fase inteira: o conteúdo já foi escolhido atrás pelo LUCIEN. `None` com
+    # a flag off, sem arquivo (tópico que ele ainda não leu), ou em qualquer
+    # falha de leitura.
+    boletim = (
+        load_boletim(config.kobe_home, topic_id)
+        if config.boletim_enabled
+        else None
+    )
+
     # Sinais de grounding temporais (Highlander Frente 1.1): há quanto tempo foi
     # a última troca neste tópico, computado do histórico já carregado. Atrás da
     # flag; best-effort (None se off ou gap curto).
@@ -1119,6 +1131,7 @@ async def _handle_user_text(
         sala_ativa_info=sala_ativa_info,
         alertas_abertos_info=alertas_abertos_info,
         curated_core=curated_core,
+        boletim=boletim,
         grounding_signals=grounding_signals,
         background_state=background_state,
         durable_memory=durable_memory,

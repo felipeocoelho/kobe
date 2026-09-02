@@ -22,6 +22,11 @@ from bot.memory.aging import (
     parse_ts,
 )
 from bot.memory.background_state import render_background_state
+from bot.memory.boletim import (
+    BOLETIM_CHAR_LIMIT,
+    BOLETIM_TOKEN_BUDGET,
+    carregar as load_boletim,
+)
 from bot.memory.curated_core import (
     CURATED_CORE_CHAR_LIMIT,
     CURATED_CORE_MEMORY_CHAR_LIMIT,
@@ -37,7 +42,10 @@ from bot.memory.working_set import (
 )
 
 __all__ = [
+    "BOLETIM_CHAR_LIMIT",
+    "BOLETIM_TOKEN_BUDGET",
     "carimbo",
+    "load_boletim",
     "estado_com_idade",
     "humanizar_idade",
     "parse_ts",

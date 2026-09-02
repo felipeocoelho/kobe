@@ -68,6 +68,16 @@ _ensure_venv(__file__)
 LARGURA = 88
 
 
+def _kobe_home() -> Path:
+    """A raiz do Kobe — o que decide ONDE o boletim é gravado.
+
+    `KOBE_HOME` quando declarado (é o que o bot exporta), senão a árvore de onde
+    este script está rodando. Sem default fixo: um caminho cravado escreveria o
+    boletim de um ambiente na pasta do outro.
+    """
+    return Path(os.environ.get("KOBE_HOME") or _RAIZ)
+
+
 def _url(args) -> str:
     url = (getattr(args, "database_url", None) or os.environ.get("DATABASE_URL") or "").strip()
     if not url:
@@ -473,6 +483,23 @@ def cmd_reverter(args) -> int:
             print("ENSAIO — nada foi gravado. A afirmação VOLTARIA a:")
         else:
             cx.commit()
+            # O boletim é PROJEÇÃO do registro, e `reverter` é o único caminho
+            # que muda o registro fora de uma rodada do worker. Sem este gancho,
+            # o arquivo em disco continuaria mostrando o estado desfeito até a
+            # próxima rodada daquele tópico — um boletim que contradiz o banco é
+            # pior que boletim nenhum.
+            try:
+                from bot.lucien import boletim
+                if boletim.habilitado():
+                    dono = cx.cursor().execute(
+                        "SELECT c.topic_id::text AS t FROM lucien_events e"
+                        " JOIN lucien_claims c ON c.id = e.claim_id"
+                        " WHERE e.id = %s", (args.evento,)).fetchone()
+                    if dono:
+                        boletim.gerar(cx, dono["t"], kobe_home=_kobe_home())
+            except Exception as exc:  # noqa: BLE001
+                print(f"  (aviso: o boletim não foi regerado — {exc})",
+                      file=sys.stderr)
             print("Revertido. A afirmação ficou assim:")
         print()
         print(f"  [{antes['kind']}] {antes['statement']}")
@@ -487,6 +514,43 @@ def cmd_reverter(args) -> int:
         cx.rollback()
         print(f"kobe-lucien: {exc}", file=sys.stderr)
         return 2
+    finally:
+        cx.close()
+
+
+def cmd_boletim(args) -> int:
+    """Gera o boletim à mão — backfill da primeira instalação, e inspeção.
+
+    O worker regenera sozinho ao fim de cada rodada; isto existe para os dois
+    casos que ele não cobre: um banco que já tem afirmações mas ainda não teve
+    rodada nova, e a conferência humana do que o agente vai receber. Como a
+    escrita é idempotente byte a byte, rodar isto "à toa" nunca é errado.
+    """
+    from bot.lucien import boletim, store
+
+    cx = store.conectar(_url(args))
+    try:
+        if args.ver:
+            alvos = ([args.topico] if args.topico else
+                     [r["t"] for r in cx.cursor().execute(
+                         "SELECT DISTINCT topic_id::text AS t FROM lucien_claims"
+                     ).fetchall()])
+            for t in alvos:
+                texto = boletim.montar_texto(cx, t)
+                print(f"── {t} " + "─" * 40)
+                print(texto or "(sem afirmações — nenhum boletim)")
+                print()
+            return 0
+        if args.topico:
+            mudou = boletim.gerar(cx, args.topico, kobe_home=_kobe_home())
+            print("boletim atualizado" if mudou
+                  else "nada mudou (o boletim já estava em dia)")
+            return 0
+        mudados, vistos = boletim.gerar_todos(cx, kobe_home=_kobe_home())
+        print(f"{vistos} tópico(s) com afirmações · {mudados} boletim(ns) atualizado(s)")
+        if not mudados and vistos:
+            print("nada mudou — é o esperado quando não houve conversa nova.")
+        return 0
     finally:
         cx.close()
 
@@ -534,6 +598,15 @@ def main(argv=None) -> int:
                    help="teto DURO de lotes (default 5). Não existe 'até acabar'.")
     p.add_argument("--ensaio", action="store_true", help="só a conta, sem chamar modelo")
     p.set_defaults(func=cmd_reconstruir)
+
+    p = sub.add_parser(
+        "boletim",
+        help="gera/inspeciona o boletim quente (F4) — o registro projetado em disco",
+    )
+    p.add_argument("--topico", default=None, help="UUID do tópico (default: todos)")
+    p.add_argument("--ver", action="store_true",
+                   help="imprime o conteúdo em vez de gravar")
+    p.set_defaults(func=cmd_boletim)
 
     p = sub.add_parser("reverter", help="desfaz UM evento pela imagem anterior")
     p.add_argument("evento", help="o id do evento (kobe-lucien relatorio --com-id)")

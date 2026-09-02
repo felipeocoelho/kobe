@@ -27,6 +27,7 @@ from bot.claude_runner import ClaudeRunner
 from bot.cleanup import cleanup_loop
 from bot.config import Config, ConfigError, load_config
 from bot.db import build_client
+from bot.memory import working_set
 from bot.plugins import (
     build_capability_index,
     discover_plugins,
@@ -413,6 +414,17 @@ def main() -> None:
             "mensagem de qualquer outro será ignorada em silêncio",
             len(config.telegram_allowed_chat_ids),
         )
+
+    # A configuração efetiva da memória de trabalho, no log de subida. Calibrar
+    # às cegas é o que faz um ajuste parecer inócuo — mede-se em 31/08/2026 que
+    # o PISO de 8 mensagens é quem corta em 87% dos turnos, não o relógio; quem
+    # mexesse no tempo não sentiria nada e concluiria a coisa errada.
+    logger.info("memória — %s", working_set.descrever())
+    for _problema in working_set.conferir():
+        # WARNING e não erro fatal: um bot no ar com aviso alto se conserta em
+        # minutos; um bot que se recusa a subir por causa de um número deixa o
+        # operador sem canal nenhum.
+        logger.warning("configuração incoerente da janela imediata — %s", _problema)
 
     _avisar_paridade_de_env(config)
 

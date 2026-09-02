@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Diagnóstico da memória de trabalho — QUEM MANDA na janela imediata.
+
+POR QUE ESTA FERRAMENTA EXISTE
+-------------------------------
+Porque medir só serve se ajustar for barato — e ajustar só serve se der para
+**ver o efeito**. Sem isso, calibrar vira adivinhação com aparência de método.
+
+O caso concreto que a motivou, medido em 31/08/2026: a janela imediata parece
+ser "os últimos 10 minutos", e não é. Sobre os 968 turnos reais do operador no
+tópico de maior volume, **o piso de 8 mensagens é quem corta em 87% dos turnos**;
+o relógio corta em 11%; e os tetos de 60 mensagens e 8.000 tokens **nunca**
+cortaram. Quem mexesse no tempo não sentiria diferença nenhuma — e concluiria
+"esse parâmetro não importa" quando a verdade é "outro está na frente dele".
+
+Pior: o quadro **muda** conforme se mexe. Subir a janela para 6 h sem tocar no
+teto de 8.000 faz o TETO virar o limitante em 47% dos turnos — ou seja, a
+"janela de 6 horas" entrega 8.000 tokens quase metade das vezes, e o parâmetro
+novo não entrega o que promete. Em silêncio.
+
+O QUE ELE FAZ, E O QUE ELE NÃO FAZ
+-----------------------------------
+Ele **reexecuta a lógica real** de `bot/memory/working_set.py` sobre os turnos
+que já aconteceram no banco, e responde três coisas: quanto a janela gasta, qual
+parâmetro é o limitante efetivo, e o que mudaria com outra configuração
+(`--simular`). É só leitura — não escreve nada, não muda configuração, não fala
+com modelo nenhum.
+
+Ele **não** diz se a janela deveria ser maior. Isso não se responde por custo,
+e sim por relevância; a bateria que mede isso vive fora daqui.
+
+USO
+    kobe-memoria diagnostico                      # a configuração de hoje
+    kobe-memoria diagnostico --topico "Dev Kobe"  # um tópico só
+    kobe-memoria diagnostico --simular 3600:8:100:16000
+                                                  # tempo:piso:tetoMsgs:tetoTokens
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import statistics as st
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+_KOBE_HOME = Path(__file__).resolve().parent.parent.parent
+if str(_KOBE_HOME) not in sys.path:
+    sys.path.insert(0, str(_KOBE_HOME))
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+
+def _url(args) -> str:
+    url = (getattr(args, "database_url", None) or os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        print("kobe-memoria: sem banco. Passe --database-url ou defina DATABASE_URL.",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return url
+
+
+def _pct(v, q):
+    v = sorted(v)
+    return v[min(len(v) - 1, int(round((len(v) - 1) * q)))] if v else 0
+
+
+def _simular(msgs, ancoras, seg, piso, teto_m, teto_t, chars_por_token):
+    """A lógica de `get_immediate_messages`, aplicada a cada turno já ocorrido.
+
+    Mantida em paralelo à do módulo de propósito — se as duas divergirem um dia,
+    o diagnóstico mentiria com autoridade. O teste `test_kobe_memoria.py` compara
+    as duas sobre o mesmo dado justamente para que a cópia não vire ficção.
+    """
+    toks, nmsgs = [], []
+    manda = {"piso": 0, "tempo": 0, "teto_msgs": 0, "teto_tokens": 0}
+    for i in ancoras:
+        bloco = msgs[max(0, i - teto_m + 1): i + 1]
+        corte = bloco[-1]["ts"] - timedelta(seconds=seg)
+        dentro = [m for m in bloco if m["ts"] >= corte]
+        if len(bloco) == teto_m and len(dentro) >= teto_m:
+            quem = "teto_msgs"
+        elif len(dentro) < piso:
+            quem = "piso"
+        else:
+            quem = "tempo"
+        janela = bloco[-max(len(dentro), piso):]
+        total, mantidas = 0, 0
+        for m in reversed(janela):
+            custo = int(m["n"] / chars_por_token) + 1
+            if mantidas and teto_t > 0 and total + custo > teto_t:
+                quem = "teto_tokens"
+                break
+            mantidas += 1
+            total += custo
+        manda[quem] += 1
+        toks.append(total)
+        nmsgs.append(mantidas)
+    return toks, nmsgs, manda
+
+
+def _linha(rotulo, toks, nmsgs, manda, n):
+    dom = " · ".join(
+        f"{k} {v * 100 // n}%" for k, v in sorted(manda.items(), key=lambda x: -x[1]) if v
+    )
+    return (f"{rotulo:<26} | {st.median(nmsgs):>4.0f} /{_pct(nmsgs, .9):>5} | "
+            f"{st.median(toks):>7.0f} /{_pct(toks, .9):>7} /{_pct(toks, .95):>7} | {dom}")
+
+
+def cmd_diagnostico(args) -> int:
+    import psycopg
+    from psycopg.rows import dict_row
+    from bot.memory import working_set as w
+
+    filtro, params = "", []
+    if args.topico:
+        filtro = " AND t.current_name = %s"
+        params = [args.topico]
+
+    with psycopg.connect(_url(args), row_factory=dict_row) as cx:
+        topicos = cx.execute(
+            "SELECT t.current_name AS nome, COUNT(*) AS n FROM messages m"
+            " JOIN topics t ON t.id = m.topic_id"
+            " WHERE t.current_name IS NOT NULL" + filtro +
+            " GROUP BY 1 HAVING COUNT(*) >= 50 ORDER BY n DESC", params).fetchall()
+        if not topicos:
+            print("kobe-memoria: nenhum tópico com conversa suficiente (>= 50 msgs).")
+            return 0
+
+        print()
+        print(f"configuração efetiva — {w.descrever()}")
+        for problema in w.conferir():
+            print(f"  ⚠️  INCOERENTE: {problema}")
+        print()
+
+        for t in topicos:
+            linhas = cx.execute(
+                "SELECT m.role, m.created_at AS ts,"
+                "       length(coalesce(m.content,'')) AS n FROM messages m"
+                " JOIN topics t ON t.id = m.topic_id"
+                " WHERE t.current_name = %s ORDER BY m.created_at", (t["nome"],)
+            ).fetchall()
+            ancoras = [i for i, m in enumerate(linhas) if m["role"] == "user"]
+            if not ancoras:
+                continue
+
+            print(f"── {t['nome']} · {len(linhas)} mensagens · "
+                  f"{len(ancoras)} turnos do operador " + "─" * 12)
+            print(f"{'configuração':<26} | {'msgs m/p90':>11} | "
+                  f"{'tokens med/p90/p95':>25} | quem manda (% dos turnos)")
+
+            atual = (w.IMMEDIATE_WINDOW_SECONDS, w.IMMEDIATE_MIN_COUNT,
+                     w.IMMEDIATE_HARD_CAP, w.IMMEDIATE_TOKEN_CAP)
+            cenarios = [("hoje", atual)]
+            for bruto in args.simular or []:
+                try:
+                    p = tuple(int(x) for x in bruto.split(":"))
+                    if len(p) != 4:
+                        raise ValueError
+                except ValueError:
+                    print(f"  (ignorado: '{bruto}' não é tempo:piso:tetoMsgs:tetoTokens)")
+                    continue
+                cenarios.append((f"{p[0]}s/{p[1]}/{p[2]}/{p[3]}", p))
+
+            for rotulo, (seg, piso, tm, tt) in cenarios:
+                toks, nmsgs, manda = _simular(
+                    linhas, ancoras, seg, piso, tm, tt, w._CHARS_PER_TOKEN)
+                print("  " + _linha(rotulo, toks, nmsgs, manda, len(ancoras)))
+            print()
+
+    print("Leitura: 'quem manda' é o parâmetro que decidiu o corte em cada turno.")
+    print("Mexer num parâmetro que não aparece aqui não muda quase nada — e o")
+    print("resultado nulo seria lido como 'não importa' em vez de 'outro está na")
+    print("frente dele'. Este é o erro que a ferramenta existe para evitar.")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="kobe-memoria",
+        description="Diagnóstico da memória de trabalho (Highlander v3, F4).")
+    ap.add_argument("--database-url", default=None)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("diagnostico",
+                       help="quanto a janela gasta e qual parâmetro é o limitante")
+    p.add_argument("--topico", default=None, help="nome do tópico (default: todos)")
+    p.add_argument("--simular", action="append", default=None,
+                   metavar="TEMPO:PISO:TETOMSGS:TETOTOKENS",
+                   help="compara com outra configuração; pode repetir")
+    p.set_defaults(func=cmd_diagnostico)
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

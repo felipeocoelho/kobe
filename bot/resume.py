@@ -48,6 +48,7 @@ from telegram.ext import Application
 from bot.alertas.context import render_alertas_abertos
 from bot.memory import (
     get_immediate_messages,
+    load_boletim,
     load_curated_core,
     render_grounding_signals,
 )
@@ -127,6 +128,7 @@ def build_resume_prompt(
     topic_context: Optional[str] = None,
     alertas_abertos_info: Optional[str] = None,
     curated_core: Optional[str] = None,
+    boletim: Optional[str] = None,
     grounding_signals: Optional[str] = None,
 ) -> str:
     """Monta o prompt do turno de retomada.
@@ -143,6 +145,7 @@ def build_resume_prompt(
         topic_context=topic_context,
         alertas_abertos_info=alertas_abertos_info,
         curated_core=curated_core,
+        boletim=boletim,
         grounding_signals=grounding_signals,
     )
 
@@ -184,6 +187,15 @@ def _load_resume_context(
     curated_core: Optional[str] = (
         load_curated_core(config.kobe_home) if config.curated_core_enabled else None
     )
+    # O mesmo bloco do turno normal. Uma retomada que não o trouxesse mostraria
+    # ao agente um contexto diferente do que ele teria numa mensagem comum — e a
+    # divergência entre os dois caminhos de montagem é justamente o tipo de
+    # defeito que ninguém percebe até dar resposta contraditória.
+    boletim: Optional[str] = (
+        load_boletim(config.kobe_home, snap.get("topic_id"))
+        if config.boletim_enabled
+        else None
+    )
 
     # Sinais de grounding temporais (Frente 1.1): há quanto tempo foi a última
     # troca antes deste ping de retomada. Atrás da flag.
@@ -205,6 +217,7 @@ def _load_resume_context(
         "topic_context": topic_context,
         "alertas_abertos_info": alertas_abertos_info,
         "curated_core": curated_core,
+        "boletim": boletim,
         "grounding_signals": grounding_signals,
     }
 
@@ -284,6 +297,7 @@ async def resume_one_snapshot(app: Application, snap: dict) -> None:
                 topic_context=ctx["topic_context"],
                 alertas_abertos_info=ctx["alertas_abertos_info"],
                 curated_core=ctx["curated_core"],
+                boletim=ctx["boletim"],
                 grounding_signals=ctx["grounding_signals"],
             )
 

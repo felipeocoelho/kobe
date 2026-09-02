@@ -290,6 +290,27 @@ def uma_rodada(
                     "gravadas e continuam achaveis por palavra; a busca por "
                     "paráfrase as alcança na próxima passada", exc,
                 )
+
+            # O boletim quente (F4), pelo mesmo motivo e com a mesma proteção do
+            # bloco acima: vem DEPOIS do commit e não pode desfazer nada. É a
+            # projeção em disco do que esta rodada acabou de apurar — SQL e
+            # formatação de string, sem nenhuma chamada de modelo —, e ela pega
+            # carona numa rodada que já ia acontecer. Custo marginal de
+            # assinatura: zero.
+            try:
+                from bot.lucien import boletim
+
+                if boletim.habilitado() and boletim.gerar(
+                    cx, topic_id, kobe_home=kobe_home
+                ):
+                    logger.info("lucien: boletim de %s regerado", lote.topico_nome)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "lucien: o boletim não foi regerado (%s) — o registro está "
+                    "gravado e a próxima rodada tenta de novo; o que o turno lê "
+                    "continua sendo o boletim anterior, com a data que ele "
+                    "declara", exc,
+                )
             return r
         finally:
             store.destravar(cx)

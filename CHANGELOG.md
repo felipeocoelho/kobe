@@ -4,6 +4,283 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### docs(boletim): o CLAUDE.md ensina a ler o bloco novo (2026-09-01)
+
+**Operador pediu:** a seção do boletim no `CLAUDE.md`, corrigindo o escopo da
+autorização anterior. O que fica fora desta entrega é a **faxina** do arquivo
+(enxugar e reorganizar), que é fase própria; documentar o que esta entrega
+introduz é parte normal dela. Pedido dele, como conselho: **o mínimo necessário,
+regra e ponteiro, sem narrativa** — o arquivo está em 56 mil caracteres e vai
+passar por dieta.
+
+**Por quê:** o bloco já se explica in-band (o cabeçalho declara que é curado, o
+rodapé declara o recorte), e foi assim de propósito. Mas a regra que o liga ao
+resto do contrato não cabe dentro do bloco: **o boletim não dispensa o
+`kobe-remember`**. Sem isso escrito, um recorte de ~16 linhas convida
+exatamente à conclusão que o Highlander inteiro existe para impedir — tomar
+ausência no recorte por ausência no registro.
+
+**Foi feito:** uma seção de **1.083 caracteres** (~1,9% do arquivo), em quatro
+marcadores: é recorte e não índice; cada linha é julgamento de modelo com
+origem; o cabeçalho tem data e o que vem depois dela o boletim não viu; bloco
+ausente é normal e não se comenta.
+
+**Testes:** `test_o_claude_md_ensina_que_o_boletim_e_recorte_e_nao_dispensa_o_remember`
+guarda os **invariantes** da seção, não a redação — mesmo princípio de
+`tests/test_claude_md_regra_remember.py`. Ele existe por causa da dieta que vem:
+o enxugamento pode reescrever a prosa, mas se levar embora a distinção entre
+"não está no boletim" e "não existe", fica vermelho. Suíte: **1.000 passando,
+169 puladas.**
+
+**Reversão:** `git revert <hash>` — o bloco continua funcionando sem a seção,
+porque o aviso in-band é o que sustenta; a seção reforça.
+
+### feat(memoria): os parâmetros da janela viram configuração, com travas e diagnóstico (2026-09-01)
+
+**Operador pediu:** *"esse tipo de parâmetro que a gente está conversando — tamanho
+da janela em tokens, tempo da janela, piso de mensagens, tamanho do boletim — se
+isso não era para ser flag no arquivo de configuração. De modo que, se a gente
+fosse fazer uma medição e você precisasse corrigir, você falaria: vou ajustar os
+valores tais das flags tais, e está tudo resolvido. Não precisa alterar código na
+mão."* (31/08/2026)
+
+**Por quê:** ele está certo, e o levantamento factual é constrangedor. LUCIEN
+(F3) tem **16 de 16** parâmetros por ambiente; a busca (F2) tem os dois que
+importam; a janela imediata tinha **1 de 5** — e o único exposto
+(`WORKING_MEMORY_TOKEN_CAP`) é justamente o que **nunca manda**: 0% dos turnos,
+medido. Os três que governam de fato (600 · 8 · 60) e a régua de conversão
+estavam todos cravados. **O único botão do painel era o que não estava ligado em
+nada.**
+
+O ponto de fundo dele — *"medição só serve se ajustar for barato"* — está certo,
+e falta a metade que o completa: **ajustar só serve se der para ver o efeito.**
+
+**Foi feito:**
+
+- **Os quatro parâmetros da janela viram configuração**, com os valores de
+  **sempre** como padrão: `WORKING_MEMORY_WINDOW_SECONDS=600`,
+  `WORKING_MEMORY_MIN_COUNT=8`, `WORKING_MEMORY_HARD_CAP=60`,
+  `WORKING_MEMORY_TOKEN_CAP=8000`, mais `WORKING_MEMORY_CHARS_PER_TOKEN=4`.
+  **Esta entrega põe os botões no painel e não gira nenhum** — mudar os valores
+  é decisão do operador, em fase própria. Há teste guardando isso
+  (`test_os_defaults_sao_os_valores_de_hoje`): se ele quebrar, uma entrega que
+  se declarou de risco zero mudou o prompt de todo turno.
+- **Cada um preso em faixa, e o desvio REGISTRADO** — nunca corrigido em
+  silêncio. A régua `CHARS_PER_TOKEN` é a mais estreita (3–5) de propósito: ela
+  não é política, é medida. Valor alto ali não relaxa um orçamento, faz o código
+  **contar errado** e estourar o teto achando que respeitou. É o mesmo perigo
+  que `bot/search/embedder.py` já documenta sobre a dimensão do vetor — *"não dá
+  erro, dá resposta errada com nota plausível"*.
+- **`working_set.conferir()` — a conferência de invariante na subida.** Faixa por
+  parâmetro não pega o problema real: **cada um pode ser válido e o conjunto ser
+  impossível.** Piso de 80 com teto de 60 é um estado que o código obedeceria
+  sem reclamar — a consulta traz 60, o piso pede 80, e o piso vira letra morta
+  enquanto a configuração anuncia outra coisa. `main()` registra a configuração
+  efetiva e grita a incoerência. **WARNING e não erro fatal**: um bot no ar com
+  aviso alto se conserta em minutos; um bot que se recusa a subir por causa de
+  um número deixa o operador sem canal.
+- **`bot/bin/kobe-memoria diagnostico` (novo)** — o extra que o operador aprovou
+  e chamou de item mais valioso do parecer. Reexecuta a lógica real da janela
+  sobre os turnos que **já aconteceram** no banco e responde: quanto ela gasta,
+  **qual parâmetro é o limitante efetivo**, e o que mudaria com outra
+  configuração (`--simular tempo:piso:tetoMsgs:tetoTokens`). Só leitura.
+
+**A armadilha que ele previu, medida.** Subir a janela para 6 h **sem** mexer no
+teto de 8.000 faz o TETO virar o limitante em **47% dos turnos** — a "janela de
+6 horas" entregaria 8.000 tokens quase metade das vezes, e o parâmetro novo não
+entregaria o que promete, em silêncio. Está no `.env.example`, ao lado das
+chaves, porque é onde alguém vai ler antes de calibrar.
+
+**Testes:** `tests/test_kobe_memoria.py`, 9 casos. O central é a **trava contra a
+cópia virar ficção**: o diagnóstico reimplementa a lógica da janela para poder
+aplicá-la ao passado, e um diagnóstico que diverge do original mente **com
+autoridade** — leva a calibrar na direção errada, com confiança. O teste roda as
+duas implementações sobre os mesmos dados (rajada, conversa esparsa, rajada
+longa, e o padrão misto real) e exige o mesmo resultado.
+
+**Suíte inteira: 999 passando, 169 puladas.**
+
+**Reversão:** `git revert <hash>`. Nenhuma mudança de comportamento para
+reverter — os padrões são os valores anteriores, e é isso que o teste dos
+defaults garante.
+
+### feat(boletim): o boletim entra no prompt, atrás de BOLETIM_ENABLED (2026-09-01)
+
+**Operador pediu:** que o boletim chegue de fato ao agente — e **ligado por
+padrão**. Palavras dele em 01/09/2026: *"com certeza nasce ligado"*.
+
+**Por quê:** as duas metades anteriores escreviam e sabiam ler um arquivo que
+ninguém consumia. Este commit é o que fecha o circuito.
+
+**Foi feito:**
+
+- **`build_prompt` recebe `boletim`**, injetado logo depois do núcleo curado e
+  antes da sala/alertas. A ordem se lê como frase: *quem é o operador* → *o que
+  o agente sabe* → **o que vale hoje NESTE tópico** → o resto do contexto
+  dinâmico. Trocar essa ordem não quebraria nada — e é por isso que há teste
+  (`test_t7b`): ninguém perceberia.
+- **`telegram_handler` e `resume` carregam e passam**, os dois. Uma retomada que
+  não trouxesse o bloco mostraria ao agente um contexto diferente do de uma
+  mensagem comum, e divergência entre os dois caminhos de montagem é o tipo de
+  defeito que só aparece como resposta contraditória, meses depois.
+- **Nenhuma consulta nova em nenhum dos dois.** O `topic_id` já estava em escopo
+  — na L859 do handler e no `snap` do resume. Foi isso que tornou a chave por
+  UUID (em vez de slug) gratuita do lado do leitor.
+- **`bot/config.py`: `boletim_enabled`**, default `true`. Seguro em instalação
+  nova porque lá não existe boletim nenhum — sem arquivo, o bloco é ausente e o
+  prompt é o de sempre.
+- **`.env.example`** com a chave e as duas de orçamento, documentando o que
+  cada uma custa e por que estão presas em faixa.
+
+**Testes:** 32 casos entre `test_boletim.py` e `test_boletim_escrita.py`, e
+**suíte inteira verde: 989 passando, 169 puladas** (terminal limpo, sem o `.env`
+de dev). Os dois novos que importam:
+
+- **T-1d/T-1e** medem o crescimento do **prompt de verdade**, com e sem o bloco,
+  inclusive com um arquivo 50× maior que o teto em disco — era exatamente o que
+  o briefing cobrava ("verificado por teste, não por inspeção visual").
+- **T-7** prova a reversão: com o bloco ausente, o prompt é **byte a byte** o de
+  antes desta fase.
+
+**Reversão:** `BOLETIM_ENABLED=false` + restart devolve o comportamento anterior
+sem tocar em arquivo nem em banco (e o T-7 é a prova disso). Para desfazer o
+código, `git revert <hash>`.
+
+### feat(boletim): o lado ESCRITA — o worker projeta o registro em disco (2026-09-01)
+
+**Operador pediu:** a outra metade da F4 — quem escreve o arquivo que o turno lê.
+
+**Por quê:** o boletim é função pura de `lucien_claims` + `lucien_events` daquele
+tópico, e a única coisa capaz de mudá-lo é uma rodada do LUCIEN gravando ali.
+Então o gatilho natural é o fim da rodada: o processo já está de pé, já é
+detached, e acabou de gastar dezenas de segundos falando com um modelo. Duas
+consultas e um `write()` são ruído nessa conta. Uma fonte própria no Keyko faria
+o daemon perguntar "mudou?" em todos os tópicos a cada tique para quase sempre
+não fazer nada — e acrescentaria superfície de falha no processo de que os
+**Alertas** dependem.
+
+**Foi feito:**
+
+- **`bot/lucien/boletim.py` (novo)** — as consultas dos três blocos e a escrita
+  atômica (`tmp` + `os.replace`, porque o turno pode estar lendo o arquivo agora).
+- **Gancho no `worker.uma_rodada`**, depois do commit e dentro de `try/except`,
+  pela mesma regra que o embedder já segue ali: falhar ao escrever um arquivo de
+  conveniência **nunca desfaz** uma rodada que já vale.
+- **Gancho no `kobe-lucien reverter`** — é o único caminho que muda o registro
+  fora de uma rodada. Sem ele, o arquivo continuaria mostrando o estado desfeito
+  até a próxima rodada daquele tópico, e um boletim que contradiz o banco é pior
+  que boletim nenhum.
+- **`kobe-lucien boletim [--topico X] [--ver]`** — backfill da primeira
+  instalação e inspeção do que o agente vai receber.
+- **Nenhuma chamada de modelo.** Quem escolhe as linhas é código: SQL e
+  formatação de string. O modelo já foi chamado antes, quando LUCIEN escreveu a
+  afirmação. Isto responde com fato a uma preocupação real do operador em
+  31/08/2026 (*"o LUCIEN vai ficar trabalhando igual um doido"*): o custo
+  marginal de assinatura é **zero**, não "baixo".
+- **O bloco "o que saiu de cena" NÃO lista `created`** — as afirmações
+  recém-criadas já estão no topo dos outros dois blocos, que são ordenados por
+  recência. O que os outros blocos estruturalmente não podem mostrar é o que
+  deixou de valer, que é o sinal de "mudamos de ideia".
+
+**Idempotência por construção — e foi ela que dispensou a migration.** O critério
+5 da fase exige que gerar duas vezes sem conversa nova não mude o arquivo. A
+forma ingênua (gravar `gerado_em = now()`) o quebra: na segunda passada o arquivo
+mudaria sozinho. O conserto foi fazer **cada byte ser função do banco** — o
+cabeçalho traz a marca d'água do próprio registro (`MAX(GREATEST(created_at,
+valid_to))`), não o relógio de quem gerou. Como efeito colateral que vale mais
+que o próprio critério, **não sobrou estado de geração para guardar: a F4 não
+precisou de coluna, tabela nem migration.**
+
+**Testes:** `tests/test_boletim_escrita.py`, 9 casos, verdes, com cursor falso
+(sem banco). O T-5 confere bytes **e `mtime`** — reescrever conteúdo igual faria
+a data do arquivo mentir para quem inspeciona a pasta.
+
+**Um defeito achado no smoke, não na revisão.** Rodando contra o `kobe_dev` de
+verdade, o rodapé saiu dizendo *"3 linha(s) de 2 afirmação(ões) vigente(s)"*. A
+causa: contava **todas** as linhas contra o total de vigentes, e o terceiro bloco
+é feito de afirmações **encerradas**, que por definição não estão no acervo
+vigente. Um rodapé que se contradiz destrói a confiança exatamente na linha que
+existe para ser confiável. Corrigido e travado por teste (`test_t3d`). Nenhum
+teste de mesa teria pego isso — só dado real tinha as duas contagens divergentes.
+
+**Reversão:** `git revert <hash>`. Em runtime, `BOLETIM_ENABLED=false` faz o
+worker parar de gerar. Os arquivos já escritos são derivados e podem ser
+apagados a qualquer momento (`user-data/lucien/boletins/`) — nada depende deles.
+
+### feat(boletim): o lado LEITURA do boletim quente — render, teto e degradação (2026-09-01)
+
+**Operador pediu:** a F4 do Highlander v3 — que o registro de estado que LUCIEN
+escreve atrás (868 afirmações em produção) passe a estar **presente no prompt de
+todo turno**, de graça, em vez de só chegar quando alguém roda `kobe-remember`.
+
+**Por quê:** a dor original do projeto, nas palavras dele em 27/08/2026 — *"quando
+eu pedia para retomar o assunto, existiam coisas que já tinham sido discutidas,
+sobre as quais decisões já haviam sido tomadas, e que você retomava como questões
+em aberto."* A F3 passou a REGISTRAR o que foi decidido e o que foi fechado; ela
+não fez esse registro chegar ao agente sozinho. Este commit é a metade de leitura
+do que faz chegar.
+
+**Foi feito:**
+
+- **`bot/memory/boletim.py` (novo)** — o que o turno executa: caminho do arquivo,
+  teto, render puro e um `carregar()` que **nunca levanta**. Sem banco, sem rede:
+  `open()` + `read()`. A direção da dependência é só uma — `lucien` importa
+  `memory`, nunca o contrário —, e é ela que garante que o caminho quente não
+  tenha como consultar nada.
+- **O arquivo é chaveado pelo `topic_id` (UUID), não pelo slug.** Não é gosto, é
+  correção: `get_topic_slug` devolve `None` para tópico sem `current_name` (os
+  pré-v0.10), e dois nomes distintos podem slugificar igual ("Café" e "Cafe") —
+  o que faria dois tópicos escreverem no mesmo arquivo, em silêncio. E custa
+  zero: `topic_id` já está em escopo nos dois caminhos que montam prompt.
+- **O orçamento é 800 tokens, e não os 1.200 do briefing — medido, e a medição
+  apontou para BAIXO.** Os 1.200 eram valor inicial declarado, não medição.
+  Medindo sobre os 968 turnos reais do operador no tópico de maior volume, com a
+  régua que a F2 calibrou (`SEARCH_PISO_COS = 0,57`, sobre a própria tabela
+  `messages`): um bloco de 25 linhas (= 1.200 tokens) entrega **24 linhas fora do
+  assunto na mediana**, cruzando o marco de ~20 documentos irrelevantes em que a
+  pesquisa de 27/08 mede a precisão caindo de ~72% para ~57%. 800 tokens
+  (~16 linhas) fica abaixo com folga. A analogia é frouxa (o estudo mede
+  documentos; aqui é frase) e por isso vale como ordem de grandeza — na dúvida,
+  erra-se para baixo.
+- **Os pesos dos blocos foram redistribuídos pela mesma medição:** "o que vale
+  hoje" caiu de 55% para 35% por ser o único bloco aberto e escolhido por
+  recência pura — o de pior perfil de ruído. "Pendências abertas" (40%) e "o que
+  saiu de cena" (25%) cresceram porque valem **justamente por serem
+  independentes da pergunta**: são a cura da dor original, e valem mesmo quando
+  o turno é sobre outra coisa.
+- **O teto se declara em tokens e trabalha em chars**, com razão conservadora
+  (3,2 chars/token, abaixo da faixa usual do português) — erro seguro é supor
+  poucos chars por token. Sem tokenizer: o único exato seria chamada de rede, e
+  o `tiktoken` seria preciso sobre a coisa errada (é o BPE da OpenAI, não o
+  tokenizer do Claude).
+- **`BOLETIM_TOKEN_BUDGET` e `BOLETIM_CHARS_POR_TOKEN` são configuráveis, e
+  presos em faixa no código** (400–1.000 e 2,5–5,0). A trava não é burocracia:
+  um teto de 20.000 tokens não é configuração agressiva, é o bloco comendo o
+  prompt; e uma régua de 10 chars/token não relaxa um orçamento, faz o código
+  **contar errado** e estourar o teto achando que respeitou. Valor fora da faixa
+  é preso **e registrado** — nunca corrigido em silêncio.
+- **Degradar em voz alta, nos dois sentidos.** O rodapé declara quantas
+  afirmações ficaram fora do recorte e por onde alcançá-las, porque um bloco de
+  16 linhas *parece* o registro inteiro e "não está no boletim" virando "não
+  existe" é a mentira que o Highlander existe para não contar. Já ausência do
+  arquivo é `None` silencioso — é o caso normal de um tópico que LUCIEN ainda
+  não leu.
+- **Vaga vazia fica vazia** (`test_t8`). Completar o bloco com linha fora de
+  assunto para "aproveitar o espaço" não é neutro: pela pesquisa citada, é pior
+  que deixar em branco.
+
+**Testes:** `tests/test_boletim.py`, 18 casos, **todos passando**, sem banco e
+sem rede. Cobrem os critérios 1 a 4 do briefing da fase. Dois merecem nota: o
+**T-2b** prova a ausência de latência pelo **desenho** (analisa a AST do módulo e
+recusa `psycopg`/`openai`/`httpx`, e checa que `carregar()` não recebe conexão) —
+o teste de tempo mede a máquina em que rodou, este mede a arquitetura e não
+envelhece; e o **T-4** varre arquivo ausente, vazio, só-espaço e com bytes
+inválidos, exigindo `None` em todos.
+
+**Reversão:** `git revert <hash>`. Código novo e inerte — nada o chama ainda, e
+nenhuma tabela, arquivo ou configuração existente foi tocada. Em runtime,
+`BOLETIM_ENABLED=false`.
+
 ### fix(lucien): a varredura do passado avisa quando morre — parada normal continua muda (2026-08-31)
 
 **Operador pediu:** que a varredura pare de morrer calada.
