@@ -521,29 +521,38 @@ Uma **missão** é um turno longo de raciocínio numa **sala visível** (tmux `-
 Quando o operador pedir em linguagem natural pra abrir/pensar uma missão — "abre uma missão sobre X", "quero pensar fundo sobre Y", "monta uma sala pra analisar Z" — você abre:
 ```
 .venv/bin/python -m bot.mission_control.sala_dispatch abrir --objetivo "<o tema, fiel ao que ele pediu>" \
-    --system "<Sistema>" --subsystem "<Subsistema|none>"
+    [--system "<Sistema>" --subsystem "<Subsistema|none>"]
 ```
 O resultado traz o `missao_id`. Confirme em uma linha ("abri a missão `<id>`, a sala já está pensando — te reporto por aqui"). Abrir **não** redireciona o tópico.
 
-**`--system` e `--subsystem` são obrigatórios, e quem declara é você.** Toda sala
-nasce com uma linha no catálogo de desenvolvimento dizendo em que sistema o
-trabalho aconteceu; sem os dois, o dispatch **recusa e não abre sala nenhuma** —
-não é validação de formulário, é restrição de integridade no banco. O operador
-continua pedindo do jeito que pede; ele não digita nada disso.
+**Uma missão pode ou não ser sobre um sistema — e quem decide é você, pelo pedido.**
+O operador continua pedindo do jeito que pede; ele não digita nada disso.
 
-| O trabalho é… | Declare |
+- **Não é sobre sistema nenhum** (debriefing, estratégia, copy, pesquisa, análise
+  de negócio) → **omita `--system` e `--subsystem`**. A sala abre normalmente,
+  fora do catálogo de desenvolvimento (`catalogado: false`). Não invente sistema
+  pra "satisfazer" o comando.
+- **É sobre um sistema** (pensar o Kobe, um plugin, o app Flow) → **declare os
+  dois**. Aí a sala ganha linha no catálogo, e a declaração é conferida: sistema
+  desconhecido recusa, e o subsistema passa a ser obrigatório (ou `none`).
+  Subsistema sem sistema também recusa.
+
+(Sessão **Coder** é outra coisa: lá o sistema é sempre obrigatório.)
+
+| A missão é… | Declare |
 |---|---|
+| **não é sobre sistema** (debriefing, estratégia, copy) | nada — omita os dois |
 | sobre o **Kobe** (o framework: core, `bot/`, `infra/`, `keyko/`) | `--system Kobe --subsystem none` |
 | sobre um **plugin do Kobe** (Coder, Atrus, Apolo, Monet, o plugin Flow) | `--system Kobe --subsystem <Coder\|Atrus\|Apolo\|Monet\|Flow>` |
 | sobre **outro sistema** (o app web Flow, por exemplo) | `--system Flow --subsystem none` |
 
-Quatro regras que fecham o desenho:
+Quando a missão declara sistema, quatro regras fecham o desenho:
 
 - **A pasta não decide.** Um plugin do Kobe mora em pasta própria e ainda assim o
   sistema é o **Kobe** — o plugin é o *subsistema*. O caso que prova: existe um
   **plugin** `flow` e existe o **app web Flow**; pela pasta seriam a mesma coisa,
   pela declaração não há confusão.
-- **`none` é declaração; omitir é recusado.** Seis meses depois, uma linha sem
+- **`none` é declaração; omitir o subsistema é recusado.** Seis meses depois, uma linha sem
   subsistema tem que querer dizer *"não tinha subsistema"*, e não *"ninguém
   preencheu"*.
 - **Em dúvida genuína, pergunte UMA linha antes de abrir** — *"isso é o plugin

@@ -80,15 +80,17 @@ def _abrir(kobe_home, **kw):
 # ══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("kw,codigo", [
-    ({}, "sistema_nao_declarado"),
-    ({"system": "", "subsystem": "none"}, "sistema_nao_declarado"),
+    # Missão SEM sistema deixou de ser recusa em 2026-09-15 (ver o bloco
+    # "missão que não é sobre sistema" abaixo). Subsistema solto, sem sistema,
+    # continua sendo.
+    ({"subsystem": "Coder"}, "subsistema_sem_sistema"),
     ({"system": "Radar", "subsystem": "none"}, "sistema_desconhecido"),
     ({"system": "Kobe"}, "subsistema_nao_declarado"),
     ({"system": "Kobe", "subsystem": ""}, "subsistema_nao_declarado"),
     ({"system": "Flow", "subsystem": "Coder"}, "subsistema_desconhecido"),
 ])
 def test_declaracao_invalida_recusa_e_nao_cria_nada(ambiente, monkeypatch, kw, codigo):
-    """Seis formas de errar a declaração; nenhuma abre sala, nenhuma deixa rastro."""
+    """Formas de errar a declaração; nenhuma abre sala, nenhuma deixa rastro."""
     chamou_spawn = []
     monkeypatch.setattr(sala_dispatch, "_spawn_worker",
                         lambda *a, **k: chamou_spawn.append(a) or 1)
@@ -211,6 +213,69 @@ def test_cwd_e_gravado_como_metadado(ambiente, monkeypatch):
         db.close()
     assert linha["cwd"] == str(pasta)
     assert linha["system_name"] == "Flow"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Missão que não é sobre sistema nenhum (2026-09-15)
+#
+# O bug: com o catálogo ligado, um debriefing de lançamento não abria sala,
+# porque exigia `--system` e o catálogo só conhece Kobe e Flow. Palavra do
+# operador: "uma missão pode ou não ser relativa a um sistema". Decisão dele
+# (opção A): missão sem sistema abre e fica FORA do catálogo — sem linha.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _linhas_da_sessao(session_id: str) -> int:
+    from bot import work_catalog as wc
+
+    db = wc.connect()
+    try:
+        return db.scalar("SELECT count(*) FROM work_sessions WHERE id = %s",
+                         (session_id,))
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("kw", [
+    {},                                         # omitido — o caso do bug
+    {"system": "", "subsystem": ""},
+    {"system": "none", "subsystem": "none"},    # sinônimo explícito
+    {"system": "  NONE "},
+])
+def test_missao_sem_sistema_abre_e_fica_fora_do_catalogo(ambiente, monkeypatch, kw):
+    chamou_spawn = []
+    monkeypatch.setattr(sala_dispatch, "_spawn_worker",
+                        lambda *a, **k: chamou_spawn.append(a) or 7)
+
+    antes = _missoes(ambiente)
+    res = _abrir(ambiente, objetivo="debriefing do lançamento", **kw)
+
+    assert res.get("ok") is True, res
+    assert res["catalogado"] is False
+    assert res["system"] is None and res["subsystem"] is None
+    assert len(_missoes(ambiente)) == len(antes) + 1
+    assert len(chamou_spawn) == 1
+    assert _linhas_da_sessao(res["session_id"]) == 0, \
+        "missão sem sistema não deveria ganhar linha no catálogo"
+
+
+def test_missao_sem_sistema_abre_mesmo_com_o_banco_fora(ambiente, monkeypatch):
+    """Um debriefing não é sobre sistema nenhum, então não pode depender do
+    Postgres pra abrir. Com sistema declarado, banco fora continua sendo falha
+    de instrumento (`test_banco_fora_e_falha_de_instrumento_nao_recusa`)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ninguem@127.0.0.1:1/nada")
+    monkeypatch.setattr(sala_dispatch, "_spawn_worker", lambda *a, **k: 1)
+
+    res = _abrir(ambiente, objetivo="debriefing do lançamento")
+
+    assert res.get("ok") is True, res
+    assert res["catalogado"] is False
+
+
+def test_subsistema_sem_sistema_ensina_as_duas_saidas(ambiente):
+    res = _abrir(ambiente, subsystem="Coder")
+    assert res["error"] == "subsistema_sem_sistema"
+    assert "--system Kobe" in res["message"]
+    assert "omita" in res["message"]
 
 
 # ══════════════════════════════════════════════════════════════════════════

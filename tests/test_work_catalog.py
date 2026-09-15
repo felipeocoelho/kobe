@@ -212,6 +212,61 @@ def test_omissao_de_subsistema_e_recusa_mas_none_e_aceito(db):
     assert out["subsystem"] is None and out["created"] is True
 
 
+def test_regra_da_missao_sem_sistema_sem_banco():
+    """A decisão "fica fora do catálogo" é pura e roda sem banco — inclusive em
+    clone limpo. É ela que garante as duas pontas do conserto de 2026-09-15:
+    missão sem sistema passa, **Coder sem sistema não**."""
+    from bot import work_catalog as wc
+
+    for system, subsystem in (("", ""), (None, None), ("none", ""),
+                              (" None ", "none")):
+        out = wc.mission_without_system("mission", system, subsystem)
+        assert out is not None and out["skipped"] is True
+        assert out["reason"] == "missao_sem_sistema"
+
+    # Coder: a função nunca o libera — a recusa fica com `resolve_system`.
+    assert wc.mission_without_system("coder", "", "") is None
+    assert wc.mission_without_system("coder", "none", "none") is None
+    # Missão que declarou sistema segue a regra de sempre.
+    assert wc.mission_without_system("mission", "Kobe", "") is None
+
+    with pytest.raises(wc.CatalogRefusal) as e:
+        wc.mission_without_system("mission", "", "Coder")
+    assert e.value.code == "subsistema_sem_sistema"
+
+
+def test_o_claude_md_ensina_que_missao_pode_nao_ter_sistema():
+    """Guarda o invariante, não a redação: se o CLAUDE.md voltar a dizer ao Hal
+    que `--system` é obrigatório na missão, o Hal volta a recusar debriefing — o
+    bug de 2026-09-15 renasceria pela documentação, com o código certo."""
+    texto = (RAIZ / "CLAUDE.md").read_text(encoding="utf-8")
+    inicio = texto.index("## Mission Control")
+    secao = texto[inicio:texto.index("\n## ", inicio + 1)]
+    assert "`--system` e `--subsystem` são obrigatórios" not in secao
+    assert "omita" in secao.lower()
+    assert "Coder" in secao and "sempre obrigatório" in secao
+
+
+def test_missao_sem_sistema_nao_grava_e_coder_sem_sistema_recusa(db):
+    from bot import work_catalog as wc
+
+    sid = _sid()
+    out = wc.register_session(db, session_id=sid, kind="mission",
+                              system="", subsystem="")
+    assert out["skipped"] is True and out["system"] is None
+    assert db.scalar("SELECT count(*) FROM work_sessions WHERE id = %s", (sid,)) == 0
+
+    with pytest.raises(wc.CatalogRefusal) as e:
+        wc.register_session(db, session_id=_sid(), kind="coder",
+                            system="", subsystem="none")
+    assert e.value.code == "sistema_nao_declarado"
+
+    with pytest.raises(wc.CatalogRefusal) as e:
+        wc.register_session(db, session_id=_sid(), kind="mission",
+                            system="Radar", subsystem="none")
+    assert e.value.code == "sistema_desconhecido"
+
+
 def test_sistema_desconhecido_recusa_e_diz_o_que_existe(db):
     """Sistema novo é EVENTO. A recusa tem que ensinar, não só reclamar —
     quem a lê é um agente, e ele precisa saber que a saída é *perguntar ao
@@ -515,6 +570,23 @@ def test_cli_recusa_sem_sistema_sai_2():
                      "--subsystem", "none")
     assert code == 2
     assert out["code"] == "sistema_nao_declarado"
+    assert "NENHUMA sala foi aberta" in out["note"]
+
+
+def test_cli_missao_sem_sistema_sai_0_skipped_mesmo_com_banco_fora():
+    """Missão sem sistema: exit 0 com `skipped` — o dispatcher segue abrindo.
+    Com o banco inalcançável, de propósito: essa missão não depende dele."""
+    code, out = _cli("register", "--session-id", _sid(), "--kind", "mission",
+                     DATABASE_URL="postgresql://ninguem@127.0.0.1:1/inexistente")
+    assert code == 0, out
+    assert out["ok"] is True and out["skipped"] is True
+    assert out["reason"] == "missao_sem_sistema"
+
+
+def test_cli_missao_subsistema_sem_sistema_sai_2():
+    code, out = _cli("register", "--session-id", _sid(), "--kind", "mission",
+                     "--subsystem", "Coder")
+    assert code == 2 and out["code"] == "subsistema_sem_sistema"
     assert "NENHUMA sala foi aberta" in out["note"]
 
 

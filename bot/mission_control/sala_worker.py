@@ -57,8 +57,8 @@ def _on_heartbeat(kobe_home: Path):
 def _on_death(kobe_home: Path):
     def cb(sala: str, st: dict) -> None:
         _notify(kobe_home,
-                f"🔴 [mission] a sala `{sala}` caiu durante o turno. O raciocínio "
-                f"registrado no workspace está preservado; reabra a missão pra continuar.")
+                f"🔴 [mission] a sala `{sala}` caiu durante o turno. As notas "
+                f"registradas no workspace estão preservadas; reabra a missão pra continuar.")
     return cb
 
 

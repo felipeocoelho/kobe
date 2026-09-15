@@ -67,7 +67,7 @@ def test_strategist_prompt() -> None:
     assert "ESTRATEGISTA" in p
     assert "analisa a pesquisa dos alunos" in p
     assert "2026-06-26-pesquisa" in p
-    assert "workspace/raciocinio.md" in p
+    assert "workspace/notas-da-missao.md" in p
     # prefixos de notify da missão
     for glyph in ("🧭 [mission]", "💡 [mission]", "🤝 [mission]", "🟡 [mission]", "🟢 [mission]"):
         assert glyph in p, glyph
@@ -87,6 +87,42 @@ def test_mission_brief() -> None:
     assert "mission-x-abcd1234" in b
     assert "2026-06-26-migracao" in b
     _ok("mission_brief")
+
+
+# Stems proibidos no texto que vai pro modelo (sysprompt + brief). Com eles, a API
+# recusava toda sala no 1º turno por `reasoning_extraction` (2026-09-15): pedir
+# que a sala "registre o raciocínio/pensamento" soa como extrair o raciocínio
+# interno do modelo. Casados sem acento e sem caixa.
+_VOCABULARIO_DE_EXTRACAO = (r"racioc", r"\bpens", r"thinking", r"reasoning",
+                            r"thought", r"monologo interno", r"cadeia de")
+
+
+def _sem_acento(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(c)).lower()
+
+
+def test_prompt_sem_vocabulario_de_extracao() -> None:
+    import re
+    kw = dict(objetivo="debriefing do lancamento", missao_id="2026-09-15-x",
+              workspace_rel="workspace")
+    textos = {
+        "system_prompt": sala_prompt.build_strategist_system_prompt(
+            kobe_home=Path("/opt/kobe"), **kw),
+        "brief": sala_prompt.build_mission_brief(sala="mission-x-abcd1234", **kw),
+    }
+    for nome, texto in textos.items():
+        plano = _sem_acento(texto)
+        for stem in _VOCABULARIO_DE_EXTRACAO:
+            m = re.search(stem, plano)
+            assert m is None, (
+                f"{nome} contém {m.group(0)!r} ({plano[max(0, m.start()-40):m.end()+40]!r}) "
+                "— esse vocabulário fez a API recusar toda sala (reasoning_extraction). "
+                "Peça DECISÕES/PREMISSAS/CONCLUSÕES, não 'raciocínio/pensamento'.")
+    # o brief aponta pro mesmo arquivo de notas que o system prompt
+    assert f"workspace/{sala_prompt.MISSION_NOTES_FILE}" in textos["brief"]
+    _ok("prompt_sem_vocabulario_de_extracao")
 
 
 # --- layout / paths ----------------------------------------------------
@@ -350,6 +386,7 @@ def main() -> int:
     test_sala_name()
     test_strategist_prompt()
     test_mission_brief()
+    test_prompt_sem_vocabulario_de_extracao()
     test_paths_and_workspace()
     test_flag_and_tuning()
     test_find_sala_ativa()

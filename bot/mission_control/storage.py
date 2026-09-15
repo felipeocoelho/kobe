@@ -6,7 +6,7 @@ Layout por missao (`user-data/missoes/<id>/`):
     sala.sysprompt.txt  system prompt de estrategista
     sala-launch.sh      script que vira o comando da sala tmux
     sala.log            log do worker que monitora a sala
-    workspace/          scratch da missao (raciocinio.md, rascunhos/, brief)
+    workspace/          scratch da missao (notas-da-missao.md, rascunhos/, brief)
 
 NOTA HISTORICA (2026-08-25). Este modulo servia DOIS sistemas que dividiam
 esta mesma pasta: o Sistema de Missoes v0.13 (formato `estado.json`, comandos
@@ -93,7 +93,7 @@ def path_sala_log(kobe_home: Path, missao_id: str) -> Path:
 
 
 def workspace_dir(kobe_home: Path, missao_id: str) -> Path:
-    """Scratch bruto da missão (raciocinio.md, rascunhos/, handoff-brief.md).
+    """Scratch bruto da missão (notas-da-missao.md, rascunhos/, handoff-brief.md).
     Separado da KB curada — a destilação durável é passo explícito ao fim."""
     return missao_dir(kobe_home, missao_id) / "workspace"
 

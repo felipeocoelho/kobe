@@ -32,6 +32,14 @@ AS TRÊS CAMADAS DA DECLARAÇÃO (§6.3 do briefing)
 3. **Quem preenche é o agente**, a partir do pedido, do tópico e do repositório
    — e pergunta uma linha quando genuinamente ambíguo.
 
+**A exceção da missão (2026-09-15).** A camada 2 vale inteira pro **Coder**. Uma
+sala de **missão** pode não ser sobre sistema nenhum — um debriefing de
+lançamento, uma análise de copy. Palavra do operador: *"uma missão pode ou não
+ser relativa a um sistema"*. Então missão SEM sistema (omitido ou `none`) abre
+normalmente e fica **fora** do catálogo — que é de *desenvolvimento* — sem
+linha, sem migration, e sem precisar do banco. Missão COM sistema segue a regra
+de sempre. Ver `mission_without_system`.
+
 ──────────────────────────────────────────────────────────────────────────
 A DISTINÇÃO QUE ESTE MÓDULO SE OBRIGA A FAZER
 ──────────────────────────────────────────────────────────────────────────
@@ -440,6 +448,54 @@ def resolve_topic_id(
     return row["id"] if row else None
 
 
+def _absent_or_none(ref: Optional[str]) -> bool:
+    ref = (ref or "").strip()
+    return not ref or slugify(ref) == SUBSYSTEM_NONE
+
+
+def mission_without_system(
+    kind: str, system: Optional[str], subsystem: Optional[str]
+) -> Optional[dict]:
+    """A missão que não é sobre sistema nenhum → o resultado "fora do catálogo".
+
+    Devolve `None` quando a regra normal se aplica (é Coder, ou a missão declarou
+    sistema). Devolve o dicionário `skipped` quando é missão sem sistema — omitido
+    ou escrito `none`, que aqui querem dizer a mesma coisa.
+
+    **Só para `kind == "mission"`.** O Coder sem sistema continua caindo na recusa
+    de `resolve_system`, byte a byte como antes: sessão de código é sempre sobre
+    um sistema, e é aí que o catálogo existe pra ser exigente.
+
+    Um subsistema declarado SEM sistema é recusado, e não ignorado: "Coder" solto
+    não diz de qual sistema é, e descartar a declaração em silêncio esconderia
+    justamente o esquecimento que a regra existe pra pegar.
+
+    Não toca no banco — é o que deixa uma missão de estratégia abrir mesmo com o
+    Postgres fora.
+    """
+    if kind != "mission" or not _absent_or_none(system):
+        return None
+    if not _absent_or_none(subsystem):
+        raise CatalogRefusal(
+            "subsistema_sem_sistema",
+            f"subsistema {subsystem.strip()!r} declarado sem sistema — a sala NÃO "
+            f"foi aberta.",
+            hint=(
+                "subsistema só existe dentro de um sistema. Se a missão é sobre um "
+                "plugin do Kobe, declare `--system Kobe --subsystem <Plugin>`. Se a "
+                "missão não é sobre sistema nenhum (estratégia, copy, debriefing), "
+                "omita `--system` E `--subsystem`."
+            ),
+        )
+    return {
+        "skipped": True,
+        "reason": "missao_sem_sistema",
+        "kind": kind,
+        "system": None,
+        "subsystem": None,
+    }
+
+
 # --- escrita ------------------------------------------------------------
 
 def register_session(
@@ -475,6 +531,10 @@ def register_session(
             f"kind {kind!r} inválido.",
             hint=f"use um de: {', '.join(SESSION_KINDS)}",
         )
+
+    fora = mission_without_system(kind, system, subsystem)
+    if fora is not None:
+        return {**fora, "session_id": session_id, "cwd": cwd}
 
     sistema = resolve_system(db, system)
     subsistema = resolve_subsystem(db, sistema, subsystem)
@@ -670,6 +730,11 @@ def register_from_dispatch(
     """
     if not catalog_enabled():
         return {"skipped": True, "reason": "WORK_CATALOG_ENABLED off"}
+
+    # Missão sem sistema decide-se ANTES de abrir conexão: não depende do banco.
+    fora = mission_without_system(kind, system, subsystem)
+    if fora is not None:
+        return {**fora, "session_id": session_id}
 
     db = connect()
     try:

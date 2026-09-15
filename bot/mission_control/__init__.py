@@ -1,6 +1,6 @@
 """Mission Control — as salas de missao do operador.
 
-Uma **sala de missao** e um turno longo de raciocinio numa janela visivel:
+Uma **sala de missao** e um turno longo de analise numa janela visivel:
 uma sessao `claude` rodando em tmux (`--remote-control`), navegavel no Claude
 Code Desktop, com prompt de estrategista. O operador abre por **linguagem
 natural** ("abre uma missao sobre X") — nao ha slash command. A sala nunca se

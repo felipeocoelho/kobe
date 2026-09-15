@@ -175,10 +175,12 @@ def abrir_sala(*, kobe_home: Path, objetivo: str, chat_id: int,
 
     SOBRE `system`/`subsystem` (Highlander v3, F1, §6.3)
     ----------------------------------------------------
-    São declaração OBRIGATÓRIA quando o catálogo está ligado, e a sala **não
-    nasce** sem eles. Não é validação de formulário: é a Camada 2 de uma
-    garantia de três camadas, cuja base é uma restrição de integridade no banco
-    (`work_sessions.system_id` é `NOT NULL` com chave estrangeira).
+    São OPCIONAIS na missão (correção de 2026-09-15). Uma missão pode não ser
+    sobre sistema nenhum — debriefing, estratégia, copy — e aí abre sem eles,
+    **fora** do catálogo (`catalogado: false`, sem tocar no banco). Quando a
+    missão DECLARA sistema, a regra de sempre vale inteira: sistema desconhecido
+    recusa, subsistema obrigatório (ou `none`). E subsistema sem sistema recusa.
+    A obrigatoriedade incondicional ficou só no Coder.
 
     A ordem aqui é o desenho inteiro: **registra-se primeiro, abre-se depois.**
     Se o registro falhar, nada é criado — nem a pasta da missão, nem o
@@ -329,9 +331,9 @@ def main(argv: list[str] | None = None) -> int:
     # arguments are required". Aqui a recusa É a entrega, então ela merece
     # texto bom — quem a lê é um agente decidindo o próximo passo.
     pa.add_argument("--system", default="",
-                    help="o sistema (obrigatório com o catálogo ligado)")
+                    help="o sistema, se a missão é sobre um (omita se não é)")
     pa.add_argument("--subsystem", default="",
-                    help="o subsistema, ou `none` pra declarar que não há")
+                    help="o subsistema, ou `none` (obrigatório SE --system veio)")
     pa.add_argument("--chat-id", type=int, default=_env_int("KOBE_CHAT_ID"))
     pa.add_argument("--thread-id", type=int, default=_env_int("KOBE_THREAD_ID"))
     pr = sub.add_parser("retomar")

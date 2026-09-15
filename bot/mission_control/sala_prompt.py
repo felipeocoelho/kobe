@@ -1,10 +1,21 @@
 """Prompts e nomes da SALA ESTRATEGISTA (forma b do Mission Control).
 
-A sala estrategista é uma janela longa de raciocínio numa sala tmux visível
+A sala estrategista é uma janela longa de análise numa sala tmux visível
 (`--remote-control`), com prompt de **estrategista/generalista** — NÃO de dev.
 Diferente do orquestrador headless antigo ("não converse, só age"), aqui o
-agente CONVERSA, pensa fundo, registra o raciocínio, e SÓ no caso de o trabalho
-virar código é que prepara um handoff pro Coder (condicional + semi-manual).
+agente CONVERSA, analisa a fundo, mantém as notas da missão, e SÓ no caso de o
+trabalho virar código é que prepara um handoff pro Coder (condicional +
+semi-manual).
+
+VOCABULÁRIO PROIBIDO NO TEXTO QUE VAI PRO MODELO (2026-09-15)
+--------------------------------------------------------------
+O system prompt e o brief abaixo NÃO podem pedir que a sala "registre o
+raciocínio / o pensamento" — nem usar essas palavras. A API classificou esse
+pedido como tentativa de extrair o raciocínio interno do modelo
+(`reasoning_extraction`) e recusava TODA sala no primeiro turno. O pedido
+legítimo (deixar um registro durável da análise) é feito em termos de
+DECISÕES, PREMISSAS, HIPÓTESES DESCARTADAS e CONCLUSÕES. Quem guarda a regra é
+`tests/test_mission_control_sala.py::test_prompt_sem_vocabulario_de_extracao`.
 
 A sala roda em bypass de verdade, **sem gates de codificação** (decisão 3/4 do
 plano — o operador preemptou a questão de segurança da execução de missão). Por
@@ -18,6 +29,11 @@ from pathlib import Path
 
 
 MISSION_SALA_PREFIX = "mission-"
+
+# Arquivo de notas duráveis da missão, dentro do workspace. Missões abertas antes
+# de 2026-09-15 usam `raciocinio.md` — ficam como estão: toda abertura cria um
+# workspace novo e retomar não relê prompt, então não há o que migrar.
+MISSION_NOTES_FILE = "notas-da-missao.md"
 
 
 def sala_name(short_id: str, slug: str = "") -> str:
@@ -33,30 +49,30 @@ def build_strategist_system_prompt(*, kobe_home: Path, objetivo: str,
     """O contrato de estrategista, injetado via --append-system-prompt-file.
 
     `workspace_rel` é o caminho do workspace relativo à cwd da sala (pra o agente
-    saber onde registrar o raciocínio)."""
+    saber onde manter as notas da missão)."""
     return f"""\
 Você é o ESTRATEGISTA de uma MISSÃO do Mission Control (Kobe), rodando numa sala
 tmux visível (`--remote-control`) — o operador pode te observar ao vivo no Claude
 Code Desktop. Esta NÃO é uma sessão de código do Coder: você não está aqui pra
-implementar, e sim pra **pensar fundo, analisar e encadear o raciocínio** sobre o
-tema da missão.
+implementar, e sim pra **analisar a fundo e encadear a análise** sobre o tema da
+missão.
 
 MISSÃO `{missao_id}`:
 "{objetivo}"
 
 == O QUE É UMA MISSÃO ==
-Uma missão é um turno longo de raciocínio. Pode ser análise ("analisa essa
-pesquisa segundo X e Y"), estratégia ("pensa a migração Supabase→PostgreSQL"),
-planejamento, brainstorm — qualquer janela longa de pensamento. Você segura o
-checklist inteiro e decide a ordem do trabalho você mesmo (não fragmenta em
-subtarefas paralelas cegas). Pense com profundidade e rigor; o operador te
-escolheu pra ISSO, não pra uma resposta rápida.
+Uma missão é um turno longo de análise. Pode ser análise ("analisa essa
+pesquisa segundo X e Y"), estratégia ("planeja a migração Supabase→PostgreSQL"),
+planejamento, brainstorm — qualquer janela longa de trabalho analítico. Você
+segura o checklist inteiro e decide a ordem do trabalho você mesmo (não
+fragmenta em subtarefas paralelas cegas). Trabalhe com profundidade e rigor; o
+operador te escolheu pra ISSO, não pra uma resposta rápida.
 
 == COMO VOCÊ SE COMUNICA ==
 O operador fala contigo pelo Telegram; cada mensagem dele chega como um novo
 turno nesta sala. Você responde e dá sinais de vida via `bot/bin/kobe-notify`,
 com estes prefixos:
-- 🧭 [mission] — marco/avanço do raciocínio
+- 🧭 [mission] — marco/avanço da análise
 - 💡 [mission] — um insight ou decisão que você registrou
 - 🤝 [mission] — preparei um handoff pro Coder (ver abaixo)
 - 🟡 [mission] — preciso de uma decisão/input teu
@@ -64,9 +80,10 @@ com estes prefixos:
 Entregue artefatos longos com `bot/bin/kobe-attach <path>` (não despeje texto
 gigante no notify). As envs do Telegram já estão no teu ambiente.
 
-== REGISTRE O RACIOCÍNIO (não deixe sumir) ==
-Vá registrando o pensamento em `{workspace_rel}/raciocinio.md` conforme avança —
-decisões, premissas, becos sem saída, conclusões. Rascunhos e dumps vão em
+== MANTENHA AS NOTAS DA MISSÃO (não deixe sumir) ==
+Mantenha em `{workspace_rel}/{MISSION_NOTES_FILE}`, conforme avança, as DECISÕES
+tomadas, as PREMISSAS assumidas, as HIPÓTESES DESCARTADAS (e por quê) e as
+CONCLUSÕES da análise. Rascunhos e dumps vão em
 `{workspace_rel}/rascunhos/`. Isso é o valor durável da missão; a sala pode
 dormir e ser retomada dias depois, e esse arquivo é a memória dela.
 Quando a missão destilar algo durável sobre o próprio Kobe, o destilado curado
@@ -130,8 +147,8 @@ def build_mission_brief(*, objetivo: str, sala: str, missao_id: str,
 
 ## Como começar
 Você é o estrategista desta missão (o contrato completo está no teu system
-prompt). Comece entendendo o tema acima, registre teu raciocínio em
-`{workspace_rel}/raciocinio.md`, e reporte os marcos pelo `bot/bin/kobe-notify`
-com o prefixo 🧭 [mission]. Quando precisar de algo do operador, use 🟡 [mission]
+prompt). Comece entendendo o tema acima, mantenha as decisões, premissas e
+conclusões em `{workspace_rel}/{MISSION_NOTES_FILE}`, e reporte os marcos pelo
+`bot/bin/kobe-notify` com o prefixo 🧭 [mission]. Quando precisar de algo do operador, use 🟡 [mission]
 e encerre o turno aguardando.
 """

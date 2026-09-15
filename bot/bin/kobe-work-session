@@ -35,6 +35,10 @@ conserto do `kobe-reflect` de 29/08/2026 — lá, um timeout do serviço era imp
 com a mesma frase de "não há registro", e o agente passou a afirmar ausência onde
 havia só uma falha.
 
+  exit 0 com `skipped: true` → `register --kind mission` SEM sistema: a missão
+            não é sobre sistema nenhum e fica fora do catálogo. Siga abrindo a
+            sala. (Só missão; `--kind coder` sem sistema é exit 2.)
+
   exit 4  → a chave `WORK_CATALOG_ENABLED` está desligada. **Não é erro**: é o
             estado de rollback, em que os dispatchers seguem abrindo sala sem
             declaração, como antes da F1. O chamador trata isto como "siga sem
@@ -182,6 +186,14 @@ def main(argv=None) -> int:
 
     db = None
     try:
+        # Missão sem sistema fica fora do catálogo e não precisa do banco
+        # (exit 0 com `skipped: true`). Coder sem sistema segue recusado adiante.
+        if args.cmd == "register":
+            fora = wc.mission_without_system(args.kind, args.system, args.subsystem)
+            if fora is not None:
+                return _emit({"ok": True, "action": "register",
+                              "session_id": args.session_id, **fora})
+
         db = wc.connect()
 
         if args.cmd == "register":

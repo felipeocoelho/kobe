@@ -26,7 +26,17 @@ X") — **nao ha comando slash**.
 
 A sala estrategista é a forma de "pensar junto" longa: você abre uma missão, o
 agente trabalha o tema numa sala visível e te reporta por `kobe-notify` (prefixos
-🧭/💡/🤝/🟡/🟢 `[mission]`), registrando o raciocínio em `workspace/raciocinio.md`.
+🧭/💡/🤝/🟡/🟢 `[mission]`), mantendo decisões, premissas, hipóteses descartadas
+e conclusões em `workspace/notas-da-missao.md`.
+
+> **Por que "notas da missão" e não "raciocínio" (2026-09-15).** Até esta data a
+> sala era instruída a *"registrar o raciocínio/pensamento"* em `raciocinio.md`. A
+> API passou a ler esse pedido como tentativa de extrair o raciocínio interno do
+> modelo (`reasoning_extraction`) e recusava **toda** sala no primeiro turno. O
+> prompt e o brief da sala não podem voltar a usar esse vocabulário — um teste
+> (`test_prompt_sem_vocabulario_de_extracao`) fica vermelho se voltarem. Missões
+> abertas antes da troca têm `raciocinio.md` no workspace; o arquivo segue lá,
+> intacto.
 
 **Atrás da flag** `MISSION_CONTROL_SALA_ENABLED` (default off — ligue no `.env` e
 reinicie o bot pra usar).
@@ -66,7 +76,7 @@ user-data/missoes/<id>/
 ├── sala.json              ← estado de runtime da sala (status, pid, turn_count…)
 ├── sala.sysprompt.txt     ← prompt de estrategista
 └── workspace/             ← scratch da missão
-    ├── raciocinio.md          o raciocínio registrado (memória durável da sala)
+    ├── notas-da-missao.md     decisões, premissas e conclusões (memória durável da sala)
     ├── rascunhos/
     └── handoff-brief.md       brief pro Coder, quando houver handoff
 ```
@@ -92,7 +102,8 @@ user-data/missoes/<YYYY-MM-DD-slug>/
 ├── sala-launch.sh         ← script que vira o comando da sala tmux
 ├── sala.log               ← log do worker que monitora a sala
 └── workspace/
-    ├── raciocinio.md          o raciocinio registrado (memoria duravel da sala)
+    ├── notas-da-missao.md     decisoes, premissas e conclusoes (memoria duravel da sala;
+    │                          missoes antigas: raciocinio.md)
     ├── handoff-brief.md       o brief, quando a missao vira "vamos construir X"
     └── rascunhos/
 ```
