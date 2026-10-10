@@ -55,6 +55,7 @@ from bot.plugins import Plugin, render_plugins_section
 from bot.progress import ProgressReporter
 from bot import temporal_gate
 from bot.turn_classifier import ROUTE_BACKGROUND, classify_turn
+from bot import kb_catalog
 from bot.topic_manager import (
     TOPIC_CONTEXT_CHAR_LIMIT,
     archive_active_session,
@@ -940,11 +941,19 @@ async def _handle_user_text(
         slug = await asyncio.to_thread(
             get_topic_slug, db, message.chat_id, thread_id
         )
-        raw = (
-            await asyncio.to_thread(load_topic_context, config.kobe_home, slug)
-            if slug
-            else None
-        )
+        if not slug:
+            return None, None
+
+        # O porteiro da base (migration 010): só entra no prompt o que está
+        # ADMITIDO no catálogo daquele tópico. A consulta cabe nesta mesma
+        # thread — ela já abriu o banco logo acima para resolver o slug.
+        def _com_catalogo() -> Optional[str]:
+            catalogo = kb_catalog.carregar(db, topic_id)
+            return load_topic_context(
+                config.kobe_home, slug, catalogo=catalogo
+            )
+
+        raw = await asyncio.to_thread(_com_catalogo)
         return slug, raw
 
     history, (slug, raw_context) = await asyncio.gather(

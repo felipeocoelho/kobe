@@ -1,35 +1,63 @@
-# MEMORY — fatos duráveis do agente
+# MEMORY — o que o operador decide que SEMPRE entra no prompt
 
-> **Template editável.** Este é o núcleo curado do AGENTE (não do operador —
-> esse é o `USER.md`). Quando `CURATED_CORE_ENABLED=true`, o conteúdo daqui é
-> auto-injetado no topo de todo turno (Highlander Frente 1.2). Mantenha PEQUENO
-> e estável: é um núcleo, não um diário. Há um teto (~6000 chars); perto dele o
-> agente é instruído a consolidar (fundir parecidos, descartar o que envelheceu).
+> **Template editável.** Copie para `MEMORY.md` e preencha. Enquanto o arquivo
+> real não existir, o Kobe funciona normalmente — este é um recurso opcional.
 
-> **Como o agente usa este arquivo:** fato durável e confirmado vira uma linha
-> aqui (preferência fixa do operador, decisão arquitetural fechada, pendência
-> recorrente). Use add/replace/remove editando o arquivo. **Não** vire um log de
-> conversa — o histórico cru já vive na janela imediata, e o assunto velho vem
-> do recall. Anti-alucinação (contrato): só registre fato confirmado, e mesmo
-> assim o agente confere contra a fonte antes de afirmar.
+## Para que este arquivo serve
 
-## Preferências fixas do operador
+É o **único lugar onde você, operador, decide que uma linha entra em todo turno,
+de todo tópico** — sem passar por recorte, sem depender de ordem alfabética, sem
+depender de o agente ir buscar.
 
-- [ex: prefere respostas diretas, sem floreio; updates a cada marco em tarefa longa]
+O conteúdo daqui é injetado no bloco de núcleo curado a cada turno, com teto de
+~6.000 caracteres. Perto do teto, o agente é instruído a pedir consolidação.
 
-## Decisões arquiteturais fechadas
+## O que entra
 
-- [ex: deploy é sempre git, nunca rsync; modelo padrão = Opus, nunca hardcodar modelo]
+**Decisão sua, atemporal, que vale em qualquer assunto.** Coisa que não tem "até
+quando" — se tivesse, o lugar dela seria outro.
 
-## Pendências / fios soltos recorrentes
+Exemplos do formato:
 
-- [ex: validar X em produção quando a feature Y estabilizar]
+- `Nada entra no <sistema X> automaticamente — só por pedido meu ou sugestão que eu aprove.`
+- `Quando eu disser "briefing", quero o registro macro, não relato técnico.`
 
-## Convenções do ambiente
+## O que NÃO entra — e para onde vai
 
-- [ex: dev em /home/.../projetos/<projeto>, prod em /home/.../<projeto>]
+Isto é o que separa este arquivo de um diário, e é o que impede ele de apodrecer:
+
+| não entra | vai para |
+|---|---|
+| **pendência** ("preciso resolver X") | a tabela de fatos — ela tem vigência e origem, e é preenchida sozinha pela conversa |
+| **fato com data** ("em 13/06 decidimos Y") | a tabela de fatos, pelo mesmo motivo |
+| **o que o agente aprendeu sobre você** | a tabela de fatos |
+| **regra de produto** (vale para qualquer instalação do Kobe) | o `CLAUDE.md` do projeto |
+| **caminho, endereço ou nome desta máquina** | o manual pessoal do operador |
+| **coisa que só importa num tópico** | o `prompt.md` daquele tópico |
+
+> **Por que a lista de exclusões é tão específica.** A versão anterior deste
+> template convidava a guardar "pendências / fios soltos recorrentes" aqui — e
+> arquivo de estado mantido à mão apodrece. Já aconteceu neste projeto: uma fila
+> de trabalho em markdown chegou a **75% de itens desatualizados**, e o próprio
+> arquivo registrou isso. O escopo estreito é a defesa contra repetir aquilo.
+
+## Como se opera
+
+| ação | como |
+|---|---|
+| **pôr** | diga ao agente: *"isso aqui eu quero que entre sempre"* |
+| **ver** | `cat user-data/identity/MEMORY.md` — é arquivo, editável à mão |
+| **tirar** | *"tira aquilo do MEMORY"*. **Tirar é tão barato quanto pôr, de propósito** — se sair for difícil, você para de pôr |
 
 ---
 
-> Kobe: este é o teu núcleo durável. Consolide quando crescer. Fato aqui não é
-> verdade absoluta — confira contra a fonte viva antes de afirmar (Fundamentação).
+## O que sempre vale
+
+- [substitua por suas decisões, uma por linha]
+
+---
+
+> **Nota de honestidade.** Este arquivo **não tem vigência nem origem** — é o preço
+> da simplicidade, e só é aceitável porque o escopo é decisão atemporal. Se ele
+> começar a acumular fato datado e pendência, virou outra coisa. Fato aqui não é
+> verdade absoluta: confira contra a fonte viva antes de afirmar (Fundamentação).

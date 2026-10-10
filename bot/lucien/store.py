@@ -694,6 +694,27 @@ def _superar(cx, lote: Lote, apelido: str, novo_id: str, p: ClaimProposta,
         return False
 
     antes = _imagem(cx, str(alvo["id"]))
+
+    # T5 — o que o OPERADOR registrou, só o operador tira.
+    #
+    # A porta deliberada (`bot/lucien/porta.py`) grava com `created_by='operador'`.
+    # Essas linhas são a palavra dele, não apuração de modelo — e um modelo
+    # revogando a palavra do operador em silêncio é o pior desfecho que este
+    # registro comporta: a decisão some do boletim e ninguém percebe.
+    #
+    # Isto é DESACOPLAMENTO, não acoplamento: uma proibição, não uma
+    # negociação entre duas fontes. Se o LUCIEN discordar de uma fixação, ele
+    # registra a afirmação nova ao lado — as duas convivem, visíveis, e quem
+    # arbitra é o operador.
+    if antes is not None and antes.get("created_by") == "operador":
+        r.recusas.append(Recusa(
+            trava="T5",
+            motivo=f"{apelido} foi registrada pelo OPERADOR pela porta deliberada; "
+                   "só ele a revoga. Registre a sua afirmação ao lado, sem superar.",
+            trecho=p.statement[:120],
+        ))
+        return False
+
     if antes is None or antes["status"] != "vigente":
         r.recusas.append(Recusa(
             trava="T2",
@@ -734,6 +755,17 @@ def _encerrar(cx, lote: Lote, fim: Encerramento, por_seq: dict[int, Mensagem],
                    "(ou já foi mudada nesta rodada)",
         ))
         return False
+    # T5 — mesma trava do `_superar`: o que o operador registrou pela porta
+    # deliberada, só ele encerra. Ver o comentário longo lá.
+    _antes_t5 = _imagem(cx, str(alvo["id"]))
+    if _antes_t5 is not None and _antes_t5.get("created_by") == "operador":
+        r.recusas.append(Recusa(
+            trava="T5",
+            motivo=f"{fim.apelido} foi registrada pelo OPERADOR pela porta "
+                   "deliberada; só ele a encerra.",
+        ))
+        return False
+
     origem = por_seq.get(int(fim.source_seq)) if _inteiro(fim.source_seq) else None
     if origem is None:
         r.recusas.append(Recusa(
@@ -848,7 +880,7 @@ def _imagem(cx, claim_id: str) -> Optional[dict]:
     cur = cx.cursor()
     cur.execute(
         "SELECT id, status, valid_to, superseded_by, statement, subject, kind,"
-        "       confidence, valid_from, source_seq"
+        "       confidence, valid_from, source_seq, created_by"
         "  FROM lucien_claims WHERE id = %s",
         (claim_id,),
     )

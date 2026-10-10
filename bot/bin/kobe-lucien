@@ -6,6 +6,8 @@ OS SEIS COMANDOS, E POR QUE CADA UM EXISTE
     init          finca o marco: "daqui pra frente é leitura corrente".
                   Sem ele, LUCIEN gastaria semanas mastigando o passado a seis
                   rodadas por hora, e NÃO veria a conversa de hoje.
+    token         o token de longa duração do LUCIEN: `token instalar` (lê sem
+                  eco e grava com modo 600), `token testar`, `token status`
     status        o registro está vivo? LUCIEN rodou? quando? Um agendador que
                   para não produz erro — produz SILÊNCIO, indistinguível de
                   "não havia nada novo". Este comando dá voz ao silêncio.
@@ -303,6 +305,23 @@ def cmd_status(args) -> int:
             print(f"rodadas [{l['mode']}]: {l['n']} · última {_idade(l['ultima'])}"
                   f" · último ÊXITO {_idade(l['ultimo_exito'])}")
 
+        # O incidente, do estado que a fonte do Keyko mantém (Etapa 0).
+        from bot.lucien import saude
+
+        estado = saude.ler(_home())
+        if estado.get("aberto"):
+            print(f"⚠️  PARADO desde {_dia(saude._de_iso(estado.get('desde')))} — "
+                  f"{estado.get('falhas')} falha(s) seguidas · causa: "
+                  f"{saude._ROTULO.get(estado.get('classe'), '?')} "
+                  f"({estado.get('causa')}) · {estado.get('avisos')} aviso(s) "
+                  f"enviado(s)  (fonte: {saude.caminho(_home())})")
+        elif estado.get("ultimo_incidente"):
+            ui = estado["ultimo_incidente"]
+            print(f"saúde: ok · último incidente de {_dia(saude._de_iso(ui.get('desde')))}"
+                  f" a {_dia(saude._de_iso(ui.get('ate')))}, {ui.get('falhas')} falha(s)")
+        else:
+            print("saúde: nenhum incidente registrado")
+
         cur.execute(
             "SELECT error, started_at FROM lucien_runs WHERE ok = false"
             " ORDER BY started_at DESC LIMIT 3"
@@ -558,6 +577,87 @@ def cmd_boletim(args) -> int:
 # ── main ──────────────────────────────────────────────────────────────────
 
 
+# ── token (Etapa 0, opção B) ───────────────────────────────────────────────
+
+
+def cmd_token(args) -> int:
+    """Instala, testa ou mostra o token de longa duração do LUCIEN.
+
+    NUNCA imprime o token. O `instalar` lê sem eco (ou da entrada padrão, se
+    não for terminal) e grava com modo 600 desde o nascimento do arquivo.
+    """
+    import json
+
+    from bot.lucien import credencial
+
+    home = _home()
+    p = credencial.caminho_token(home)
+
+    if args.acao == "instalar":
+        import getpass
+
+        if sys.stdin.isatty():
+            print("Cole o token que o `claude setup-token` mostrou (não aparece "
+                  "na tela) e tecle Enter:")
+            token = getpass.getpass("token: ").strip()
+        else:
+            token = sys.stdin.read().strip()
+        if not token or any(c.isspace() for c in token):
+            print("não instalei: o que chegou está vazio ou tem espaço no meio — "
+                  "cole só o token, numa linha.")
+            return 2
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".novo"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+        os.replace(tmp, p)
+        print(f"instalado em {p} (modo 600). Testando com uma chamada mínima…")
+        args.acao = "testar"
+
+    if args.acao == "testar":
+        import subprocess
+        import tempfile
+
+        from bot.lucien import brain
+
+        if credencial.modo(home) != "token":
+            print(f"sem token instalado em {p} — o LUCIEN usa a credencial "
+                  "compartilhada. Nada a testar.")
+            return 1
+        with tempfile.TemporaryDirectory(prefix="lucien-cfg-") as cfgdir:
+            env = brain._ambiente(home, cfgdir)
+            st = subprocess.run(["claude", "auth", "status", "--json"], env=env,
+                                capture_output=True, timeout=60)
+            try:
+                metodo = json.loads(st.stdout or b"{}").get("authMethod")
+            except ValueError:
+                metodo = None
+            pr = subprocess.run(
+                ["claude", "-p", "--output-format", "json", "--tools", "",
+                 "--strict-mcp-config", "--system-prompt", "Responda só: ok"],
+                input=b"ok", env=env, capture_output=True, timeout=120,
+                cwd=brain._workdir(home))
+        causa = brain.causa_do_envelope(pr.stdout.decode("utf-8", "replace"))
+        if pr.returncode == 0 and metodo == "oauth_token":
+            print("ok — o LUCIEN autentica pelo token próprio "
+                  "(authMethod=oauth_token), sem depender do /login da VPS.")
+            return 0
+        print(f"FALHOU — authMethod={metodo}, código {pr.returncode}. {causa}")
+        return 3
+
+    # status
+    print(f"credencial em uso pelo LUCIEN: {credencial.modo(home)}"
+          f"  (token procurado em {p})")
+    vals = credencial.validades(home)
+    if not vals:
+        print("validade: nenhuma data conhecida")
+    for v in vals:
+        est = " (ESTIMADA)" if v.estimada else ""
+        print(f"validade — {v.nome}: {_dia(v.vence_em)}{est}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="kobe-lucien",
@@ -607,6 +707,11 @@ def main(argv=None) -> int:
     p.add_argument("--ver", action="store_true",
                    help="imprime o conteúdo em vez de gravar")
     p.set_defaults(func=cmd_boletim)
+
+    p = sub.add_parser("token", help="token de longa duração do LUCIEN (instalar/testar/status)")
+    p.add_argument("acao", choices=("instalar", "testar", "status"), nargs="?",
+                   default="status")
+    p.set_defaults(func=cmd_token)
 
     p = sub.add_parser("reverter", help="desfaz UM evento pela imagem anterior")
     p.add_argument("evento", help="o id do evento (kobe-lucien relatorio --com-id)")

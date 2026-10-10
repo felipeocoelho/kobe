@@ -82,6 +82,8 @@ def lote(cx) -> Lote:
         " ORDER BY seq DESC LIMIT 1"
     )
     texto = cur.fetchone()
+    if texto is None:
+        pytest.skip("acervo de teste sem mensagem de texto do operador")
     cur.execute(
         "SELECT id, seq, topic_id, role, content, created_at, audio_transcribed"
         "  FROM messages WHERE audio_transcribed = true AND role = 'user'"

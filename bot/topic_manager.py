@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from bot.db import KobeDB
+from bot.kb_catalog import Catalogo
 
 
 logger = logging.getLogger("kobe.topics")
@@ -236,7 +237,11 @@ def _first_line_preview(content: str, limit: int = 120) -> str:
 
 
 def load_topic_context(
-    kobe_home: Path, slug: str, *, knowledge_inline_limit: Optional[int] = None
+    kobe_home: Path,
+    slug: str,
+    *,
+    knowledge_inline_limit: Optional[int] = None,
+    catalogo: Optional["Catalogo"] = None,
 ) -> Optional[str]:
     """Lê `user-data/topics/<slug>/prompt.md` + `knowledge/*` (ordem
     alfabética) e devolve string única pra injetar no prompt do Claude.
@@ -272,18 +277,38 @@ def load_topic_context(
             logger.warning("topic_context: falhou lendo %s: %s", prompt_md, exc)
 
     knowledge_dir = topic_dir / "knowledge"
-    kfiles: list[tuple[Path, str]] = []
+    na_pasta: list[str] = []
+    lidos: dict[str, tuple[Path, str]] = {}
     if knowledge_dir.is_dir():
         for f in sorted(knowledge_dir.iterdir()):
             if not f.is_file():
                 continue
+            na_pasta.append(f.name)
             try:
                 content = f.read_text(encoding="utf-8").strip()
             except OSError as exc:
                 logger.warning("topic_context: falhou lendo %s: %s", f, exc)
                 continue
             if content:
-                kfiles.append((f, content))
+                lidos[f.name] = (f, content)
+
+    # ── O PORTEIRO (migration 010) ────────────────────────────────────────
+    #
+    # Sem catálogo, o comportamento é o de sempre: a pasta inteira entra, em
+    # ordem alfabética. Isso mantém compatível quem chama fora do turno (CLI,
+    # testes, medição) e é o caminho que a árvore usava antes desta mudança.
+    #
+    # COM catálogo, só entra o que foi ADMITIDO — e na ordem do catálogo, que é
+    # o que substitui o critério alfabético. Arquivo sobre o qual ninguém
+    # decidiu nada não entra, mas TAMBÉM NÃO SOME: ele vira a lista de "batendo
+    # na porta", que é renderizada no próprio prompt. Um "não entrou" invisível
+    # é a mesma doença que o porteiro existe para curar, com outro nome.
+    batendo: list[str] = []
+    if catalogo is None:
+        kfiles: list[tuple[Path, str]] = [lidos[n] for n in sorted(lidos)]
+    else:
+        kfiles = [lidos[n] for n in catalogo.admitidos if n in lidos]
+        batendo = catalogo.batendo_na_porta(na_pasta)
 
     # Orçamento POR ARQUIVO, na ordem alfabética (Highlander v3, F0.4 / E9).
     #
@@ -329,6 +354,18 @@ def load_topic_context(
             "%d sob demanda (%d chars fora)",
             slug, total_knowledge, knowledge_inline_limit,
             len(inline), len(sob_demanda), fora,
+        )
+
+    # A porta, dita em voz alta. Só existe enquanto houver arquivo esperando —
+    # admitiu ou removeu, o bloco some sozinho. Custa ~100 chars e resolve o
+    # defeito de um "não entrou" silencioso.
+    if batendo:
+        nomes = ", ".join(f"`{n}`" for n in sorted(batendo))
+        chunks.append(
+            f"[{len(batendo)} arquivo(s) BATENDO NA PORTA da base deste tópico "
+            f"— estão na pasta mas ninguém admitiu, então NÃO estão no seu "
+            f"contexto: {nomes}. Se o operador quiser que entrem, ele diz "
+            f'"admite <nome>"; se não, diga a ele que estão lá.]'
         )
 
     if not chunks:

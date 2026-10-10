@@ -238,10 +238,15 @@ def test_regra_da_missao_sem_sistema_sem_banco():
 def test_o_claude_md_ensina_que_missao_pode_nao_ter_sistema():
     """Guarda o invariante, não a redação: se o CLAUDE.md voltar a dizer ao Hal
     que `--system` é obrigatório na missão, o Hal volta a recusar debriefing — o
-    bug de 2026-09-15 renasceria pela documentação, com o código certo."""
-    texto = (RAIZ / "CLAUDE.md").read_text(encoding="utf-8")
+    bug de 2026-09-15 renasceria pela documentação, com o código certo.
+
+    Desde a faxina dos depósitos a seção mora no satélite
+    `docs/agente/mission-control.md` (o `CLAUDE.md` só aponta para ele por
+    gatilho), então é ali que o invariante é guardado."""
+    texto = (RAIZ / "docs" / "agente" / "mission-control.md").read_text(encoding="utf-8")
     inicio = texto.index("## Mission Control")
-    secao = texto[inicio:texto.index("\n## ", inicio + 1)]
+    fim = texto.find("\n## ", inicio + 1)
+    secao = texto[inicio:] if fim == -1 else texto[inicio:fim]
     assert "`--system` e `--subsystem` são obrigatórios" not in secao
     assert "omita" in secao.lower()
     assert "Coder" in secao and "sempre obrigatório" in secao

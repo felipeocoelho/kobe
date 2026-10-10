@@ -47,6 +47,7 @@ operador seria criar exatamente o tipo de falso que a F3 vai ter de desfazer.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -103,6 +104,54 @@ def _texto_de_notify(comando: str) -> Optional[str]:
     return re.split(r"\s+[|>2]", resto)[0].strip()
 
 
+# Um plano da sala: `.local/plano-*.md` em qualquer nível. O `.local/` é a
+# convenção do rito do Coder pra rascunho fora do git — é ali que o plano mora.
+_RE_PLANO = re.compile(r"(?:^|/)\.local/(?:[^/]+/)*plano-[^/]*\.md$")
+# Plano escrito por shell (`cat > .local/plano-x.md <<EOF`, `tee`). O conteúdo
+# não é reconstituível a partir do comando com segurança, mas o FATO de a sala
+# ter escrito aquele arquivo é — e é o fato que importa pra atribuição.
+#
+# Duas cautelas, ambas medidas no acervo de produção em 07/10/2026: o caminho
+# só aceita caracteres de caminho (um `→ (\`.local/plano-x.md\`` dentro do texto
+# de um `kobe-notify` casava), e o corpo de heredoc é removido antes (uma sala
+# que escreveu um TESTE contendo `cat > .local/plano-sh.md` ganhava esse plano).
+# Errar pra menos aqui é o lado certo: sem atribuição o dossiê diz "nenhum
+# plano"; atribuição falsa é exatamente o defeito que esta regra existe pra matar.
+_RE_PLANO_SHELL = re.compile(
+    r"(?:(?<![-=])>{1,2}|\btee\s+(?:-a\s+)?)\s*['\"]?"
+    r"((?:[\w.~+-]+/)*\.local/(?:[\w.+-]+/)*plano-[\w.+-]*\.md)(?![\w.+/-])"
+)
+_RE_NOME_PLANO = re.compile(r"plano-[\w.+-]*\.md")
+_RE_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?^\s*\2\s*$", re.S | re.M)
+
+
+def _sem_heredoc(comando: str) -> str:
+    """O comando sem o CORPO dos heredocs (a linha que abre fica)."""
+    return _RE_HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0], comando)
+
+
+@dataclass
+class EscritaDePlano:
+    """Uma escrita que a sala fez num plano, na ordem em que aconteceu.
+
+    `tipo` é `write` (conteúdo inteiro), `edit` (troca de trecho) ou `shell`
+    (escrita por comando — sabe-se QUE escreveu, não O QUE).
+    """
+
+    caminho: str
+    tipo: str
+    conteudo: Optional[str] = None
+    antigo: Optional[str] = None
+    novo: Optional[str] = None
+    todas: bool = False
+
+
+def _absoluto(caminho: str, cwd: Optional[str]) -> str:
+    if not os.path.isabs(caminho) and cwd:
+        caminho = os.path.join(cwd, caminho)
+    return os.path.normpath(caminho)
+
+
 @dataclass
 class Leitura:
     """O que se extraiu de um transcript. Só fato, nada interpretado."""
@@ -121,6 +170,15 @@ class Leitura:
     ferramentas: dict[str, int] = field(default_factory=dict)
     turnos_assistente: int = 0
     blocos_thinking: int = 0
+    # Toda escrita que a sala fez em `.local/**/plano-*.md`, em ordem. É a
+    # ÚNICA fonte de atribuição do plano: o que a sala escreveu é dela; o que só
+    # está no disco ao lado pode ser de qualquer outra.
+    escritas_de_plano: list[EscritaDePlano] = field(default_factory=list)
+    # Nomes de plano (`plano-*.md`) citados em QUALQUER comando de shell da
+    # sala, corpo de heredoc incluído. Não atribui plano — só diz que a sala
+    # pode ter mexido no arquivo por fora das ferramentas de edição (um script
+    # marcando caixas, um `sed`), o que explica o disco divergir do transcript.
+    planos_tocados_por_shell: set[str] = field(default_factory=set)
 
 
 def ler_transcript(path: Path) -> Leitura:
@@ -192,12 +250,27 @@ def ler_transcript(path: Path) -> Leitura:
                             if not isinstance(entrada, dict):
                                 continue
                             caminho = entrada.get("file_path")
-                            if nome in ("Write", "Edit", "NotebookEdit") and caminho:
+                            if nome in ("Write", "Edit", "MultiEdit",
+                                        "NotebookEdit") and caminho:
                                 if caminho not in vistos_arquivos:
                                     vistos_arquivos.add(caminho)
                                     leitura.arquivos_escritos.append(caminho)
+                            if (isinstance(caminho, str)
+                                    and nome in ("Write", "Edit", "MultiEdit")
+                                    and _RE_PLANO.search(caminho)):
+                                _registra_escrita_de_plano(
+                                    leitura, nome, entrada,
+                                    _absoluto(caminho, obj.get("cwd") or leitura.cwd))
                             comando = entrada.get("command")
                             if nome == "Bash" and isinstance(comando, str):
+                                leitura.planos_tocados_por_shell.update(
+                                    _RE_NOME_PLANO.findall(comando))
+                                for m in _RE_PLANO_SHELL.finditer(_sem_heredoc(comando)):
+                                    leitura.escritas_de_plano.append(EscritaDePlano(
+                                        caminho=_absoluto(
+                                            m.group(1),
+                                            obj.get("cwd") or leitura.cwd),
+                                        tipo="shell"))
                                 texto = _texto_de_notify(comando)
                                 if texto:
                                     leitura.marcos.append(_corta(texto))
@@ -207,39 +280,165 @@ def ler_transcript(path: Path) -> Leitura:
     return leitura
 
 
+def _registra_escrita_de_plano(leitura: Leitura, ferramenta: str,
+                               entrada: dict, caminho: str) -> None:
+    if ferramenta == "Write":
+        conteudo = entrada.get("content")
+        leitura.escritas_de_plano.append(EscritaDePlano(
+            caminho=caminho, tipo="write",
+            conteudo=conteudo if isinstance(conteudo, str) else None))
+        return
+    trocas = entrada.get("edits") if ferramenta == "MultiEdit" else [entrada]
+    for t in trocas if isinstance(trocas, list) else []:
+        if not isinstance(t, dict):
+            continue
+        antigo, novo = t.get("old_string"), t.get("new_string")
+        leitura.escritas_de_plano.append(EscritaDePlano(
+            caminho=caminho, tipo="edit",
+            antigo=antigo if isinstance(antigo, str) else None,
+            novo=novo if isinstance(novo, str) else None,
+            todas=bool(t.get("replace_all"))))
+
+
 # --- o que ficou aberto -------------------------------------------------
+#
+# ATÉ 07/10/2026 o plano vinha do disco: "o `.local/plano-*.md` mais recente da
+# pasta de trabalho". Toda sala com pasta na raiz do repositório divide um único
+# `.local/`, e herdava o plano da última sala que escreveu ali. Medido em
+# produção naquele dia: 742 de 797 dossiês citavam um plano que a sala NUNCA
+# escreveu. Dossiê que mente é pior que dossiê que falta.
+#
+# Agora a atribuição vem do transcript — o que a sala escreveu é dela. O disco
+# só entra pra trazer o estado mais atual de um plano que JÁ é dela.
 
 _RE_CAIXA = re.compile(r"^\s*[-*]\s*\[( |x|X)\]\s*(.+?)\s*$")
 
 
-def pendencias_do_plano(cwd: Optional[str]) -> tuple[Optional[str], list[str], int]:
-    """As caixas NÃO marcadas do `.local/plano-*.md` da sala.
+@dataclass
+class PlanoDaSala:
+    """O plano atribuído à sala, e de onde o checklist foi lido.
 
-    É a fonte mais literal que existe pra "o que ficou aberto": não é inferência
-    sobre o que a sala fez, é a lista que ela própria escreveu e foi marcando.
-    Se houver mais de um plano, vale o mais recente.
+    `origem`:
+      - `disco`       — o arquivo existe e é o que a sala escreveu;
+      - `transcript`  — reconstruído reaplicando as escritas do transcript
+                        (o arquivo sumiu, ou o do disco já não é o dela);
+      - `indisponivel`— a sala escreveu, mas não há como mostrar o checklist.
     """
-    if not cwd:
-        return None, [], 0
-    base = Path(cwd) / ".local"
-    if not base.is_dir():
-        return None, [], 0
-    planos = sorted(base.glob("plano-*.md"), key=lambda p: p.stat().st_mtime)
-    if not planos:
-        return None, [], 0
-    plano = planos[-1]
-    abertas, total = [], 0
+
+    caminho: str
+    origem: str
+    abertas: list[str] = field(default_factory=list)
+    total: int = 0
+    nota: Optional[str] = None
+    outros: list[str] = field(default_factory=list)
+
+
+def _caixas(texto: str) -> list[tuple[bool, str]]:
+    caixas = []
+    for linha in texto.splitlines():
+        m = _RE_CAIXA.match(linha)
+        if m:
+            caixas.append((m.group(1) != " ", m.group(2)))
+    return caixas
+
+
+def _reconstroi(escritas: list[EscritaDePlano]) -> tuple[Optional[str], Optional[str]]:
+    """Reaplica as escritas em ordem. Devolve `(texto, None)` ou `(None, motivo)`.
+
+    Nunca devolve meio plano: uma troca que não casa (o trecho antigo não está
+    no texto) quer dizer que o arquivo foi mexido por fora do que o transcript
+    registra, e a partir daí qualquer texto seria palpite.
+    """
+    sem_partida = "o transcript não tem o texto de partida do plano"
+    por_shell = ("o plano foi escrito por comando de shell, cujo conteúdo o "
+                 "transcript não guarda")
+    texto: Optional[str] = None
+    lacuna = sem_partida  # por que `texto` é None, quando é
+    for e in escritas:
+        if e.tipo == "write":
+            # Uma escrita inteira recompõe o texto, mesmo depois de uma lacuna.
+            texto = e.conteudo if isinstance(e.conteudo, str) else None
+            lacuna = "uma escrita do plano não tem conteúdo legível no transcript"
+        elif e.tipo == "shell":
+            texto, lacuna = None, por_shell
+        else:  # edit
+            if texto is None:
+                continue  # a lacuna já está registrada; uma escrita pode salvar
+            if e.antigo is None or e.novo is None or e.antigo not in texto:
+                return None, ("uma edição do plano não casa com o texto "
+                              "reconstruído — o arquivo foi mexido por fora")
+            texto = texto.replace(e.antigo, e.novo) if e.todas \
+                else texto.replace(e.antigo, e.novo, 1)
+    if texto is None:
+        return None, lacuna
+    return texto, None
+
+
+def plano_da_sala(leitura: Leitura) -> Optional[PlanoDaSala]:
+    """O plano que ESTA sala escreveu, ou `None` se ela não escreveu nenhum.
+
+    Se escreveu mais de um, vale o último que ela tocou; os outros são citados.
+    """
+    if not leitura.escritas_de_plano:
+        return None
+    ordem: list[str] = []
+    for e in leitura.escritas_de_plano:
+        if e.caminho in ordem:
+            ordem.remove(e.caminho)
+        ordem.append(e.caminho)
+    caminho = ordem[-1]
+    outros = ordem[:-1]
+    escritas = [e for e in leitura.escritas_de_plano if e.caminho == caminho]
+
+    reconstruido, motivo = _reconstroi(escritas)
+
+    em_disco: Optional[str] = None
     try:
-        for linha in plano.read_text(encoding="utf-8", errors="replace").splitlines():
-            m = _RE_CAIXA.match(linha)
-            if not m:
-                continue
-            total += 1
-            if m.group(1) == " ":
-                abertas.append(m.group(2))
+        p = Path(caminho)
+        if p.is_file():
+            em_disco = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return str(plano), [], 0
-    return str(plano), abertas, total
+        em_disco = None
+
+    texto, origem, nota = None, "indisponivel", None
+    if em_disco is not None and reconstruido is not None:
+        # O disco só vale se ainda for o MESMO plano: mesmos itens, na mesma
+        # ordem (as marcações podem ter mudado — é o estado mais atual). Itens
+        # diferentes = outra sala reaproveitou o nome, e o disco não é dela.
+        if [t for _, t in _caixas(em_disco)] == [t for _, t in _caixas(reconstruido)]:
+            texto, origem = em_disco, "disco"
+        elif Path(caminho).name in leitura.planos_tocados_por_shell:
+            # Medido no acervo (07/10/2026): 7 de 7 divergências eram a PRÓPRIA
+            # sala reescrevendo o plano por script. O disco é dela, e mais novo.
+            texto, origem = em_disco, "disco"
+        else:
+            texto, origem = reconstruido, "transcript"
+            nota = ("o arquivo em disco já não é o que esta sala escreveu; abaixo, "
+                    "o plano como ela o deixou, reconstruído do transcript")
+    elif em_disco is not None:
+        # Não dá pra conferir o disco contra o transcript (escrita por shell,
+        # edição que não casa), mas a sala comprovadamente escreveu ESTE
+        # arquivo — atribuição feita; o conteúdo é o do disco.
+        texto, origem = em_disco, "disco"
+    elif reconstruido is not None:
+        texto, origem = reconstruido, "transcript"
+        nota = "o arquivo não existe mais em disco; reconstruído do transcript"
+        if Path(caminho).name in leitura.planos_tocados_por_shell:
+            # O transcript guarda as edições feitas por ferramenta, não as feitas
+            # por script. Se a sala também mexeu no plano por comando, a contagem
+            # pode estar atrasada — e um "0 de 17" errado seria uma mentira.
+            nota += (" — a sala também mexeu nele por comando de shell, que o "
+                     "transcript não reproduz; as marcações podem estar "
+                     "desatualizadas")
+    else:
+        nota = f"o arquivo não existe mais em disco e não dá pra reconstruí-lo: {motivo}"
+
+    plano = PlanoDaSala(caminho=caminho, origem=origem, nota=nota, outros=outros)
+    if texto is not None:
+        caixas = _caixas(texto)
+        plano.total = len(caixas)
+        plano.abertas = [t for feita, t in caixas if not feita]
+    return plano
 
 
 # --- a renderização -----------------------------------------------------
@@ -279,7 +478,7 @@ def render(
     }.get(status_bruto, "em andamento")
 
     cwd = cat.get("cwd") or leitura.cwd
-    plano, abertas, total_caixas = pendencias_do_plano(cwd)
+    plano = plano_da_sala(leitura)
 
     sistema = cat.get("system_name") or "(não catalogada)"
     subsistema = cat.get("subsystem_name") or "(nenhum)"
@@ -362,17 +561,30 @@ def render(
 
     L.append("## O que ficou aberto")
     L.append("")
-    if plano:
-        marcadas = total_caixas - len(abertas)
-        L.append(f"Plano: `{plano}` — **{marcadas} de {total_caixas}** concluídos.")
+    if plano is None:
+        L.append(
+            "_Nenhum plano identificado para esta sala_ — ela não escreveu "
+            "nenhum `.local/plano-*.md` (a atribuição vem do transcript, não do "
+            "que estiver na pasta)."
+        )
+    elif plano.origem == "indisponivel":
+        L.append(f"Plano: `{plano.caminho}` — _{plano.nota}._")
+    else:
+        marcadas = plano.total - len(plano.abertas)
+        L.append(f"Plano: `{plano.caminho}` — **{marcadas} de {plano.total}** concluídos.")
+        if plano.nota:
+            L.append("")
+            L.append(f"_({plano.nota}.)_")
         L.append("")
-        if abertas:
-            for item in abertas:
+        if plano.abertas:
+            for item in plano.abertas:
                 L.append(f"- [ ] {item}")
         else:
             L.append("_Nenhum item em aberto no checklist._")
-    else:
-        L.append("_Nenhum `.local/plano-*.md` encontrado na pasta de trabalho._")
+    if plano is not None and plano.outros:
+        L.append("")
+        L.append("Outros planos escritos por esta sala: "
+                 + ", ".join(f"`{o}`" for o in plano.outros) + ".")
     L.append("")
 
     L.append("## O que produziu")

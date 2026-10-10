@@ -591,3 +591,59 @@ def test_estado_perdido_com_destino_de_outro_arquivo_preserva(origem, destino, s
     preservado = dest.parent / alvo.superseded_to
     assert preservado.read_bytes() == intruso   # nada se perdeu
     assert dest.read_bytes() == src.read_bytes()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Regerar o acervo inteiro quando a REGRA do dossiê muda (Etapa 0, 07/10/2026)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _acervo_com_uma_sala(tmp_path: Path) -> tuple[Path, Path]:
+    acervo = tmp_path / "acervo"
+    proj = acervo / "-proj"
+    proj.mkdir(parents=True)
+    jl = proj / f"{uuid.uuid4()}.jsonl"
+    jl.write_text(json.dumps({"type": "assistant", "cwd": "/w", "message": {
+        "content": [{"type": "text", "text": "."}]}}) + "\n", encoding="utf-8")
+    # o dossiê VELHO, com a mentira que a regra antiga escrevia
+    (proj / f"{jl.stem}.dossier.md").write_text("Plano: `/alheio/.local/plano-x.md`\n",
+                                                 encoding="utf-8")
+    return acervo, jl
+
+
+def test_regenerar_dossies_refaz_salas_paradas_sem_tocar_o_transcript(
+        tmp_path, monkeypatch):
+    from bot.transcripts import collector
+    monkeypatch.setenv("WORK_CATALOG_ENABLED", "false")
+    acervo, jl = _acervo_com_uma_sala(tmp_path)
+    antes = hashlib.sha256(jl.read_bytes()).hexdigest()
+
+    res = collector.regenerar_dossies(dest_root=acervo)
+
+    assert res.ok and len(res.sessions) == 1
+    novo = (jl.parent / f"{jl.stem}.dossier.md").read_text(encoding="utf-8")
+    assert "/alheio/" not in novo
+    assert "Nenhum plano identificado para esta sala" in novo
+    assert hashlib.sha256(jl.read_bytes()).hexdigest() == antes
+
+
+def test_regenerar_dossies_com_saida_nao_toca_o_acervo(tmp_path, monkeypatch):
+    from bot.transcripts import collector
+    monkeypatch.setenv("WORK_CATALOG_ENABLED", "false")
+    acervo, jl = _acervo_com_uma_sala(tmp_path)
+    velho = jl.parent / f"{jl.stem}.dossier.md"
+    conteudo_velho = velho.read_text(encoding="utf-8")
+
+    saida = tmp_path / "rascunho"
+    collector.regenerar_dossies(dest_root=acervo, saida=saida)
+
+    assert velho.read_text(encoding="utf-8") == conteudo_velho
+    paralelo = saida / "-proj" / f"{jl.stem}.dossier.md"
+    assert "Nenhum plano identificado" in paralelo.read_text(encoding="utf-8")
+
+
+def test_regenerar_dossies_filtra_por_short_id(tmp_path, monkeypatch):
+    from bot.transcripts import collector
+    monkeypatch.setenv("WORK_CATALOG_ENABLED", "false")
+    acervo, jl = _acervo_com_uma_sala(tmp_path)
+    assert len(collector.regenerar_dossies(dest_root=acervo, only=["zzzzzzzz"]).sessions) == 0
+    assert len(collector.regenerar_dossies(dest_root=acervo, only=[jl.stem[:8]]).sessions) == 1

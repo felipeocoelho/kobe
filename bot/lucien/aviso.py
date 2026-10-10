@@ -61,10 +61,21 @@ def avisar(kobe_home: str, motivo: str) -> bool:
     else:
         env.pop("KOBE_THREAD_ID", None)
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [helper, f"{PREFIXO} {motivo}"], env=env, timeout=30,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False,
         )
+        codigo = getattr(proc, "returncode", 0)
+        if codigo != 0:
+            # Até 07/10/2026 isto devolvia True só por ter RODADO o helper, com
+            # o stderr em /dev/null: um Telegram recusando a mensagem passava
+            # como "avisado". Agora "saiu" quer dizer que o helper disse que saiu.
+            stderr = getattr(proc, "stderr", b"") or b""
+            logger.warning(
+                "lucien: o kobe-notify falhou (código %s) — aviso NÃO entregue: %s · %s",
+                codigo, stderr.decode("utf-8", "replace").strip()[:300], motivo,
+            )
+            return False
         return True
     except Exception:  # noqa: BLE001 — falhar em avisar não derruba quem chamou
         logger.exception("lucien: falha ao enviar o aviso")

@@ -263,3 +263,34 @@ def test_timeout_vira_CerebroIndisponivel_dizendo_quantos_segundos(monkeypatch):
     monkeypatch.setattr(brain.subprocess, "run", _estourar)
     with pytest.raises(CerebroIndisponivel, match="180s"):
         brain.chamar("oi", kobe_home="/tmp", timeout=180)
+
+
+# O envelope REAL de uma CLI sem login, capturado em 07/10/2026 apontando a CLI
+# para um diretório de credencial vazio. Começa idêntico aos 144 erros gravados
+# em 04-05/10 — e o motivo só aparece no campo `result`, perto do fim.
+_ENVELOPE_SEM_LOGIN = r'''{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"3392f291-af61-4e10-8419-c0ee868965f1","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"terminal_reason":"api_error","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"safety_stops":0,"is_error":true,"num_turns":1,"subtype":"success","api_error_status":null,"result":"Not logged in · Please run /login","type":"result","duration_ms":119,"uuid":"3943eb81-1ca9-4e33-a8ce-ce6a67f2a3b4","queued_turn_count":0,"result_index":0}'''
+
+
+def test_a_causa_do_envelope_vem_ANTES_do_corte(monkeypatch, tmp_path):
+    """Os 144 erros de 04-05/10 foram gravados como os primeiros 400 caracteres
+    do envelope, e o corte caía antes do `result`. Nenhum dizia por que falhou."""
+    import subprocess as sp
+
+    def _sem_login(*a, **k):
+        return sp.CompletedProcess(args=a, returncode=1,
+                                   stdout=_ENVELOPE_SEM_LOGIN.encode(), stderr=b"")
+
+    monkeypatch.setattr(brain.subprocess, "run", _sem_login)
+    with pytest.raises(CerebroIndisponivel) as exc:
+        brain.chamar("oi", kobe_home=str(tmp_path))
+    msg = str(exc.value)
+    assert "causa: Not logged in · Please run /login" in msg
+    assert msg.index("causa:") < msg.index("duration_api_ms")
+    assert "terminal_reason=api_error" in msg
+
+
+def test_causa_do_envelope_tolera_saida_que_nao_e_envelope():
+    assert brain.causa_do_envelope("") == ""
+    assert brain.causa_do_envelope("texto solto") == ""
+    assert brain.causa_do_envelope("[1, 2]") == ""
+    assert brain.causa_do_envelope('{"result": "x", "subtype": "success"}') == "causa: x"

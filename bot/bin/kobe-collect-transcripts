@@ -15,6 +15,7 @@ A cópia é crua e íntegra: nenhum bloco é peneirado, nem `thinking`.
     kobe-collect-transcripts --dry-run       # o que faria, sem escrever
     kobe-collect-transcripts --session 17f5  # uma sala só (aceita o short id)
     kobe-collect-transcripts status          # quando foi a última coleta
+    kobe-collect-transcripts dossies         # refaz os dossiês (regra mudou)
     kobe-collect-transcripts status --json
 
 CÓDIGOS DE SAÍDA
@@ -177,6 +178,36 @@ def cmd_run(args) -> int:
     return EXIT_OK if res.ok else EXIT_ERROR
 
 
+def cmd_dossies(args) -> int:
+    """Refaz os dossiês a partir dos `.jsonl` já colhidos. Não colhe nada."""
+    dest_root = Path(args.dest).expanduser() if args.dest \
+        else collector.default_dest_root()
+    if not dest_root.is_dir():
+        print(f"acervo não existe: {dest_root}")
+        return EXIT_ERROR
+    saida = Path(args.saida).expanduser() if args.saida else None
+    res = collector.regenerar_dossies(dest_root=dest_root,
+                                      only=args.session or None, saida=saida)
+    falhas = [s for s in res.sessions if s.error]
+    feitos = [s for s in res.sessions if s.dossier]
+    if args.json:
+        print(json.dumps({
+            "ok": res.ok, "dest_root": str(dest_root),
+            "saida": str(saida) if saida else None,
+            "sessions_seen": len(res.sessions), "dossies": len(feitos),
+            "catalog_note": res.catalog_note,
+            "errors": [{"session": s.session_id, "error": s.error} for s in falhas],
+        }, ensure_ascii=False, indent=2))
+    else:
+        onde = f" → {saida}" if saida else " (ao lado de cada transcript)"
+        print(f"{len(feitos)} de {len(res.sessions)} dossiê(s) regerados{onde}")
+        for s in falhas:
+            print(f"  ERRO      {s.session_id[:8]}  {s.error}")
+        if res.catalog_note:
+            print(f"  ⚠️  {res.catalog_note}")
+    return EXIT_OK if res.ok else EXIT_ERROR
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="kobe-collect-transcripts",
@@ -203,6 +234,17 @@ def main(argv=None) -> int:
 
     s = sub.add_parser("status", help="quando foi a última coleta bem-sucedida")
     s.set_defaults(func=cmd_status)
+
+    d = sub.add_parser(
+        "dossies",
+        help="refaz os dossiês a partir dos transcripts já colhidos (não colhe)")
+    d.add_argument("--session", action="append", default=[],
+                   help="só esta sessão (aceita o short id); repetível")
+    d.add_argument("--dest", default=None, help="acervo (default: o do Kobe)")
+    d.add_argument("--saida", default=None,
+                   help="grava numa árvore paralela em vez de ao lado do "
+                        "transcript — pra medir sem tocar o acervo")
+    d.set_defaults(func=cmd_dossies)
 
     # Sem subcomando = `run`. O caminho comum é o do relógio, e ele não deve
     # precisar de palavra nenhuma.

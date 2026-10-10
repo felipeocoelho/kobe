@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""kobe-fato — registra fato, decisão ou preferência do operador na tabela de fatos.
+
+É a **porta de entrada deliberada** do registro de estado. Existe para que o
+agente possa dizer *"registrei na tabela de fatos, vigente desde hoje, origem #N"* em vez
+de *"salvei num arquivo"* — que é gravar sem vigência, sem origem e sem revogação.
+
+USO
+---
+    kobe-fato registrar --tipo preferencia --assunto "<assunto curto>" "<a afirmação>"
+    kobe-fato registrar --tipo decisao --assunto "deploy" "..."  --origem 3812
+    kobe-fato revogar <id> --motivo "não vale mais porque ..."
+    kobe-fato listar [--limite 30]
+
+OS QUATRO TIPOS
+---------------
+    preferencia  — como o operador quer que as coisas sejam feitas
+    decisao      — algo que ficou decidido
+    aberto       — pendência: intenção declarada que ainda não fechou
+    fato         — constatação sobre o mundo ou sobre o sistema
+
+QUANDO CHAMAR — a régua, e ela é estreita de propósito
+-------------------------------------------------------
+Chame quando o operador **declarar** algo durável sobre como as coisas são ou
+devem ser. O sinal típico: *"minha preferência é…"*, *"a partir de agora…"*,
+*"ficou decidido que…"*, *"anota que…"*, *"está em aberto…"*.
+
+**NÃO chame** para: conversa comum, resposta a pergunta, algo que ele só
+mencionou de passagem (o LUCIEN pega isso sozinho, atrás), ou conteúdo longo que
+não cabe numa frase — isso é documento, e documento vai para arquivo.
+
+**Encher a tabela é tão ruim quanto deixá-la vazia.** O boletim mostra ~16 linhas
+por recência: cada registro irrelevante empurra um relevante para fora.
+
+O QUE O COMANDO GARANTE
+-----------------------
+- **Origem real.** A afirmação é amarrada a uma mensagem que existe, e o `seq`
+  devolvido abre com `kobe-remember --ver <n>`. A porta não afrouxa a chave
+  estrangeira — fato que nunca foi dito não entra por aqui.
+- **A data é a do fato**, não a da gravação: `valid_from` vem da mensagem de origem.
+- **Confiança `alta`**, exceto quando a origem veio de áudio — aí cai para `media`,
+  porque transcrição erra.
+- **O boletim é regenerado na hora**, então o registro aparece já no próximo turno.
+
+SAÍDA
+-----
+Texto pronto para você repetir ao operador. Código de saída 0 em sucesso, 1 em
+recusa (com o motivo), 3 em falha de instrumento (banco fora) — **3 não é "não
+gravou porque não devia", é "não sei se gravou"**, e a conduta é dizer isso.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+# O interpretador certo — ver `bot/bin/_venv.py`. Sem isto o helper roda no
+# Python do sistema, que não tem `psycopg`, e falha com um ImportError que não
+# diz o que fazer. O preâmbulo vem ANTES de qualquer import do projeto.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def _topico_atual(cx):
+    """O `topics.id` de onde a chamada veio, ou `None`.
+
+    Mesmo padrão do `kobe-remember`: sem `KOBE_CHAT_ID` no ambiente não há tópico
+    corrente — é o caso de rodar o comando à mão num terminal, e aí a porta não
+    tem onde gravar. Dizer isso em voz alta é melhor que gravar no tópico errado.
+    """
+    chat = os.environ.get("KOBE_CHAT_ID")
+    if not chat:
+        return None
+    thread = os.environ.get("KOBE_THREAD_ID") or None
+    try:
+        chat_id = int(chat)
+        thread_id = int(thread) if thread not in (None, "") else 0
+    except ValueError:
+        return None
+    cur = cx.cursor()
+    cur.execute(
+        "SELECT id FROM topics WHERE telegram_chat_id = %s AND telegram_thread_id = %s",
+        (chat_id, thread_id),
+    )
+    linha = cur.fetchone()
+    return str(linha["id"]) if linha else None
+
+
+def _url() -> str:
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        print(
+            "kobe-fato: sem banco. Defina DATABASE_URL.\n"
+            "Não há alvo default de propósito — gravar no banco errado tem que "
+            "custar um ato explícito.",
+            file=sys.stderr,
+        )
+        raise SystemExit(3)
+    return url
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="kobe-fato", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("registrar", help="grava uma afirmação do operador")
+    p.add_argument("afirmacao", help="a afirmação, UMA frase, 20 a 400 chars")
+    p.add_argument("--tipo", required=True,
+                   choices=["preferencia", "decisao", "aberto", "fato"])
+    p.add_argument("--assunto", required=True, help="assunto curto — agrupa e deduplica")
+    p.add_argument("--origem", type=int, default=None,
+                   help="seq da mensagem de origem (default: a última do operador)")
+
+    p = sub.add_parser("revogar", help="tira de vigência (não apaga)")
+    p.add_argument("id")
+    p.add_argument("--motivo", required=True)
+
+    p = sub.add_parser("listar", help="o que o operador registrou por esta porta")
+    p.add_argument("--limite", type=int, default=30)
+
+    args = ap.parse_args(argv)
+
+    from bot.lucien import porta, store
+
+    try:
+        cx = store.conectar(_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-fato: (FALHA DO INSTRUMENTO) não consegui falar com o banco: {exc}",
+              file=sys.stderr)
+        return 3
+
+    try:
+        topic_id = _topico_atual(cx)
+        if topic_id is None:
+            print("kobe-fato: não consegui resolver o tópico "
+                  "(KOBE_CHAT_ID / KOBE_THREAD_ID).", file=sys.stderr)
+            return 1
+
+        if args.cmd == "registrar":
+            r = porta.registrar(
+                cx, topic_id=topic_id, assunto=args.assunto,
+                afirmacao=args.afirmacao, tipo=args.tipo, origem_seq=args.origem,
+            )
+            cx.commit()
+            if r["duplicata"]:
+                print(f"já estava registrado (mesma afirmação, ainda vigente) — id {r['id']}")
+                return 0
+            dia = str(r["valid_from"])[:10]
+            print(f"registrei na tabela de fatos: [{args.tipo}] vigente desde {dia}, "
+                  f"origem #{r['seq']}, confiança {r['confianca']} · id {r['id']}")
+
+        elif args.cmd == "revogar":
+            r = porta.revogar(cx, args.id, motivo=args.motivo)
+            cx.commit()
+            print(f"revogado na tabela de fatos — deixa de valer a partir de agora, "
+                  f"e continua legível como revogado: {r['statement'][:90]}…")
+
+        else:
+            linhas = porta.listar(cx, topic_id, limite=args.limite)
+            if not linhas:
+                print("nada registrado por esta porta neste tópico ainda.")
+                return 0
+            for l in linhas:
+                marca = "·" if l["status"] == "vigente" else "×"
+                print(f"{marca} [{l['kind']} {str(l['valid_from'])[:10]}] "
+                      f"{l['statement'][:88]}  ←#{l['source_seq']}  {l['id']}")
+            return 0
+
+    except porta.PortaRecusou as exc:
+        print(f"kobe-fato RECUSOU: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-fato: (FALHA DO INSTRUMENTO) {exc}", file=sys.stderr)
+        return 3
+    finally:
+        cx.close()
+
+    # A projeção em disco é o que faz o registro aparecer no prompt do próximo
+    # turno. Falhar aqui não desfaz a gravação — a afirmação já está no banco.
+    try:
+        from bot.lucien import boletim
+        cx2 = store.conectar(_url())
+        try:
+            boletim.gerar(cx2, topic_id, kobe_home=Path(os.environ.get("KOBE_HOME", ".")))
+        finally:
+            cx2.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (aviso: gravou, mas não consegui regenerar o boletim: {exc})",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

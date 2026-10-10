@@ -4,6 +4,326 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### docs+fix(lucien): token de longa duração NÃO instalado nesta instalação; aviso de vencimento de hora em hora (2026-10-07)
+
+**Operador pediu:** não instalar o token de longa duração do LUCIEN (decisão
+de 07/10/2026, revertendo a opção B), corrigir a documentação que recomendava
+instalar, e confirmar que o aviso antecipado de 7 e 1 dia funciona **só** com a
+credencial compartilhada — a única proteção que sobra.
+
+**Por quê:** a doc oficial (`code.claude.com/docs/en/authentication`, *Generate
+a long-lived token*) diz que o token "can only make model requests, so it can't
+establish Remote Control sessions or fetch claude.ai connectors". O operador
+conferiu nesta instalação (fora da sala que escreveu esta entrada): com o token,
+a sala sobe sem Remote Control e os conectores do claude.ai caem de 9 para 0.
+O Hal e as salas continuariam no login que vence ~todo mês, então o operador
+preferiu UMA credencial para tudo a manter duas e renovar uma delas
+mensalmente de qualquer forma. O código do token fica: sem o arquivo
+`user-data/secrets/lucien-claude-token` ele não faz nada.
+
+**Foi feito:**
+- `docs/runbooks/lucien-token-longa-duracao.md`: nova seção inicial com o que o
+  token NÃO faz (citação literal da doc oficial), a duração (1 ano, mesma
+  página) e a decisão desta instalação. O passo a passo continua lá para quem
+  decidir o contrário.
+- `.env.example`: a seção da credencial do LUCIEN diz que o default (sem
+  arquivo) é o caminho recomendado e o que o token custa.
+- **Bug do aviso antecipado**, achado ao simular a produção dia a dia: a
+  checagem era 1×/24h, ancorada na hora em que o Keyko subiu. No pior caso
+  (Keyko reiniciado minutos antes da hora do vencimento), o aviso de "falta 1
+  dia" sairia **minutos** antes de vencer. Agora a checagem é de hora em hora
+  (só lê uma data), e cada aviso continua saindo uma vez só — folga mínima de
+  23 h para o aviso de 1 dia.
+- Texto dos avisos: a conta de tempo arredonda **pra cima** ("faltam 7 dias",
+  não "~6"), abaixo de 1 dia fala em horas, e o aviso de **vencido** não manda
+  mais renovar "antes dessa data".
+
+**Testes:**
+- Simulação, só leitura, da checagem de produção: data real lida de
+  `~/.claude/.credentials.json` (vence 01/11/2026 18:58), **sem** arquivo de
+  token, estado de saúde real. Antes da correção: avisos em 25/10, 31/10 e
+  01/11 às 20:47, com o texto "faltam ~6" e "renove antes" depois de vencido.
+- `test_lucien_credencial.py` (+2): pior caso de horário (vários minutos de
+  "restart" ao redor da hora do vencimento) garante ≥23 h de folga no aviso de
+  1 dia e ≥6d23h no de 7; arredondamento.
+- `test_lucien_saude_integracao.py` (+1): a fonte rechecha depois de 1 h —
+  **falha** com a cadência antiga de 24 h e passa com a nova.
+- Os testes do aviso rodam sem arquivo de token: o caminho da credencial
+  compartilhada sozinha é o que está provado.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit + `systemctl --user restart keyko`.
+
+### fix(tests): a suíte da fonte do LUCIEN não escreve mais na árvore real (2026-10-07)
+
+**Operador pediu:** Etapa 0 (sala `02b175bd`) — pego na validação no keyko-dev,
+logo depois do merge dos consertos.
+
+**Por quê:** os testes de `tests/test_lucien_source.py` constroem a fonte com
+`kobe_home=RAIZ`, a árvore de verdade. Desde o conserto 2 o `tick()` grava o
+estado de saúde em `<kobe_home>/user-data/lucien/saude.json` — então rodar a
+suíte sujava o estado do ambiente onde ela rodava. Visto no keyko-dev: o
+primeiro tick depois do restart achou `_disparos_sem_rodada: 1` sem disparo
+nenhum. Em produção, a suíte rodada lá poderia empurrar o detector de "worker
+que morre sem registrar" para um falso alarme.
+
+**Foi feito:**
+- `tests/test_lucien_source.py`: a fixture autouse passa a dar uma pasta
+  temporária como `kobe_home` (8 construções da fonte trocadas), e isola o
+  destino de aviso (`LUCIEN_ALERT_*` removidas) e as credenciais
+  (`LUCIEN_CREDENCIAL_COMPARTILHADA` e `LUCIEN_OAUTH_TOKEN_FILE` apontando pra
+  arquivos que não existem).
+- Estado de dev corrigido à mão (contador zerado; cópia do arquivo sujo em
+  `.local/etapa0-02b175bd/`).
+
+**Testes:**
+- `pytest tests` com banco descartável: 1.268 passando, 3 pulados.
+- Prova de que a suíte não escreve: marco de tempo antes, `find user-data
+  -newer` depois — **nenhum** arquivo escrito fora das pastas do Coder.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit (volta o defeito; nada mais muda).
+
+### feat(lucien): token próprio de longa duração + aviso antecipado de vencimento (2026-10-07)
+
+**Operador pediu:** Etapa 0, conserto 3 — parar de ser o mecanismo de renovação
+de credencial do LUCIEN. Escolheu as opções **B + C** do plano da sala
+`02b175bd`. Levar o token ao Kobe inteiro fica para outra sala.
+
+**Por quê:** medido com `strace`: mesmo com configuração isolada, a CLI do
+LUCIEN lê `~/.claude/.credentials.json` — a credencial do operador, a mesma do
+Hal e das salas. O histórico da CLI mostra `/login` manual em 29/05, 29/06,
+30/07, 26/08 e 05/10. O arquivo declara o próximo vencimento: 01/11/2026 18:58.
+Chave de API (opção A) foi descartada: medido US$ 0,59 por rodada (≈ R$
+100–235/mês) e não resolveria o login do resto da VPS.
+
+**Foi feito:**
+- `bot/lucien/credencial.py` (novo): lê o token de
+  `user-data/secrets/lucien-claude-token` (recusa se o arquivo tiver permissão
+  de grupo/outros); diz qual credencial está em uso; levanta as datas de
+  vencimento (a da credencial compartilhada, lida do campo
+  `refreshTokenExpiresAt` — só a data; a do token, ESTIMADA em 365 dias a partir
+  da instalação) e decide os avisos de 7 dias, 1 dia e vencido, uma vez cada por
+  data (renovar zera os marcos).
+- `brain._ambiente`: com token instalado, o subprocesso do LUCIEN recebe
+  `CLAUDE_CODE_OAUTH_TOKEN` e perde `ANTHROPIC_API_KEY` (uma chave herdada não
+  pode virar fatura passando na frente do token). Sem o arquivo, nada muda.
+- `source`: a checagem de vencimento roda uma vez por dia dentro da checagem de
+  saúde; a mensagem de falha de login traz a instrução da credencial em uso
+  (`/login` ou `setup-token`).
+- `kobe-lucien token instalar|testar|status`: instala lendo sem eco e gravando
+  com modo 600 desde a criação; testa com `claude auth status` + uma chamada
+  mínima; mostra modo e datas. Nunca imprime o token.
+- `docs/runbooks/lucien-token-longa-duracao.md`; `.env.example` documenta
+  `LUCIEN_OAUTH_TOKEN_FILE`, `LUCIEN_TOKEN_VALIDADE_DIAS`,
+  `LUCIEN_CREDENCIAL_COMPARTILHADA`.
+
+**Testes:**
+- Premissa verificada antes de codar: com `CLAUDE_CODE_OAUTH_TOKEN` definido
+  (token falso), a CLI reporta `authMethod: oauth_token` e falha com 401
+  **mesmo com a credencial real válida no disco** — ou seja, a variável manda.
+- `test_lucien_credencial.py` (10): sem token nada muda; com token ele entra só
+  no subprocesso e a chave de API sai; permissão aberta recusada sem vazar o
+  conteúdo no log; instrução de login conforme a credencial; leitura só da data;
+  marcos 7/1/vencido uma vez cada; renovação; "só soube a 1 dia" não recebe o de
+  7; token com data ESTIMADA dita na mensagem; arquivo ilegível não levanta.
+- `test_lucien_saude_integracao.py` (+1): o aviso de vencimento sai da fonte
+  real, uma vez por dia.
+- Smoke do `kobe-lucien token` com token FALSO num arquivo de rascunho:
+  `instalar` grava 600 e o `testar` falha pelo motivo certo
+  (`authMethod=oauth_token`, 401); `status` mostra 01/11/2026 18:58 para a
+  credencial compartilhada; 644 é recusado.
+- **Não testado aqui, por depender de ato do operador:** um token REAL. O
+  `kobe-lucien token testar` faz essa prova assim que ele instalar.
+- `pytest` inteiro com banco descartável: 1.223 passando, 3 pulados; sem
+  banco: 1.045 passando.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit. Para só desligar o token: apagar
+`user-data/secrets/lucien-claude-token`.
+
+### fix(lucien): rodada que falha AVISA — com represamento (2026-10-07)
+
+**Operador pediu:** Etapa 0, conserto 2 — o LUCIEN falhou por um dia inteiro e
+ninguém foi avisado; resolver de forma definitiva.
+
+**Por quê:** medido no banco de produção: **144 rodadas seguidas falharam** de
+04/10 17:45 a 05/10 17:12 (Brasília), todas "a CLI saiu com código 1", e nenhum
+aviso saiu. Eram quatro buracos em fila: (1) o worker só fazia
+`logger.warning` na falha do modelo; (2) o worker roda destacado com
+stdout/stderr em `/dev/null`, então esse log ia para lugar nenhum; (3) a fonte
+disparava e esquecia — o mesmo lote voltava a ficar devido, até o teto de 6 por
+hora; (4) `source._avisar()` só escrevia no log. E um quinto: `brain.py` cortava
+o erro em 400 caracteres ANTES do campo `result`, que dizia a causa — nenhuma
+das 144 linhas no banco explicava por que falhou.
+
+**Foi feito:**
+- `bot/lucien/saude.py` (novo): a regra de quando avisar, como função pura.
+  Incidente **abre** com `LUCIEN_FALHAS_SEGUIDAS` (padrão 3) rodadas seguidas
+  sem êxito **ou** disparos sem rodada nova no banco (worker que morre antes de
+  registrar). Abrir = 1 mensagem com a causa classificada (`login`, `tempo`,
+  `ilegivel`, `cli_ausente`, `worker`, `outro`) e o que fazer. Repetição só
+  soma; lembrete a cada `LUCIEN_AVISO_LEMBRETE_H` (padrão 6 h); causa que muda
+  de classe = 1 mensagem; êxito depois do início = 1 mensagem de "voltou".
+  Horários no fuso do operador. Estado em `user-data/lucien/saude.json`
+  (escrita atômica; ilegível = começa limpo), então restart não reabre nem
+  esquece incidente.
+- `bot/lucien/source.py`: o `tick()` olha a saúde antes de disparar, em bloco
+  que nunca levanta; registra o código de saída do worker; marca cada disparo
+  pra detectar "disparou e nenhuma rodada apareceu". O worker passa a escrever
+  em `user-data/lucien/worker.log` (rotação simples em 5 MB) em vez de
+  `/dev/null`. `_avisar()` (falha da própria fonte) passa a ir ao operador, no
+  máximo 1× a cada 6 h.
+- `bot/lucien/brain.py`: `causa_do_envelope()` tira `result`,
+  `api_error_status`, `terminal_reason` e `subtype` do envelope e os põe NA
+  FRENTE da mensagem de erro, antes do corte.
+- `bot/lucien/aviso.py`: `avisar()` só devolve `True` se o `kobe-notify` saiu
+  com 0; antes devolvia `True` por ter rodado o helper, com stderr em
+  `/dev/null` (um Telegram recusando passava por "avisado"). Continua sem
+  levantar nunca.
+- `kobe-lucien status` mostra o incidente aberto (ou o último encerrado).
+- `bot/lucien/__init__.py`: knob `LUCIEN_AVISO_LEMBRETE_H`; `.env.example`
+  documenta os dois knobs.
+- `tests/test_lucien_store.py`: a fixture `lote` indexava `texto["topic_id"]`
+  antes de checar se havia mensagem — num banco vazio, 32 provas davam
+  `TypeError` em vez de "pulado". Agora pulam com motivo.
+
+**Testes:**
+- `test_lucien_saude.py` (11): reproduz a **sequência real de 04-05/10**
+  (rodadas a cada 5 min, teto de 6/h) e trava em **5 mensagens** — 1 abertura,
+  3 lembretes, 1 "voltou" que diz "144 rodada(s) falharam" (o número do banco).
+  Mais: falha isolada não avisa, mudança de causa, worker sem registro,
+  classificação, mensagem nunca carrega o envelope inteiro, persistência sobre
+  restart, estado ilegível, e entrega só conta com o helper saindo 0.
+- `test_lucien_brain.py` (+2): com o **envelope real** de "sem login" (capturado
+  apontando a CLI pra uma credencial vazia — a real não foi tocada), a causa
+  aparece antes de `duration_api_ms`.
+- `test_lucien_saude_integracao.py` (3): worker real + brain + banco +
+  fonte, com CLI `claude` falsa no PATH: 2 falhas = 0 aviso; 3ª = 1 aviso;
+  +5 falhas = continua 1; "login" feito = aviso de "voltou" com "8 rodada(s)".
+  O teste cria tópico próprio e apaga só o que criou.
+- **Ponta a ponta com Telegram real pelo bot de DEV** (banco descartável, CLI
+  falsa): 8 falhas → 1 "PAREI", login → 1 "voltou"; `kobe-notify` saiu 0.
+- Banco de teste descartável criado do zero pelo instalador
+  (`provision_db.py` + `migrate.py up`): `pytest` inteiro **com** banco
+  1.212 passando, 3 pulados (por falta de dado), estável em 3 execuções.
+  Sem banco: 1.035 passando, 180 pulados.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit + `systemctl --user restart keyko`.
+`user-data/lucien/saude.json` e `worker.log` podem ser apagados sem efeito.
+
+### fix(transcripts): o dossiê cita o plano que a PRÓPRIA sala escreveu (2026-10-07)
+
+**Operador pediu:** Etapa 0 do fechamento do Highlander v3, conserto 1 — o dossiê
+de sala citava o plano errado na maioria dos arquivos.
+
+**Por quê:** `dossier.pendencias_do_plano()` pegava o `.local/plano-*.md` mais
+recente **da pasta de trabalho**. Toda sala com pasta na raiz do repositório
+divide um único `.local/` e herdava o plano da última sala que escreveu ali.
+Medido no acervo de produção em 07/10: **742 de 797** dossiês citavam um plano
+que a sala nunca escreveu; só 24 salas escreveram plano de fato. A seção "o que
+ficou aberto" é a que responde *"em que pé ficou"* — e mentia na maioria.
+
+**Foi feito:**
+- `bot/transcripts/dossier.py`: a atribuição do plano passa a vir do
+  **transcript** — cada `Write`/`Edit`/`MultiEdit` em `.local/**/plano-*.md`
+  (caminho relativo resolvido contra o `cwd` da linha) e redirecionamento de
+  shell (`>`, `>>`, `tee`) fora de corpo de heredoc. Sem plano escrito pela
+  sala → *"Nenhum plano identificado para esta sala"*. Função nova
+  `plano_da_sala()` substitui `pendencias_do_plano()`.
+- Arquivo em disco vale quando ainda é o mesmo plano (mesmos itens) **ou** quando
+  a própria sala mexeu nele por comando; se divergir sem isso (outra sala
+  reaproveitou o nome), vale a reconstrução e o dossiê diz por quê.
+- Arquivo sumido (worktree apagada depois do merge) → o plano é **reconstruído**
+  reaplicando as escritas do transcript. Edição que não casa → o dossiê diz que
+  não dá pra reconstruir, nunca mostra meio plano. Se a sala também mexeu no
+  plano por script, avisa que as marcações podem estar desatualizadas.
+- Mais de um plano da sala → vale o último tocado; os outros são citados.
+- `collector.regenerar_dossies()` + subcomando
+  `kobe-collect-transcripts dossies [--session X] [--saida DIR] [--json]`:
+  refaz o dossiê de **toda** sala colhida (o "por acúmulo" só refazia quem teve
+  novidade, e as paradas ficariam com a mentira pra sempre). `--saida` grava
+  numa árvore paralela pra medir sem tocar o acervo. Falha de geração de um
+  dossiê agora fica registrada em `SessionResult.error` em vez de sumir.
+- `MultiEdit` passa a contar em "arquivos escritos ou editados".
+
+**Testes:**
+- 16 testes novos em `test_transcript_dossier.py` e 3 em
+  `test_transcript_collector.py`. Os 3 que reproduzem o bug (plano de outra sala
+  na pasta compartilhada; o alheio mais recente; nome reaproveitado) **falham no
+  código antigo** e passam no novo.
+- Corrida sobre os **814** transcripts de produção, com saída em rascunho
+  (acervo intocado), conferida por um script independente que reimplementa
+  "que planos esta sala escreveu?": **0** dossiês citando plano que a sala não
+  escreveu (eram 742); 26 com plano (21 do disco, 5 reconstruídos — os 5 com o
+  aviso de marcações possivelmente desatualizadas); 788 "nenhum plano".
+- Duas regras corrigidas DURANTE a medição, cada uma com teste: texto de
+  `kobe-notify` com `→ (\`.local/plano…\`` e corpo de heredoc eram lidos como
+  escrita por shell; e 7 de 7 divergências disco×transcript eram a própria sala
+  editando o plano por script (a nota "não é o que a sala escreveu" seria falsa).
+- Conferido à mão: as sessões em worktree sem plano (129) **não** são retomadas
+  da sala — são sessões de teste (`responda só: ok`), provas de sala de missão e
+  turnos do bot de dev; "nenhum plano" é a resposta correta pra elas.
+- `pytest` inteiro: 1.023 passando, 177 puladas.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit + regerar com `kobe-collect-transcripts
+dossies` (ou restaurar o `tar` de backup tirado antes de regerar em produção).
+
+### fix(faxina): o que a bateria pegou — `kobe-kb` quebrado e o primeiro contato sem quem olhe (2026-10-07)
+
+**Operador pediu:** fechar a faxina dos quatro depósitos testando à exaustão em dev,
+com veredito formado ("não passe testes pra mim").
+**Por quê:** a bateria comportamental (antes × depois, isolada, ~200 rodadas)
+achou dois defeitos que iriam para a produção.
+**Foi feito:**
+- `bot/bin/kobe-kb`: abria o banco com `KobeDB()` sem conexão — **todo** comando
+  do porteiro saía como falha do instrumento, inclusive o `semear`, que é o passo
+  do deploy que impede o tópico de perder a base no primeiro turno. Passa a usar
+  `build_client(load_config())`, como os outros helpers;
+- `tests/test_kobe_kb_cli.py` (novo): roda o comando de verdade, num subprocesso,
+  contra o banco de teste (`semear --ensaio`, `semear`, `remover`, `admitir`,
+  `listar`), e uma guarda estática que barra `KobeDB()` sem argumento em qualquer
+  helper de `bot/bin/`. Os três testes **falham** com o código anterior;
+- `CLAUDE.md`, seção dos gatilhos: volta a frase *"antes de responder qualquer
+  mensagem, verifique se `user-data/.onboarded` existe"*. A faxina a tinha levado
+  junto com o manual do onboarding, e o gatilho que ficou dependia dela — a
+  ausência do arquivo não chega no prompt. É a mesma instrução do arquivo
+  anterior, então o custo é o de antes;
+- `tests/test_claude_md_gatilhos.py`: guarda essa instrução.
+**Testes:** bateria em dev — onboarding de instalação nova: antes 5/5, depois sem
+conserto 1/5, depois com conserto **5/5**; os outros 15 cenários sem piora. Camada
+4 (handler real, tópico `LAB FAXINA`): 7/8, a única falha era o `kobe-kb`.
+`pytest`: 1.139 passando com banco limpo, 1.029 sem banco. Veredito completo em
+`.local/veredito-bateria-r15.md` da sala.
+**Commits:** este.
+**Reversão:** `git revert` deste commit (nenhum dado nem schema tocado).
+
+### chore(faxina): a branch da faxina chega na bancada, e o merge reconcilia a main (2026-10-07)
+
+**Operador pediu:** fechar a faxina dos quatro depósitos; o primeiro ato da sala
+é trazer os 11 commits de `coder/87cbe08a` para cima da `main` de dev atual.
+**Por quê:** a `main` andou 6 commits desde a base da faxina, e dois deles
+mexeram justamente numa seção que a faxina tirou do `CLAUDE.md`.
+**Foi feito:**
+- conflito no `CLAUDE.md`: a `main` reescreveu a seção do Mission Control
+  ("missão pode não ter sistema"), e a faxina tinha descido essa seção para
+  `docs/agente/mission-control.md`. Ficou o lado da faxina no `CLAUDE.md` e a
+  mudança da `main` foi **levada para o satélite**, texto por texto;
+- `tests/test_work_catalog.py` passa a guardar o invariante "missão pode não ter
+  sistema" no satélite, que é onde a seção mora agora;
+- conflito no `CHANGELOG.md`: as duas pilhas de entradas foram mantidas;
+- `tests/test_lucien_store.py`: a fixture indexava a mensagem **antes** de checar
+  se ela existia — num banco sem acervo, quebrava (32 erros) em vez de pular.
+**Testes:** `pytest` inteiro com banco recém-migrado (`en_US.UTF-8`, `UTC`):
+1.135 passando, 0 falhas; sem banco (clone limpo): 1.027 passando. As 9 falhas
+de `test_db_integration` vistas no `kobe_test` compartilhado **também ocorrem na
+`main` pura** — resíduo daquele banco, não efeito desta branch.
+**Commits:** o merge desta entrada.
+**Reversão:** `git reset --hard e07cc20` na branch da sala (antes de ir à `main`),
+ou `git revert -m 1 <merge>` depois.
+
 ### fix(mission-control): sala destravada — prompt sem o vocabulário que a API lê como `reasoning_extraction` (2026-09-15)
 
 **Operador pediu:** destravar o Mission Control com urgência — toda sala de missão
@@ -136,6 +456,475 @@ sistema → `ok`, `catalogado: false`; `--subsystem Coder` sozinho → recusa;
 
 **Reversão:** `git revert <hash>` — nenhum dado nem schema foi tocado. Contorno
 enquanto isso: `WORK_CATALOG_ENABLED=false` na chamada.
+
+### feat(kb): o porteiro da base de conhecimento do tópico (2026-09-04)
+
+**Operador autorizou**, em 04/09: *"pode ir para o banco e pode ter migrations.
+Eu não vejo problema nisso. Vai para cima."* — e antes disso, sobre o mérito:
+*"eu autorizo, pode criar, sou a favor de criar — só que eu quero saber como é que
+isso funciona."*
+
+**O problema, com o caso concreto:** a pasta `knowledge/` de um tópico não tinha
+porteiro. Qualquer arquivo que caísse lá entrava no prompt, **em todo turno**, e a
+ordem era a **ordem alfabética do nome do arquivo** — ninguém escolheu isso.
+
+Foi assim que o formulário de debriefing de uma mentorada, com nome, e-mail e
+telefone, entrou em todo turno do tópico Olimpo entre 17/06 e 04/09. E, por a
+truncagem cortar pelo fim de uma lista ordenada por acidente, o que sobrevivia ao
+corte eram justamente os **primeiros 1.156 caracteres** — o cabeçalho com os dados
+pessoais — enquanto as respostas do formulário eram descartadas.
+
+**Foi feito:**
+- **Migration `010_kb_catalog.sql`** — uma tabela nova, aditiva, idempotente. Não
+  altera nem apaga nada.
+- **`bot/kb_catalog.py`** — três estados, e a distinção entre os dois últimos é o
+  que impede o mecanismo de virar chateação: **admitido** entra; **removido** não
+  entra e **não volta a pedir**; **batendo na porta** não entra mas **aparece no
+  prompt**. *"Nunca decidi"* e *"decidi que não"* são estados diferentes — um
+  arquivo removido que voltasse a pedir transformaria uma decisão do operador em
+  pergunta recorrente.
+- **O carregador de contexto** passa a consultar o catálogo. Sem catálogo, o
+  comportamento é o de antes (compatível com CLI, medição e testes).
+- **`bot/bin/kobe-kb`** — `listar`, `admitir`, `remover`, `semear`.
+- **O conteúdo continua em arquivo.** O `.md` guarda o texto e é editável à mão; o
+  banco governa **quem entra no prompt**. É a divisão que o operador declarou.
+
+**`semear`, e por que ele existe:** a virada é *fail-closed* — sem catálogo, nada
+entra. Num tópico que já tinha base curada isso seria **perda silenciosa de
+contexto no primeiro turno depois do deploy**. `semear` admite o que já está na
+pasta, tornando o dia da virada **idêntico** ao de antes; o porteiro só morde do
+arquivo novo em diante, que é o que ele existe para pegar.
+
+**Testes:** **1024 passed, 186 skipped** sem banco; **1210 passed** com o banco de
+desenvolvimento. A migration foi aplicada no `kobe_dev` e a referência de schema
+**regenerada** — e o portão de referência fez o trabalho dele antes disso: ficou
+vermelho acusando *"nao conhece 010"*, exatamente como projetado.
+
+**Sonda ponta a ponta**, reproduzindo o caso do Olimpo num tópico de teste com um
+arquivo curado e um arquivo com dado pessoal:
+
+| | antes | depois |
+|---|---|---|
+| o dado pessoal entra? | **sim** | **não — o portão segurou** |
+| o curado entra? | sim | sim |
+| avisa que ficou algo fora? | — | sim, nomeando o arquivo |
+| depois de decidir que não, volta a perguntar? | — | **não** |
+
+**Reversão:** `git revert` do commit devolve o comportamento anterior (a pasta
+inteira volta a entrar, por ordem alfabética) e a tabela fica inerte. A migration
+não precisa ser desfeita — nada no comportamento antigo depende dela.
+
+### fix(nomenclatura): a tabela de fatos é o destino; o LUCIEN é o curador (2026-09-04)
+
+**Operador corrigiu**, e a correção vale para todo nome durável: **Highlander** é
+o **sistema** de gerenciamento de memória; **LUCIEN** é uma **peça** dele — o
+curador que roda fora do turno; e **a tabela de fatos (`lucien_claims`) é o objeto
+que ele cuida**, sendo ela o destino de um registro.
+
+Formas certas: *"registrei na tabela de fatos"*, *"registrei na memória que o
+LUCIEN cuida"*. Forma errada: *"registrei no LUCIEN"* — ninguém registra dentro de
+um curador.
+
+**Por que isso mereceu commit:** o rótulo errado tinha entrado em **quatro lugares
+duráveis** que a sala acabara de criar — a mensagem que o helper devolve ao
+operador, a docstring do módulo da porta, a seção do `CLAUDE.md` e a asserção do
+teste. Não era só prosa: era a frase que o agente diria em voz alta. Razão
+declarada pelo operador: *é erro pequeno hoje que vira erro grande depois, quando
+"LUCIEN" começar a significar "o sistema de memória" na cabeça de quem ler o código
+daqui a seis meses.*
+
+**Foi feito:**
+- Os quatro lugares corrigidos. A mensagem do `kobe-fato` agora sai como
+  *"registrei na tabela de fatos: [fato] vigente desde …, origem #…"* — conferido
+  por execução, não por leitura.
+- **A régua entrou no `CLAUDE.md`**, junto da regra de destino: quem é o sistema,
+  quem é a peça, quem é o objeto, e a proibição explícita da forma errada. Com a
+  nota de que o prefixo `lucien_` das tabelas **está certo e não se mexe** — ele
+  marca de quem é a curadoria, não de quem é o sistema.
+- **Dois testes novos**: um que exige a régua escrita, outro que **falha se a
+  forma errada voltar** ao `CLAUDE.md`, ao módulo da porta ou ao helper. O
+  `CHANGELOG` fica de fora dessa varredura de propósito — ele é histórico e cita a
+  forma errada para registrar a correção.
+
+**Varredura de conflito (item 3 do pedido):** procurei no código e na documentação
+por usos de "LUCIEN" com sentido de *sistema* ou de *destino*. **Não achei
+nenhum.** Todos os usos existentes o tratam como quem faz o trabalho — *"o parser
+do LUCIEN"*, *"as travas do LUCIEN"*, *"curado por LUCIEN"*, *"LUCIEN ainda não
+leu"*. Nada a renomear, e nada a decidir.
+
+**Testes:** **1015 passed, 181 skipped** sem banco; **1196 passed** com o banco de
+desenvolvimento. O registro de smoke feito para conferir a mensagem foi marcado
+como abandonado, não apagado.
+
+### feat(lucien): a porta de entrada deliberada da tabela de fatos (2026-09-04)
+
+**Operador pediu**, em 04/09, reagindo a eu ter gravado uma preferência dele num
+`.md` da knowledge base e reportado isso como virtude: *"você registrou um fato.
+Fato fica onde? Tabela de fatos. Você registrou um fato num arquivo, que não tem
+governança nenhuma."* E: *"se a gente não deu a ordem para que esse código seja
+produzido, eu estou dando essa ordem agora."*
+
+**Por quê:** o LUCIEN escreve lendo a conversa, atrás, por acúmulo — cobre bem o
+que é dito de passagem, mas **não cobre o ato deliberado**. Sem porta, o único
+caminho para uma preferência declarada era o arquivo, que é gravar **sem vigência,
+sem origem e sem revogação**. O defeito não foi escrever o arquivo (era o único
+caminho); foi não haver **nem porta, nem regra**.
+
+**Foi feito — a porta (A):**
+- **`bot/lucien/porta.py`** — `registrar`, `revogar`, `listar`. Grava com
+  `created_by='operador'`, marca que existia no schema desde a criação e **nunca
+  havia sido usada** (das 916 afirmações, 916 eram do LUCIEN).
+- **`bot/bin/kobe-fato`** — o comando que o agente chama no turno.
+- **A trava de origem NÃO foi afrouxada.** A porta resolve a mensagem real do
+  operador e amarra a afirmação nela; o `seq` devolvido abre com
+  `kobe-remember --ver`. Consequência aceita: **fato que nunca foi dito continua
+  sem entrada** — a saída para ele é dizê-lo, não relaxar a chave estrangeira.
+- `valid_from` vem da mensagem de origem (a data do fato, não a da gravação);
+  confiança nasce `alta`, mas cai para `media` quando a origem é áudio.
+- **Trava T5, nova, no `store`:** o LUCIEN **não pode** superar nem encerrar linha
+  com `created_by='operador'`. Um modelo revogando a palavra do operador em
+  silêncio é o pior desfecho que este registro comporta. É proibição, não
+  negociação: se o LUCIEN discordar, registra ao lado e o operador arbitra.
+
+**Foi feito — a regra (B), que é o que impede a bagunça de voltar:**
+- Seção **"Fato do operador vai para a TABELA, não para um arquivo"** no
+  `CLAUDE.md`, com a régua operável entre linha e arquivo (*"isto pode ser
+  revogado um dia?"* — se pode, é linha) e a proibição do arquivo como **plano B
+  silencioso** quando a porta falha.
+- **`tests/test_regra_fato_vai_para_tabela.py`** — sete testes que guardam a regra
+  contra a próxima faxina: que ela existe, nomeia o comando, exige o relato com
+  origem, dá o critério, proíbe o plano B, que a porta existe em disco e que a T5
+  guarda os **dois** caminhos que mudam status.
+
+**Testes — e dois defeitos meus que a medição pegou:**
+
+1. **A T5 nasceu quebrada.** Ela lia `antes.get("created_by")`, mas `_imagem` não
+   trazia essa coluna no `SELECT` — a trava lia `None` e **nunca dispararia**.
+   Falha silenciosa, achada relendo antes de rodar. Corrigido, e há um teste
+   específico para isso, porque o modo de falha é justamente não fazer barulho.
+2. **A porta commitava por dentro**, e com isso a suíte — que roda em transação
+   revertida — **gravou sete linhas de teste no `kobe_dev`**. Exatamente o tipo de
+   poluição que a porta existe para evitar. Corrigido: `registrar`/`revogar` não
+   commitam mais (quem commita é o `kobe-fato`), e os testes passaram a usar
+   assunto único por execução. As sete linhas foram **marcadas como abandonadas,
+   não apagadas** — `mv`, nunca `rm`, vale também para linha de banco.
+
+Números: **1013 passed, 181 skipped** sem banco; **1194 passed** com o banco de
+desenvolvimento (a suíte de integração da porta roda aí). O teste da porta foi
+rodado **três vezes seguidas** para provar que o isolamento agora funciona — 12
+passed nas três, e zero linha vigente deixada para trás. Ponta a ponta pelo
+`kobe-fato`: registro, dedupe, recusa por tamanho e regeneração do boletim, todos
+conferidos. **Produção não foi tocada** (`created_by='operador'` na produção: 0).
+
+**Reversão:** `git revert`. A porta é aditiva — nenhum caminho existente muda de
+comportamento, e a T5 só **recusa** o que antes passava (recusa aparece em
+`claims_rejected`, então some do radar de ninguém).
+
+### fix(identidade): a correção que já existia parava de ser derrotada por 6 a 1 (2026-09-04)
+
+**Operador pediu**, em 03/09: *"você olha para mim como um DBA, mas não da forma
+que eu gostaria. (…) é até um pouco incômodo toda hora essa analogia com coisas de
+banco de dados. Se for para fazer analogia, faz muito mais sentido falar com o meu
+mundo hoje de marketing digital."*
+
+**O que eu descobri ao ir consertar, e é o ponto:** **a correção já tinha sido
+dada em 31/08 e estava escrita** no `PREFERENCES.md`, com todas as letras — *"NÃO
+significa analogia. Nada de 'é como um índice vs full scan'"*. E as analogias
+continuaram assim mesmo.
+
+O motivo é aritmético, não interpretativo: **a instrução antiga vivia em seis
+arquivos e a correção em um.** Dois dos seis entram no prompt de todo turno do
+`dev-kobe`, junto com o `PREFERENCES.md`. O agente recebia as três ao mesmo tempo,
+e **a maioria vencia**.
+
+Os seis, nomeados: `identity/USER.md`, `topics/dev-kobe/prompt.md`,
+`preferencias/design-arquitetura.md` (duas ocorrências),
+`arquitetura/01-visao-geral.md` e `topics/dev-kobe/knowledge/00-indice-base-kobe.md`.
+
+**Foi feito:**
+- Os **seis** trechos corrigidos. Onde havia valor técnico (as tabelas de
+  equivalência DBA), o conteúdo **não foi apagado** — foi reclassificado como
+  *glossário*, com nota de que não é forma de conversar com o operador.
+- **`USER.md`**: a biografia passa a dizer o que ele é **hoje** — estrategista de
+  marketing digital e copywriter, com formação AWAI e o repertório de referência
+  (Erico Rocha, Ricardo Máxima, Micha Menezes, Leandro Ladeira; Dan Kennedy,
+  Russell Brunson, Ryan Deiss). O DBA vira **trajetória anterior**, com a nota de
+  que *"DBA" ali é régua de conversa, não profissão*: não é leigo em TI, não é
+  desenvolvedor, e o vocabulário de casa é arquivo, processo, log, backup, job,
+  agendamento, trace.
+- **`PREFERENCES.md`**: a regra ganha dois degraus — padrão sem analogia; quando
+  ajudar, repertório de marketing. E registra **por que precisou ser escrita duas
+  vezes**, para que a próxima pessoa entenda que o problema era de contagem.
+
+**Testes — e a sonda pegou um defeito meu.** Depois de enriquecer o `USER.md`, a
+medição do núcleo curado acusou: **`USER.md` 4.356 chars contra teto de 4.000 —
+estava sendo truncado**, e o corte comia o fim do arquivo (áreas de domínio e a
+nota de fechamento). Ou seja: eu tinha acabado de criar o defeito que a faxina
+existe para eliminar. Enxuguei em três passos, checando a cada um, até **3.891
+chars**. Conferido pelo carregador real: núcleo curado **5.139 chars, sem
+truncagem**, e as oito frases-chave presentes — inclusive as que estavam sendo
+cortadas.
+
+**Reversão:** os arquivos vivem em `user-data/`, fora do git. O trecho anterior de
+cada um está preservado no script `.local/etapa8-identidade.py`, que carrega os
+pares velho/novo — desfazer é inverter os pares.
+
+### feat(memoria): o Chat Manager vira duas linhas, e o MEMORY.md nasce (2026-09-04)
+
+Duas etapas da faxina no mesmo commit, porque as duas são sobre **o que merece
+estar no prompt**.
+
+#### Etapa 6 — o sedimento histórico sai
+
+**Operador pediu**, em 03/09: *"Chat Manager não tem a menor lógica estar em nenhum
+CLAUDE.md. A gente está pegando a informação de que um sistema morreu e sempre
+jogando dentro do prompt. Não tem a menor lógica isso."*
+
+A seção tinha **1.730 chars** e era três coisas: a **narrativa** (existiu, v1 e v2,
+removido em 25/08), a regra de que os quatro comandos sumiram, e a regra de que
+`/nova`, `/contexto`, `/salvar` e `/retomar` continuam vivos.
+
+**Conferi onde a narrativa já está preservada antes de tirá-la:** o `CHANGELOG.md`
+guarda a aposentadoria em detalhe, e a base de conhecimento do `dev-kobe` a
+menciona em cinco arquivos. Nada se perde.
+
+Sobrou **652 chars** com a regra viva: quais comandos existem, e a instrução de
+**não prometer** um que não existe. **−1.078 chars/turno.**
+
+#### Etapa 7 — o `MEMORY.md` nasce, com escopo reduzido
+
+**Operador aprovou**, em 03/09: *"MEMORY.md nascer com o escopo reduzido, só o que
+eu decido que sempre entra, sem pendência, sem fato datado: pode ser."*
+
+**Por que ele ganha, e por que o escopo é estreito:** ele é o **único depósito que
+entrega entrada garantida por decisão do operador** — o boletim entra por recência
+(recorte de ~16 linhas sobre centenas), a knowledge base entra por ordem
+alfabética, e o `prompt.md` de tópico só vale num tópico. O slot já existia no
+código (teto de 6.000 chars no núcleo curado) e **entregava zero, porque o arquivo
+nunca foi criado**.
+
+O escopo estreito é a defesa contra o modo de falha conhecido: arquivo de estado
+mantido à mão apodrece. Neste projeto já aconteceu — uma fila de trabalho em
+markdown chegou a 75% de itens desatualizados, e o próprio arquivo registrou isso.
+
+**Foi feito:**
+- `MEMORY.md.example` **reescrito**: as quatro seções antigas (que convidavam a
+  guardar pendência e fato datado) deram lugar ao escopo reduzido, com a tabela do
+  que **não** entra e para onde vai cada coisa.
+- O arquivo real criado em produção, semeado com **uma única linha** — a regra do
+  Flow, que é decisão explícita e atemporal do operador. Nasce quase vazio de
+  propósito: quem decide o que entra ali é ele, não o agente.
+
+**Testes:** **1005 passed, 169 skipped** — sem regressão. Conferido pelo carregador
+real que o `MEMORY.md` **é injetado** (núcleo curado 3.361 → 4.531 chars) e que
+**não trunca** (1.048 contra teto de 6.000). `CLAUDE.md`: 38.381 → 37.303.
+
+**Reversão:** `git revert` devolve a seção do Chat Manager e o template antigo.
+Para desfazer o `MEMORY.md` real basta apagá-lo — o núcleo curado volta ao
+comportamento anterior byte a byte.
+
+### refactor(claude-md): desce o manual de memória, a REGRA DURA fica (2026-09-04)
+
+**Operador pediu:** a etapa 5, terceiro e mais delicado lote. Palavras dele, em
+03/09: *"não faz sentido a gente falar assim: 'olha, agora use o kobe-remember,
+agora use o kobe-reflect'. Isso injetado no prompt, perenemente, soa muito estranho
+pra mim."*
+
+**Por quê, e por que este lote é o mais arriscado:** a seção de memória é a
+doutrina anti-confabulação — a que impede o agente de responder sobre o passado de
+cabeça. Tirá-la inteira seria destruir o que a faxina existe para proteger. Mas ela
+não era uma coisa só: eram **duas coisas grudadas**.
+
+| | chars | natureza | destino |
+|---|---:|---|---|
+| a **regra** — pergunta sobre o passado exige rodar o comando; resposta sem citação é violação; falha do instrumento **não** é "não há registro" | fica | **conduta**: gatilho lateral, violação silenciosa | **permanece no prompt** |
+| o **manual** — as três camadas, as flags, a janela de eco, como ler cada saída | 5.942 | **mecanismo**: só importa depois que o comando rodou | **satélite** |
+
+**Foi feito:** saíram `kobe-reflect` (2.814) e "As três camadas do kobe-remember"
+(3.128). **A seção `REGRA DURA` ficou intacta no prompt.**
+
+**Testes:** conferi **antes de remover** onde vivia cada frase travada pelos testes
+de invariante — mapeei as nove por seção. Todas as que os testes exigem vivem na
+`REGRA DURA`, que fica; `destilado` e `você não sabe se há registro ou não` também
+apareciam nas seções removidas, mas têm ocorrência na que fica. Depois da remoção:
+**38 passed** nos três arquivos que guardam a doutrina de memória, o boletim e os
+gatilhos; **1005 passed, 169 skipped** na suíte completa. `CLAUDE.md`: 44.323 →
+38.381 chars.
+
+**Uma trava que se provou no mesmo turno:** ao tentar remover também a seção do
+Chat Manager, o script **recusou** — ela não está preservada em nenhum satélite,
+porque é sedimento histórico e o destino dela é outro (etapa 6). A trava impediu
+que "descer" virasse "apagar", sem depender de eu lembrar.
+
+**Reversão:** `git revert` devolve as duas seções ao prompt.
+
+### refactor(claude-md): descem Alertas e Mission Control, e o gatilho passa a disparar pelo PEDIDO (2026-09-04)
+
+**Operador pediu:** a etapa 5, segundo lote — as duas maiores seções de manual de
+mecanismo do arquivo.
+
+**Foi feito:** saíram Sistema de Alertas (3.643) e Mission Control (5.090) —
+**8.733 caracteres a menos no prompt de todo turno**, com o conteúdo preservado
+nos satélites.
+
+**E um defeito que a remoção expôs, consertado no mesmo commit.** Ao tirar as duas
+seções, ficou evidente que a tabela de gatilhos estava escrita do ângulo errado:
+ela dizia *"antes de criar um alerta, carregue X"*. Mas o agente não decide "criar
+um alerta" do nada — **o operador pede um lembrete**, e é o agente que precisa
+fazer a ponte. Um gatilho escrito na linguagem interna do mecanismo só dispara para
+quem já sabe que o mecanismo existe, ou seja, **para quem não precisa dele**.
+
+As sete linhas foram reescritas para ancorar no que é **observável**: o pedido do
+operador ("me lembra toda terça", "abre uma missão sobre X", "anota aí que…") ou
+um bloco que chegou no prompt (`[Alertas aguardando confirmação]`,
+`[Sala de missão ativa]`). E ficou dito no arquivo que **a tabela é também o índice
+das capacidades** — mecanismo que não aparece ali é mecanismo que o agente não
+descobre sozinho, e isso é bug da tabela.
+
+**Testes:** **1005 passed, 169 skipped** nas duas medições (após a remoção e após
+a reescrita dos gatilhos) — sem regressão. `CLAUDE.md`: 51.998 → 43.265 → 44.323
+(os 1.058 de volta são o custo dos gatilhos melhores, e são um bom negócio contra
+8.733 que saíram).
+
+**Reversão:** `git revert` devolve as duas seções e o formato antigo da tabela.
+
+### refactor(claude-md): descem os cinco primeiros manuais (2026-09-04)
+
+**Operador pediu:** a **etapa 5** — tirar do prompt o manual de mecanismo, uma
+seção por vez, com sonda entre elas. Este é o primeiro lote, escolhido por ser o
+de **menor risco**: são seções descritivas, cujo gatilho é sempre uma tarefa
+explícita do operador.
+
+**Foi feito:** saíram do `CLAUDE.md`, para os satélites criados no commit
+anterior — Sistema de memória (2.724), Primeiro contato / onboarding (2.599),
+Atualização conversacional de user-data (735), Edição conversacional da knowledge
+base (1.953) e Helpers (1.146). **9.157 caracteres saíram do prompt de todo
+turno.**
+
+**A trava que tornou isso seguro:** o script de remoção
+(`.local/remover-secao.py`) **recusa apagar uma seção cujo corpo não esteja
+preservado em `docs/agente/`**. Não é disciplina de quem executa — é o script que
+aborta. Cinco seções, cinco conferências, cinco aprovações.
+
+**Testes:** **1005 passed, 169 skipped** — igual ao commit anterior, sem
+regressão. Conferido que cada seção removida tem **0 ocorrências** no `CLAUDE.md` e
+**1 ocorrência** em `docs/agente/`. O teste de gatilhos garante, além disso, que
+todo satélite citado existe e que nenhum satélite ficou órfão.
+`CLAUDE.md`: 61.155 → 51.998 chars.
+
+**Reversão:** `git revert` deste commit devolve as cinco seções ao prompt. Os
+satélites continuam existindo (foram criados noutro commit), então o pior caso é
+redundância temporária — nunca ausência.
+
+### feat(claude-md): os gatilhos taxativos, e o teste que os guarda (2026-09-04)
+
+**Operador pediu:** a **etapa 5** da faxina — tirar o manual de mecanismo do
+prompt. Este commit entrega o que **substitui** o manual, antes de qualquer
+remoção acontecer.
+
+**Por quê:** o manual sai, mas alguém precisa dizer **quando** ir buscá-lo. E a
+forma dessa linha não é indiferente — ela é a diferença entre o mecanismo
+funcionar ou não. A forma *"consulte quando for relevante"* **não funciona, e isso
+foi medido**: numa sessão de setembro, dois ponteiros bem escritos para uma
+baseline de segurança ficaram sem ser abertos, num turno que tinha encontrado dado
+pessoal de terceiro em produção. Gatilho ancorado em **assunto** exige julgar
+relevância, e julgamento perde para o foco da tarefa. Gatilho ancorado em **ação**
+("antes de rodar X, carregue Y") é binário: ou você está prestes a fazer aquilo,
+ou não está.
+
+**Foi feito:**
+- Seção **"Gatilhos taxativos"** no `CLAUDE.md`: sete linhas, cada uma nomeando
+  uma ação e o satélite obrigatório antes dela.
+- **`tests/test_claude_md_gatilhos.py`** — cinco testes determinísticos, sem
+  modelo e sem rede: a seção existe; **todo satélite citado existe em disco**;
+  **todo satélite em disco tem gatilho** (o inverso — satélite órfão é texto que
+  saiu do prompt e nunca volta); o gatilho é ancorado em ação; e não há linguagem
+  frouxa ("se necessário", "se quiser") que devolva a decisão ao julgamento.
+
+**Testes:** **1000 → 1005 passed**, 169 skipped. Os cinco novos são os do arquivo
+acima. E eles já pegaram um defeito real na primeira execução: a frase
+`não depende de você achar que precisa` estava **partida por quebra de linha** e o
+teste não a encontrou — mesma classe de erro que já mordeu a seção do boletim.
+Corrigido com reflow. `CLAUDE.md`: 59.545 → 61.166 chars.
+
+**Nota:** este commit é **aditivo** — nada saiu do prompt ainda. As remoções vêm
+nos commits seguintes, uma seção por vez, para que cada uma reverta sozinha.
+
+**Reversão:** `git revert`. Devolve o arquivo ao estado do commit anterior e apaga
+o teste novo; nenhum satélite é afetado.
+
+### feat(docs): nascem os satélites do agente, com texto idêntico (2026-09-04)
+
+**Operador pediu:** a **etapa 4** da faxina — criar os arquivos de destino do
+manual de mecanismo **antes** de remover qualquer coisa do prompt. Ordem dele:
+*"pôr antes de tirar"*.
+
+**Por quê:** o princípio que governa a faxina inteira é não abrir janela em que
+uma regra não exista em lugar nenhum. Se o satélite nascesse no mesmo commit que
+remove a seção do `CLAUDE.md`, reverter devolveria os dois e o trabalho do
+satélite se perderia junto. Separados, cada um reverte sozinho.
+
+**Foi feito:** sete satélites em `docs/agente/`, extraídos por script
+(`.local/extrair-satelites.py`) e não à mão — `memoria-manual.md`,
+`mission-control.md`, `alertas.md`, `arquitetura-memoria.md`, `onboarding.md`,
+`knowledge-base.md`, `helpers.md`. Cada um leva um cabeçalho de ponteiro (que é
+endereço, não conteúdo) e o corpo **byte a byte igual** ao do `CLAUDE.md`.
+
+**Testes:** o script **confere a identidade depois de gravar** e falha se um byte
+divergir — todos passaram. O `CLAUDE.md` **não foi tocado** nesta etapa: sha
+`7aed434bf64a` antes e depois, o mesmo do commit anterior. Corpos extraídos, com
+sha de cada um: memoria-manual `881b8c94d64f` (5.941), mission-control
+`018e1ad393aa` (5.089), alertas `b42f8025f01f` (3.642), arquitetura-memoria
+`92532a12b278` (2.723), onboarding `ab187dabf9fb` (2.598), knowledge-base
+`22d87a617550` (2.687), helpers `49dcbc6c9206` (1.145).
+
+**Nota de escopo:** a mecânica de migrations **não** virou satélite. A seção
+"Mudou o banco?" fica inteira no prompt — a violação dela é silenciosa (o
+instalador do segundo usuário não falha; a feature quebra meses depois), e pela
+régua da faxina isso é conduta, não manual.
+
+**Reversão:** `git revert` deste commit apaga os sete arquivos e não mexe em mais
+nada, porque nada mais foi tocado.
+
+### feat(claude-md): o produto ganha credenciais, ambientes e streaming (2026-09-04)
+
+**Operador pediu:** levar para o `CLAUDE.md` do projeto o que hoje só existe no
+manual pessoal dele e que um segundo usuário não teria. Palavras dele: *"tudo que
+demanda funcionamento do Kobe precisa estar no CLAUDE.md do Kobe — de modo que o
+eventual segundo usuário possa rodar o Kobe sem problemas"*. É a **etapa 3** da
+faxina de reorganização dos depósitos, aprovada em 03/09 (#3785) e reafirmada em
+04/09 (*"é lógico que isso tem que ir pra lá"*).
+
+**Por quê:** três lacunas foram medidas por busca no arquivo, e são ausências, não
+impressões — o `CLAUDE.md` do projeto tinha **zero** ocorrências de "prod VPS" e
+"repo dev", **nenhuma** regra de tratamento de credencial, e **nada** sobre
+streaming dirigido ao agente. A mais grave é a primeira: um segundo usuário
+instalava o Kobe e recebia um agente sem regra nenhuma de credencial — ou seja,
+um agente que pode commitar `.env`. Isso não é economia de prompt, é defeito de
+produto.
+
+**Foi feito:**
+- Seção **"Ambientes e deploy — os quatro estágios"**: o modelo `dev VPS` /
+  `repo dev` / `prod VPS` / `repo prod`, a ordem do fluxo, a regra de que o
+  público só instala do repo prod, e a pesagem de risco antes de pedir
+  confirmação. Os **endereços concretos ficam no manual do operador** — aqui só o
+  modelo, que é o que vale para qualquer instalação.
+- Seção **"Credenciais — regra dura"**: nunca commitar, conferir o `.gitignore`
+  antes de `git add -A`, nunca ecoar em log, e a regra que faltava — credencial
+  vazada exige **rotação**, não `git rm`.
+- Seção **"Performance percebida"**: streaming obrigatório, I/O independente em
+  paralelo, cache entre turnos, e fallback com voz em vez de silêncio.
+
+**Testes:** suíte completa antes e depois — **1000 passed, 169 skipped** nas duas
+medições, sem regressão. Conferido que as três seções entram uma única vez cada, e
+que os termos que antes davam zero ocorrências agora aparecem (`prod VPS` 4,
+`repo dev` 4, `rotacionada` 1, `Streaming é obrigatório` 1). Tamanho do arquivo:
+55.748 → 59.545 chars (+3.797) — **ele cresce nesta etapa de propósito**; o
+encolhimento vem na etapa 5, e a ordem é essa para não abrir janela em que uma
+regra não exista em lugar nenhum.
+
+**Reversão:** `git revert` deste commit. Nada foi removido do arquivo — a etapa é
+puramente aditiva, então reverter devolve o estado anterior sem perda.
 
 ### docs(boletim): o CLAUDE.md ensina a ler o bloco novo (2026-09-01)
 

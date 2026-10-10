@@ -435,15 +435,22 @@ def collect_once(
     return resultado
 
 
-def _regenera_dossies(resultado: RunResult) -> None:
+def _regenera_dossies(resultado: RunResult, sessoes: Optional[list] = None,
+                      saida: Optional[Path] = None) -> None:
     """Regenera o dossiê de cada sala que teve novidade — o "por acúmulo".
 
     Best-effort e por sala: um transcript que quebre a geração não pode impedir
     o dossiê dos outros. O dossiê é derivado; a fonte de verdade é o `.jsonl` ao
     lado, e ele não é tocado aqui.
+
+    `sessoes` substitui "as que tiveram novidade" (é o que `regenerar_dossies`
+    usa pra refazer o acervo inteiro). `saida`, quando dada, grava os dossiês
+    numa árvore paralela em vez de ao lado do transcript — pra medir o efeito
+    de uma mudança sem tocar o acervo.
     """
     from bot.transcripts import dossier
 
+    alvo = resultado.touched if sessoes is None else sessoes
     catalogo_por_sessao: dict[str, Any] = {}
     artefatos_por_sessao: dict[str, Any] = {}
     db = None
@@ -454,7 +461,7 @@ def _regenera_dossies(resultado: RunResult) -> None:
             resultado.catalog_note = "catálogo desligado — dossiê sem sistema/subsistema"
         else:
             db = wc.connect()
-            for s in resultado.touched:
+            for s in alvo:
                 try:
                     linha = wc.get_session(db, s.session_id)
                 except Exception as exc:  # noqa: BLE001
@@ -476,19 +483,56 @@ def _regenera_dossies(resultado: RunResult) -> None:
             except Exception:  # noqa: BLE001
                 pass
 
-    for s in resultado.touched:
+    for s in alvo:
         if s.dest is None or not s.dest.is_file():
             continue
+        destino = None
+        if saida is not None and resultado.dest_root is not None:
+            destino = saida / dossier.dossier_path_for(s.dest).relative_to(
+                resultado.dest_root)
         try:
             caminho = dossier.gerar(
                 session_id=s.session_id,
                 transcript=s.dest,
                 catalogo=catalogo_por_sessao.get(s.session_id),
                 artefatos=artefatos_por_sessao.get(s.session_id),
+                destino=destino,
             )
             s.dossier = caminho
-        except Exception:  # noqa: BLE001 — um dossiê ruim não para os outros
+        except Exception as exc:  # noqa: BLE001 — um dossiê ruim não para os outros
+            s.error = f"dossiê: {type(exc).__name__}: {exc}"
             continue
+
+
+def regenerar_dossies(
+    *,
+    dest_root: Optional[Path] = None,
+    only: Optional[Iterable[str]] = None,
+    saida: Optional[Path] = None,
+) -> RunResult:
+    """Refaz o dossiê de TODA sala já colhida, a partir do `.jsonl`.
+
+    Existe porque o "por acúmulo" só regenera quem teve novidade: quando a
+    REGRA do dossiê muda (como em 07/10/2026, quando o plano deixou de vir do
+    disco), as salas paradas ficariam com o dossiê velho para sempre. O
+    transcript não é tocado — só lido.
+    """
+    dest_root = dest_root or default_dest_root()
+    resultado = RunResult(dest_root=dest_root)
+    filtro = {f.lower() for f in only} if only else None
+    sessoes: list[SessionResult] = []
+    for jsonl in sorted(dest_root.glob("*/*.jsonl")):
+        sid = jsonl.stem
+        if filtro and not any(sid.lower() == f or sid.lower().startswith(f)
+                              for f in filtro):
+            continue
+        sessoes.append(SessionResult(key=str(jsonl), session_id=sid,
+                                     project=jsonl.parent.name, dest=jsonl,
+                                     action="dossier"))
+    resultado.sessions = sessoes
+    _regenera_dossies(resultado, sessoes=sessoes, saida=saida)
+    resultado.ok = not any(s.error for s in sessoes)
+    return resultado
 
 
 def _atualiza_catalogo(resultado: RunResult) -> None:

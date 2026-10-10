@@ -34,11 +34,28 @@ from bot.lucien import source  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _sem_heranca(monkeypatch):
-    """O ambiente da sessão não pode decidir o resultado do teste."""
+def _sem_heranca(monkeypatch, tmp_path):
+    """O ambiente da sessão não pode decidir o resultado do teste.
+
+    E o teste não pode ESCREVER na árvore real. Desde 07/10/2026 o `tick()` da
+    fonte grava o estado de saúde em `<kobe_home>/user-data/lucien/saude.json`;
+    com `kobe_home=RAIZ`, rodar a suíte sujava o estado do ambiente onde ela
+    rodou (pego no keyko-dev logo depois do merge da Etapa 0). Por isso
+    `_HOME` é uma pasta temporária, e o aviso não tem destino nem credencial
+    real para ler.
+    """
+    global _HOME
     for k in ("LUCIEN_ENABLED", "LUCIEN_BATCH_MIN", "LUCIEN_MAX_AGE_S",
-              "LUCIEN_MODEL", "LUCIEN_MODEL_RECONSTRUCAO"):
+              "LUCIEN_MODEL", "LUCIEN_MODEL_RECONSTRUCAO",
+              "LUCIEN_ALERT_CHAT_ID", "LUCIEN_ALERT_THREAD_ID"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("LUCIEN_CREDENCIAL_COMPARTILHADA", str(tmp_path / "sem-creds.json"))
+    monkeypatch.setenv("LUCIEN_OAUTH_TOKEN_FILE", str(tmp_path / "sem-token"))
+    _HOME = tmp_path / "kobe"
+    (_HOME / "user-data" / "lucien").mkdir(parents=True)
+
+
+_HOME: Path = RAIZ  # trocado por uma pasta temporária a cada teste
 
 
 class _CxFalso:
@@ -88,7 +105,7 @@ def test_a_chave_desligada_faz_o_tick_nao_tocar_no_banco(monkeypatch):
     sem restart, por exemplo), ela ainda tem que ser inerte."""
     monkeypatch.setenv("LUCIEN_ENABLED", "false")
     chamou = []
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=lambda: chamou.append(1))
+    s = source.LucienSource(kobe_home=_HOME, db_factory=lambda: chamou.append(1))
     assert s.tick() == []
     assert not chamou, "tick com a chave off abriu conexão com o banco"
 
@@ -101,7 +118,7 @@ def test_o_tick_NUNCA_devolve_despertar(monkeypatch):
     modelo com a caneta na mão."""
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
     disparos = []
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_CxFalso)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_CxFalso)
     monkeypatch.setattr(s, "_disparar", lambda: disparos.append(1))
     monkeypatch.setattr("bot.lucien.worker.cota_disponivel", lambda cx: True)
     monkeypatch.setattr(
@@ -116,7 +133,7 @@ def test_o_tick_nao_dispara_se_ja_ha_worker_em_voo(monkeypatch):
     """O cadeado do banco já protegeria a escrita, mas disparar processos que
     morrem no cadeado gasta recurso à toa."""
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_CxFalso)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_CxFalso)
 
     class _Vivo:
         def poll(self):
@@ -137,13 +154,13 @@ def test_o_tick_nao_levanta_quando_o_banco_esta_fora(monkeypatch):
     def _explodir():
         raise ConnectionError("banco fora")
 
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_explodir)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_explodir)
     assert s.tick() == []
 
 
 def test_o_tick_nao_levanta_quando_a_consulta_falha(monkeypatch):
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_CxFalso)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_CxFalso)
     monkeypatch.setattr(
         "bot.lucien.worker.cota_disponivel",
         lambda cx: (_ for _ in ()).throw(RuntimeError("tabela sumiu")),
@@ -155,7 +172,7 @@ def test_a_conexao_e_fechada_mesmo_quando_da_erro(monkeypatch):
     """Processo de vida curta pode vazar; um daemon que roda por semanas, não."""
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
     cx = _CxFalso()
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=lambda: cx)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=lambda: cx)
     monkeypatch.setattr(
         "bot.lucien.worker.cota_disponivel",
         lambda c: (_ for _ in ()).throw(RuntimeError("erro")),
@@ -167,7 +184,7 @@ def test_a_conexao_e_fechada_mesmo_quando_da_erro(monkeypatch):
 def test_sem_lote_devido_nao_dispara_nada(monkeypatch):
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
     disparos = []
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_CxFalso)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_CxFalso)
     monkeypatch.setattr(s, "_disparar", lambda: disparos.append(1))
     monkeypatch.setattr("bot.lucien.worker.cota_disponivel", lambda cx: True)
     monkeypatch.setattr("bot.lucien.worker.escolher_topico", lambda cx, **k: None)
@@ -177,7 +194,7 @@ def test_sem_lote_devido_nao_dispara_nada(monkeypatch):
 def test_cota_estourada_nao_dispara(monkeypatch):
     monkeypatch.setenv("LUCIEN_ENABLED", "true")
     disparos = []
-    s = source.LucienSource(kobe_home=RAIZ, db_factory=_CxFalso)
+    s = source.LucienSource(kobe_home=_HOME, db_factory=_CxFalso)
     monkeypatch.setattr(s, "_disparar", lambda: disparos.append(1))
     monkeypatch.setattr("bot.lucien.worker.cota_disponivel", lambda cx: False)
     assert s.tick() == [] and not disparos

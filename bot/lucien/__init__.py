@@ -237,6 +237,16 @@ def falhas_seguidas_max() -> int:
     return int(_num("LUCIEN_FALHAS_SEGUIDAS", 3, minimo=1))
 
 
+def aviso_lembrete_h() -> float:
+    """De quantas em quantas horas lembrar que o LUCIEN CONTINUA parado.
+
+    Abrir o incidente avisa uma vez; a repetição só soma. Sem lembrete, um
+    aviso perdido no meio da conversa seria o único; com um a cada falha, viram
+    144 mensagens num dia (a pane de 04-05/10/2026). Seis horas é o meio.
+    """
+    return _num("LUCIEN_AVISO_LEMBRETE_H", 6, minimo=0.5)
+
+
 def maximo_rodadas_hora() -> int:
     """Teto de cota. LUCIEN não tem pressa; um pico de conversa não pode virar
     um pico de chamadas de modelo."""

@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""kobe-kb — o porteiro da base de conhecimento do tópico.
+
+A pasta `knowledge/` de um tópico não tinha porteiro: qualquer arquivo que
+caísse lá entrava no prompt, em todo turno, na ordem alfabética do nome. Este
+comando é o porteiro.
+
+USO
+---
+    kobe-kb listar
+    kobe-kb admitir <arquivo.md> --titulo "<como aparece na lista>" \\
+                    [--motivo "<por que está na base>"] [--ordem N]
+    kobe-kb remover <arquivo.md>
+
+`<arquivo.md>` é o NOME do arquivo dentro de `knowledge/`, não um caminho.
+
+OS TRÊS ESTADOS, E A DISTINÇÃO QUE IMPORTA
+-------------------------------------------
+    admitido           entra no prompt
+    removido           não entra, e NÃO volta a pedir
+    batendo na porta   não entra, mas aparece no prompt pedindo decisão
+
+*"Nunca decidi"* e *"decidi que não"* são coisas diferentes. Arquivo removido que
+voltasse a pedir admissão transformaria uma decisão do operador em pergunta
+recorrente — e pergunta recorrente é como um aviso vira ruído e para de ser lido.
+
+O QUE ESTE COMANDO NÃO FAZ
+---------------------------
+**Não apaga arquivo.** Remover é tirar do prompt; o `.md` continua em disco,
+intacto, e pode ser readmitido depois. O conteúdo da base é arquivo editável à
+mão — o catálogo governa quem entra, não o que está escrito.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def _topico_atual(db):
+    """O `topics.id` de onde a chamada veio, ou `None`.
+
+    Mesmo padrão do `kobe-remember` e do `kobe-fato`: sem `KOBE_CHAT_ID` no
+    ambiente não há tópico corrente, e dizer isso é melhor que mexer no
+    catálogo do tópico errado.
+    """
+    chat = os.environ.get("KOBE_CHAT_ID")
+    if not chat:
+        return None
+    thread = os.environ.get("KOBE_THREAD_ID") or None
+    try:
+        chat_id = int(chat)
+        thread_id = int(thread) if thread not in (None, "") else 0
+    except ValueError:
+        return None
+    linha = db.one(
+        "SELECT id FROM topics WHERE telegram_chat_id = %s AND telegram_thread_id = %s",
+        (chat_id, thread_id),
+    )
+    return str(linha["id"]) if linha else None
+
+
+def _pasta(db, topic_id: str) -> Path | None:
+    from bot.topic_manager import get_topic_slug  # noqa: E402
+
+    linha = db.one(
+        "SELECT telegram_chat_id AS c, telegram_thread_id AS t FROM topics WHERE id = %s",
+        (topic_id,),
+    )
+    if not linha:
+        return None
+    slug = get_topic_slug(db, int(linha["c"]), int(linha["t"]))
+    if not slug:
+        return None
+    return Path(os.environ.get("KOBE_HOME", ".")) / "user-data" / "topics" / slug / "knowledge"
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="kobe-kb", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("listar", help="o que está na base, o que saiu e o que está batendo na porta")
+
+    p = sub.add_parser("admitir", help="põe um documento na base do tópico")
+    p.add_argument("arquivo")
+    p.add_argument("--titulo", required=True)
+    p.add_argument("--motivo", default=None)
+    p.add_argument("--ordem", type=int, default=None)
+
+    p = sub.add_parser("remover", help="tira do prompt (NÃO apaga o arquivo)")
+    p.add_argument("arquivo")
+
+    p = sub.add_parser(
+        "semear",
+        help="admite o que JÁ está na pasta — torna a virada do porteiro invisível",
+    )
+    p.add_argument("--ensaio", action="store_true", help="mostra e não grava")
+
+    args = ap.parse_args(argv)
+
+    from bot import kb_catalog  # noqa: E402
+    from bot.config import load_config  # noqa: E402
+    from bot.db import build_client  # noqa: E402
+
+    try:
+        # A conexão vem da configuração, como em todo helper (`kobe-remember`
+        # idem). `KobeDB()` sem argumento — o que estava aqui até 07/10/2026 —
+        # levantava TypeError e fazia TODO comando sair como falha do
+        # instrumento, a semeadura do deploy inclusive.
+        db = build_client(load_config())
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-kb: (FALHA DO INSTRUMENTO) não consegui falar com o banco: {exc}",
+              file=sys.stderr)
+        return 3
+
+    topic_id = _topico_atual(db)
+    if topic_id is None:
+        print("kobe-kb: não consegui resolver o tópico (KOBE_CHAT_ID / KOBE_THREAD_ID).",
+              file=sys.stderr)
+        return 1
+
+    try:
+        if args.cmd == "admitir":
+            pasta = _pasta(db, topic_id)
+            if pasta is not None and not (pasta / args.arquivo).is_file():
+                print(f"kobe-kb RECUSOU: `{args.arquivo}` não existe em {pasta}. "
+                      "Admitir arquivo que não está lá deixaria o catálogo apontando "
+                      "para o vazio.", file=sys.stderr)
+                return 1
+            r = kb_catalog.admitir(
+                db, topic_id, args.arquivo, titulo=args.titulo,
+                motivo=args.motivo, ordem=args.ordem,
+            )
+            verbo = "readmitido (estava fora)" if r == "readmitido" else "admitido"
+            print(f"`{args.arquivo}` {verbo} na base deste tópico — entra no prompt "
+                  "a partir do próximo turno.")
+
+        elif args.cmd == "remover":
+            if kb_catalog.remover(db, topic_id, args.arquivo):
+                print(f"`{args.arquivo}` saiu da base — deixa de entrar no prompt. "
+                      "**O arquivo continua em disco**, e pode ser readmitido depois.")
+            else:
+                print(f"`{args.arquivo}` não estava admitido — nada a remover.")
+                return 1
+
+        elif args.cmd == "semear":
+            # A virada do porteiro é fail-closed: sem catálogo, NADA entra. Num
+            # tópico que já tinha base curada, isso seria uma perda silenciosa de
+            # contexto no primeiro turno depois do deploy.
+            #
+            # Semear admite o que já está na pasta, e com isso o comportamento no
+            # dia da virada é **idêntico** ao de antes. O porteiro só passa a
+            # morder do arquivo NOVO em diante — que é exatamente o que ele
+            # existe para pegar.
+            pasta = _pasta(db, topic_id)
+            if pasta is None or not pasta.is_dir():
+                print("kobe-kb: este tópico não tem pasta de knowledge — nada a semear.")
+                return 0
+            cat = kb_catalog.carregar(db, topic_id)
+            novos = [p.name for p in sorted(pasta.iterdir())
+                     if p.is_file() and p.name not in cat.conhecidos]
+            if not novos:
+                print("nada a semear — o catálogo já conhece tudo que está na pasta.")
+                return 0
+            for nome in novos:
+                if args.ensaio:
+                    print(f"  (ensaio) admitiria `{nome}`")
+                    continue
+                kb_catalog.admitir(
+                    db, topic_id, nome, titulo=nome,
+                    motivo="semeado na virada do porteiro — estava na base antes dele existir",
+                )
+                print(f"  admitido `{nome}`")
+            if args.ensaio:
+                print(f"\n{len(novos)} arquivo(s) seriam admitidos. Rode sem --ensaio.")
+            else:
+                print(f"\n{len(novos)} arquivo(s) admitidos. O comportamento deste "
+                      "tópico continua idêntico ao de antes do porteiro.")
+
+        else:
+            linhas = kb_catalog.listar(db, topic_id)
+            pasta = _pasta(db, topic_id)
+            na_pasta = sorted(p.name for p in pasta.iterdir() if p.is_file()) if (
+                pasta and pasta.is_dir()) else []
+            cat = kb_catalog.carregar(db, topic_id)
+            batendo = cat.batendo_na_porta(na_pasta)
+
+            dentro = [l for l in linhas if l["status"] == "admitido"]
+            fora = [l for l in linhas if l["status"] != "admitido"]
+
+            print(f"NA BASE ({len(dentro)}) — nesta ordem é que entram no prompt:")
+            for l in dentro or []:
+                motivo = f" · {l['motivo']}" if l["motivo"] else ""
+                print(f"  · {l['titulo']}{motivo}")
+                print(f"      {l['caminho']} · desde {str(l['admitido_em'])[:10]}")
+            if not dentro:
+                print("  (nada admitido)")
+
+            if fora:
+                print(f"\nFORA ({len(fora)}) — o arquivo continua em disco:")
+                for l in fora:
+                    print(f"  × {l['titulo']} · {l['caminho']} · "
+                          f"saiu em {str(l['removido_em'])[:10]}")
+
+            if batendo:
+                print(f"\nBATENDO NA PORTA ({len(batendo)}) — estão na pasta e "
+                      "ninguém decidiu:")
+                for n in batendo:
+                    print(f"  ? {n}")
+                print('  (para admitir: kobe-kb admitir <nome> --titulo "…")')
+
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-kb: (FALHA DO INSTRUMENTO) {exc}", file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

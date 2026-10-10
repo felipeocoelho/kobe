@@ -25,7 +25,8 @@
     "006",
     "007",
     "008",
-    "009"
+    "009",
+    "010"
   ],
   "tables": {
     "contacts": {
@@ -205,6 +206,174 @@
         {
           "name": "contacts_tipo_check",
           "definition": "CHECK ((tipo = ANY (ARRAY['pessoa'::text, 'grupo'::text])))"
+        }
+      ]
+    },
+    "kb_catalog": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": "uuid_generate_v4()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "topic_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "caminho",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "titulo",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "motivo",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "ordem",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'admitido'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "admitido_em",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "removido_em",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "source_message_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_kb_catalog_admitidos",
+          "definition": "CREATE INDEX idx_kb_catalog_admitidos ON public.kb_catalog USING btree (topic_id, ordem, admitido_em) WHERE (status = 'admitido'::text)"
+        },
+        {
+          "name": "idx_kb_catalog_topico",
+          "definition": "CREATE INDEX idx_kb_catalog_topico ON public.kb_catalog USING btree (topic_id)"
+        },
+        {
+          "name": "kb_catalog_pkey",
+          "definition": "CREATE UNIQUE INDEX kb_catalog_pkey ON public.kb_catalog USING btree (id)"
+        },
+        {
+          "name": "kb_catalog_um_por_arquivo",
+          "definition": "CREATE UNIQUE INDEX kb_catalog_um_por_arquivo ON public.kb_catalog USING btree (topic_id, caminho)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "kb_catalog_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "kb_catalog_saida_check",
+          "definition": "CHECK (((status = 'admitido'::text) = (removido_em IS NULL)))"
+        },
+        {
+          "name": "kb_catalog_source_message_id_fkey",
+          "definition": "FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "kb_catalog_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['admitido'::text, 'removido'::text])))"
+        },
+        {
+          "name": "kb_catalog_topic_id_fkey",
+          "definition": "FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "kb_catalog_um_por_arquivo",
+          "definition": "UNIQUE (topic_id, caminho)"
         }
       ]
     },

@@ -107,6 +107,17 @@ def _ambiente(kobe_home: str, config_dir: str) -> dict:
     # LUCIEN não vire uma voz no chat. O relatório é F5, e é do operador.
     for fora in ("KOBE_CHAT_ID", "KOBE_THREAD_ID"):
         env.pop(fora, None)
+    # O token de longa duração do LUCIEN, quando instalado (opção B da Etapa 0,
+    # 07/10/2026). Sem ele, nada muda: a CLI usa a credencial compartilhada. Com
+    # ele, tira-se também a chave de API do ambiente: a escolha do operador foi
+    # NÃO pagar API pelo LUCIEN, e uma `ANTHROPIC_API_KEY` herdada do daemon
+    # poderia passar na frente do token e virar fatura sem ninguém decidir.
+    from bot.lucien import credencial
+
+    token = credencial.ler_token(kobe_home)
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        env.pop("ANTHROPIC_API_KEY", None)
     return env
 
 
@@ -148,15 +159,45 @@ def chamar(prompt: str, *, kobe_home: str, reconstrucao: bool = False,
         # erro dizia só "(sem stderr)", que não diagnostica nada. O motivo vinha
         # no stdout, no envelope de erro da própria CLI. Uma mensagem de falha
         # que não diz a causa custa uma investigação inteira depois.
+        #
+        # E o motivo vem num CAMPO do envelope (`result`), lá pelo fim dele.
+        # Medido em 07/10/2026: as 144 falhas de 04-05/10 ficaram gravadas como
+        # os primeiros 400 caracteres do envelope — `duration_api_ms`, `usage`…
+        # — e o corte caía ANTES do `result`, que dizia "Not logged in · Please
+        # run /login". Então a causa vai na frente, e só depois o resto cortado.
         erro = proc.stderr.decode("utf-8", "replace").strip()[:400]
+        causa = causa_do_envelope(saida)
         detalhe = " ".join(saida.split())[:400]
-        pistas = " · ".join(x for x in (erro, detalhe) if x) or "(sem stderr nem stdout)"
+        pistas = " · ".join(x for x in (causa, erro, detalhe) if x) \
+            or "(sem stderr nem stdout)"
         raise CerebroIndisponivel(
             f"a CLI saiu com código {proc.returncode}: {pistas}"
         )
     if not saida.strip():
         raise CerebroIndisponivel("a CLI respondeu vazio")
     return saida
+
+
+def causa_do_envelope(saida: str) -> str:
+    """O motivo de uma falha, tirado dos campos do envelope JSON da CLI.
+
+    `""` quando a saída não é um envelope — aí o chamador fica com o texto cru.
+    """
+    try:
+        env = json.loads((saida or "").strip())
+    except ValueError:
+        return ""
+    if not isinstance(env, dict):
+        return ""
+    partes = []
+    resultado = env.get("result")
+    if isinstance(resultado, str) and resultado.strip():
+        partes.append(f"causa: {' '.join(resultado.split())[:300]}")
+    for campo in ("api_error_status", "terminal_reason", "subtype"):
+        valor = env.get(campo)
+        if valor not in (None, "", "success"):
+            partes.append(f"{campo}={valor}")
+    return " · ".join(partes)
 
 
 # ── O parser ─────────────────────────────────────────────────────────────

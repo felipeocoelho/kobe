@@ -47,6 +47,17 @@ def _bash(comando: str):
     return {"type": "tool_use", "name": "Bash", "input": {"command": comando}}
 
 
+def _write(caminho: str, conteudo: str):
+    return {"type": "tool_use", "name": "Write",
+            "input": {"file_path": caminho, "content": conteudo}}
+
+
+def _edit(caminho: str, antigo: str, novo: str, todas: bool = False):
+    return {"type": "tool_use", "name": "Edit",
+            "input": {"file_path": caminho, "old_string": antigo,
+                      "new_string": novo, "replace_all": todas}}
+
+
 @pytest.fixture
 def transcript(tmp_path: Path) -> Path:
     p = tmp_path / f"{uuid.uuid4()}.jsonl"
@@ -178,9 +189,11 @@ def test_pendencias_saem_das_caixas_nao_marcadas_do_plano(tmp_path, transcript):
     marcando. Não é inferência sobre o que ela fez."""
     cwd = tmp_path / "trabalho"
     (cwd / ".local").mkdir(parents=True)
-    (cwd / ".local" / "plano-x.md").write_text(
-        "# Plano\n- [x] feito\n- [ ] falta isto\n- [ ] e isto\n", encoding="utf-8")
-    transcript.write_bytes(_assistente({"type": "text", "text": "."}))
+    plano = cwd / ".local" / "plano-x.md"
+    conteudo = "# Plano\n- [x] feito\n- [ ] falta isto\n- [ ] e isto\n"
+    plano.write_text(conteudo, encoding="utf-8")
+    # O plano conta porque a SALA o escreveu — está no transcript dela.
+    transcript.write_bytes(_assistente(_write(str(plano), conteudo)))
 
     texto = dossier.gerar(
         session_id=transcript.stem, transcript=transcript,
@@ -200,7 +213,7 @@ def test_sem_plano_o_dossie_diz_que_nao_achou(tmp_path, transcript):
         session_id=transcript.stem, transcript=transcript,
         catalogo={"cwd": str(tmp_path / "vazio")},
     ).read_text(encoding="utf-8")
-    assert "Nenhum `.local/plano-*.md` encontrado" in texto
+    assert "Nenhum plano identificado para esta sala" in texto
 
 
 def test_produzidos_saem_de_arquivos_escritos_e_commits(tmp_path, transcript):
@@ -282,3 +295,245 @@ def test_o_dossie_nunca_toca_o_transcript(tmp_path, transcript):
 def test_o_nome_do_dossie_fica_ao_lado_do_transcript(tmp_path, transcript):
     esperado = transcript.with_name(transcript.stem + ".dossier.md")
     assert dossier.dossier_path_for(transcript) == esperado
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D5 — o plano é o que a PRÓPRIA sala escreveu (Etapa 0, 07/10/2026)
+#
+# Até 07/10 o plano vinha do disco: "o `.local/plano-*.md` mais recente da pasta
+# de trabalho". Salas com pasta na raiz dividem um `.local/` só — e 742 de 797
+# dossiês de produção citavam um plano que a sala nunca escreveu.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _gera(transcript, cwd) -> str:
+    return dossier.gerar(
+        session_id=transcript.stem, transcript=transcript,
+        catalogo={"status": "running", "cwd": str(cwd)},
+    ).read_text(encoding="utf-8")
+
+
+def test_plano_de_outra_sala_na_pasta_compartilhada_nao_e_atribuido(tmp_path, transcript):
+    """O BUG. Uma sala que não escreveu plano nenhum, com pasta na raiz onde
+    OUTRA sala deixou o dela. No código antigo isto citava o plano alheio."""
+    cwd = tmp_path / "raiz"
+    (cwd / ".local").mkdir(parents=True)
+    (cwd / ".local" / "plano-de-outra-sala.md").write_text(
+        "- [ ] item que não é desta sala\n", encoding="utf-8")
+    transcript.write_bytes(_assistente({"type": "text", "text": "."}))
+
+    texto = _gera(transcript, cwd)
+    assert "plano-de-outra-sala" not in texto
+    assert "item que não é desta sala" not in texto
+    assert "Nenhum plano identificado para esta sala" in texto
+
+
+def test_com_dois_planos_na_pasta_vale_o_que_a_sala_escreveu_nao_o_mais_recente(
+        tmp_path, transcript):
+    cwd = tmp_path / "raiz"
+    (cwd / ".local").mkdir(parents=True)
+    meu = cwd / ".local" / "plano-meu.md"
+    meu.write_text("- [ ] meu item\n", encoding="utf-8")
+    import os, time
+    alheio = cwd / ".local" / "plano-alheio.md"
+    alheio.write_text("- [ ] item alheio\n", encoding="utf-8")
+    futuro = time.time() + 3600
+    os.utime(alheio, (futuro, futuro))  # o alheio é o MAIS RECENTE
+    transcript.write_bytes(_assistente(_write(str(meu), "- [ ] meu item\n")))
+
+    texto = _gera(transcript, cwd)
+    assert "plano-meu.md" in texto and "meu item" in texto
+    assert "plano-alheio" not in texto and "item alheio" not in texto
+
+
+def test_caminho_relativo_e_resolvido_contra_o_cwd_da_sala(tmp_path, transcript):
+    cwd = tmp_path / "w"
+    (cwd / ".local").mkdir(parents=True)
+    (cwd / ".local" / "plano-r.md").write_text("- [x] a\n- [ ] b\n", encoding="utf-8")
+    linha = json.dumps({"type": "assistant", "cwd": str(cwd), "message": {"content": [
+        _write(".local/plano-r.md", "- [x] a\n- [ ] b\n")]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+
+    texto = _gera(transcript, cwd)
+    assert f"`{cwd}/.local/plano-r.md`" in texto
+    assert "**1 de 2** concluídos" in texto
+
+
+def test_disco_traz_as_marcacoes_mais_recentes_do_mesmo_plano(tmp_path, transcript):
+    """Se o arquivo em disco tem os MESMOS itens, ele vale — é o estado mais
+    atual (a sala pode ter marcado caixa por `sed`, que o transcript não replica)."""
+    cwd = tmp_path / "w"
+    (cwd / ".local").mkdir(parents=True)
+    p = cwd / ".local" / "plano-m.md"
+    p.write_text("- [x] a\n- [x] b\n", encoding="utf-8")
+    transcript.write_bytes(_assistente(_write(str(p), "- [ ] a\n- [ ] b\n")))
+
+    texto = _gera(transcript, cwd)
+    assert "**2 de 2** concluídos" in texto
+    assert "reconstruído" not in texto
+
+
+def test_arquivo_sumido_e_reconstruido_do_transcript(tmp_path, transcript):
+    """A worktree é apagada depois do merge — e o plano ia junto. As escritas
+    estão no transcript, então o plano volta reaplicando-as em ordem."""
+    caminho = str(tmp_path / "wt-apagada" / ".local" / "plano-z.md")
+    transcript.write_bytes(
+        _assistente(_write(caminho, "# P\n- [ ] um\n- [ ] dois\n- [ ] três\n"))
+        + _assistente(_edit(caminho, "- [ ] um", "- [x] um"))
+        + _assistente(_edit(caminho, "- [ ] dois", "- [x] dois"))
+    )
+    texto = _gera(transcript, tmp_path)
+    assert "**2 de 3** concluídos" in texto
+    assert "- [ ] três" in texto
+    assert "reconstruído do transcript" in texto
+
+
+def test_multiedit_e_replace_all_sao_reaplicados(tmp_path, transcript):
+    caminho = str(tmp_path / "sumiu" / ".local" / "plano-me.md")
+    multi = {"type": "tool_use", "name": "MultiEdit", "input": {
+        "file_path": caminho, "edits": [
+            {"old_string": "- [ ] a", "new_string": "- [x] a"},
+            {"old_string": "TODO", "new_string": "feito", "replace_all": True}]}}
+    transcript.write_bytes(
+        _assistente(_write(caminho, "- [ ] a TODO\n- [ ] b TODO\n"))
+        + _assistente(multi))
+    texto = _gera(transcript, tmp_path)
+    assert "**1 de 2** concluídos" in texto
+    assert "- [ ] b feito" in texto
+
+
+def test_edicao_que_nao_casa_nao_vira_meio_plano(tmp_path, transcript):
+    """Se uma edição não casa, o arquivo foi mexido por fora do que o transcript
+    registra — a partir daí qualquer texto seria palpite. Diz isso."""
+    caminho = str(tmp_path / "sumiu" / ".local" / "plano-q.md")
+    transcript.write_bytes(
+        _assistente(_write(caminho, "- [ ] a\n"))
+        + _assistente(_edit(caminho, "- [ ] TRECHO QUE NÃO EXISTE", "x")))
+    texto = _gera(transcript, tmp_path)
+    assert "plano-q.md" in texto
+    assert "não dá pra reconstruí-lo" in texto
+    assert "concluídos" not in texto
+
+
+def test_nome_reaproveitado_por_outra_sala_usa_a_versao_desta(tmp_path, transcript):
+    """Mesmo nome, outra sala sobrescreveu depois: os itens do disco não são os
+    que esta sala escreveu. Vale a reconstrução, e o dossiê diz por quê."""
+    cwd = tmp_path / "raiz"
+    (cwd / ".local").mkdir(parents=True)
+    p = cwd / ".local" / "plano-v1.md"
+    p.write_text("- [ ] item da OUTRA sala\n", encoding="utf-8")
+    transcript.write_bytes(_assistente(_write(str(p), "- [x] meu 1\n- [ ] meu 2\n")))
+
+    texto = _gera(transcript, cwd)
+    assert "item da OUTRA sala" not in texto
+    assert "- [ ] meu 2" in texto
+    assert "já não é o que esta sala escreveu" in texto
+
+
+def test_plano_escrito_por_shell_e_atribuido_e_lido_do_disco(tmp_path, transcript):
+    cwd = tmp_path / "w"
+    (cwd / ".local").mkdir(parents=True)
+    (cwd / ".local" / "plano-sh.md").write_text("- [ ] via shell\n", encoding="utf-8")
+    linha = json.dumps({"type": "assistant", "cwd": str(cwd), "message": {"content": [
+        _bash("cat > .local/plano-sh.md <<'EOF'\n- [ ] via shell\nEOF")]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+
+    texto = _gera(transcript, cwd)
+    assert "- [ ] via shell" in texto
+
+
+def test_plano_por_shell_sumido_diz_que_nao_reconstroi(tmp_path, transcript):
+    linha = json.dumps({"type": "assistant", "cwd": str(tmp_path / "x"), "message": {
+        "content": [_bash("cat > .local/plano-sh.md <<'EOF'\n- [ ] a\nEOF")]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+    texto = _gera(transcript, tmp_path)
+    assert "plano-sh.md" in texto
+    assert "comando de shell" in texto
+
+
+def test_dois_planos_da_sala_vale_o_ultimo_tocado_e_os_outros_sao_citados(
+        tmp_path, transcript):
+    a = str(tmp_path / "s" / ".local" / "plano-a.md")
+    b = str(tmp_path / "s" / ".local" / "plano-b.md")
+    transcript.write_bytes(
+        _assistente(_write(a, "- [ ] A1\n"))
+        + _assistente(_write(b, "- [ ] B1\n"))
+        + _assistente(_edit(a, "- [ ] A1", "- [x] A1")))  # A foi o último tocado
+    texto = _gera(transcript, tmp_path)
+    assert f"Plano: `{a}`" in texto
+    assert f"Outros planos escritos por esta sala: `{b}`" in texto
+
+
+def test_arquivo_que_nao_e_plano_nao_e_confundido(tmp_path, transcript):
+    """`plano-x.md` fora de `.local/` (doc versionado) não é o plano do rito."""
+    transcript.write_bytes(_assistente(_write(str(tmp_path / "docs" / "plano-x.md"),
+                                              "- [ ] doc\n")))
+    texto = _gera(transcript, tmp_path)
+    assert "Nenhum plano identificado para esta sala" in texto
+
+
+def test_texto_de_notify_com_caminho_de_plano_nao_vira_escrita(tmp_path, transcript):
+    """Medido no acervo: `→ (\\`.local/plano-x.md\\`` dentro de uma mensagem
+    casava com o detector de redirecionamento e atribuía o plano à sala."""
+    linha = json.dumps({"type": "assistant", "cwd": str(tmp_path), "message": {"content": [
+        _bash('bot/bin/kobe-notify "plano -> (`.local/plano-f3.md`) e => `.local/plano-g.md`"')
+    ]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+    assert "Nenhum plano identificado para esta sala" in _gera(transcript, tmp_path)
+
+
+def test_redirecionamento_dentro_de_corpo_de_heredoc_nao_conta(tmp_path, transcript):
+    """Uma sala que escreve um TESTE contendo `cat > .local/plano-sh.md` não
+    escreveu esse plano — o texto está no corpo do heredoc, não é comando."""
+    cmd = ("cat >> tests/t.py <<'PYEOF'\n"
+           "x = \"cat > .local/plano-sh.md <<'EOF'\"\n"
+           "PYEOF")
+    linha = json.dumps({"type": "assistant", "cwd": str(tmp_path), "message": {
+        "content": [_bash(cmd)]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+    assert "Nenhum plano identificado para esta sala" in _gera(transcript, tmp_path)
+
+
+def test_heredoc_que_ESCREVE_o_plano_continua_contando(tmp_path, transcript):
+    cwd = tmp_path / "w"
+    (cwd / ".local").mkdir(parents=True)
+    (cwd / ".local" / "plano-h.md").write_text("- [ ] h\n", encoding="utf-8")
+    cmd = "cat > .local/plano-h.md <<'EOF'\n- [ ] h\nEOF"
+    linha = json.dumps({"type": "assistant", "cwd": str(cwd), "message": {
+        "content": [_bash(cmd)]}}) + "\n"
+    transcript.write_text(linha, encoding="utf-8")
+    assert "- [ ] h" in _gera(transcript, cwd)
+
+
+def test_sala_que_reescreveu_o_plano_por_script_tem_o_disco_respeitado(tmp_path, transcript):
+    """Medido: 7 de 7 divergências disco×transcript no acervo eram a própria
+    sala mexendo no plano por script. Dizer "não é o que a sala escreveu" ali
+    seria FALSO — vale o disco."""
+    cwd = tmp_path / "w"
+    (cwd / ".local").mkdir(parents=True)
+    p = cwd / ".local" / "plano-s.md"
+    p.write_text("- [x] a\n- [ ] b2\n- [ ] c\n", encoding="utf-8")
+    script = ("python3 - <<'EOF'\nt=open('.local/plano-s.md').read()\n"
+              "open('.local/plano-s.md','w').write(t.replace('b','b2'))\nEOF")
+    linha_w = json.dumps({"type": "assistant", "cwd": str(cwd), "message": {"content": [
+        _write(str(p), "- [x] a\n- [ ] b\n")]}}) + "\n"
+    linha_s = json.dumps({"type": "assistant", "cwd": str(cwd), "message": {"content": [
+        _bash(script)]}}) + "\n"
+    transcript.write_text(linha_w + linha_s, encoding="utf-8")
+
+    texto = _gera(transcript, cwd)
+    assert "- [ ] b2" in texto and "- [ ] c" in texto
+    assert "já não é o que esta sala escreveu" not in texto
+
+
+def test_reconstruido_com_edicao_por_shell_avisa_que_pode_estar_desatualizado(
+        tmp_path, transcript):
+    caminho = str(tmp_path / "sumiu" / ".local" / "plano-k.md")
+    linha_w = json.dumps({"type": "assistant", "cwd": str(tmp_path / "sumiu"),
+                          "message": {"content": [_write(caminho, "- [ ] a\n")]}}) + "\n"
+    linha_s = json.dumps({"type": "assistant", "cwd": str(tmp_path / "sumiu"),
+                          "message": {"content": [
+                              _bash("sed -i 's/\\[ \\]/[x]/' .local/plano-k.md")]}}) + "\n"
+    transcript.write_text(linha_w + linha_s, encoding="utf-8")
+    texto = _gera(transcript, tmp_path)
+    assert "reconstruído do transcript" in texto
+    assert "as marcações podem estar desatualizadas" in texto

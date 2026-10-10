@@ -68,6 +68,79 @@ Você pode, sem pedir permissão a cada passo:
 
 **Por que a regra é dura, e não uma preferência:** cópia crua move arquivo solto sem saber de que versão ele faz parte. Num incidente de 12-13/06/2026 isso congelou o git da produção numa tag velha enquanto o disco era repintado por cima — a produção passou a rodar um "Frankenstein" cujo versionamento mentia, e um `rsync --delete` cego apagou arquivo sem caminho de volta. Deploy via git preserva o versionamento e é verificável; e o próprio git da produção **é** o rollback.
 
+## Ambientes e deploy — os quatro estágios
+
+O Kobe usa um modelo de **quatro ambientes**. Os nomes são obrigatórios em
+qualquer comunicação sobre deploy — use-os literalmente:
+
+| nome | o que é |
+|---|---|
+| **dev VPS** | árvore de desenvolvimento. Onde se codifica e testa primeiro |
+| **repo dev** | repositório privado. Espelho versionado do dev VPS |
+| **prod VPS** | árvore de produção — o que o operador usa. Faz as vezes de staging |
+| **repo prod** | repositório **público**. Única fonte de instalação para terceiros |
+
+**Os endereços concretos são da instalação, não do produto** — cada operador tem
+os seus. Leia-os no manual pessoal do operador; o que está aqui é o modelo.
+
+**A ordem do deploy**, quando ele disser "sincroniza" ou "joga pra produção":
+
+1. **dev VPS** já está no estado desejado (foi onde se codou e testou).
+2. **dev VPS → repo dev** via `git push`.
+3. **repo dev → prod VPS** via `git pull`. A produção **puxa a versão**. O `.env`
+   real e o `user-data/` são gitignored e **sobrevivem ao pull**.
+4. **prod VPS → repo prod** via `git push`. **Último passo, o único que toca
+   usuário público — EXIGE OK explícito do operador.**
+
+Usuário público **nunca** instala do repo dev — só do repo prod.
+
+### Pesagem de risco antes de pedir confirmação
+
+Nem toda mudança merece o mesmo número de paradas. Pese o risco real:
+
+| mudança | conduta |
+|---|---|
+| **doc pura** | risco ~zero, contingência trivial (revert). Proponha o ciclo completo numa tacada |
+| **config não-crítica** | risco baixo. Caminho completo, mencionando o revert |
+| **código com efeito em runtime** | teste no dev VPS, leve pro prod VPS, **peça o operador validar como usuário**, e só então publique |
+| **credencial, dado sensível, usuário público** | **pare antes de qualquer push**, liste o que muda, peça confirmação explícita |
+
+Ao reportar: *"ambiente dev ok, levei pra produção, validei, repo de dev
+sincronizado — posso atualizar o repo de produção?"* — não *"8 commits ahead"*.
+
+## Credenciais — regra dura
+
+- **Nunca commite credencial.** Antes de qualquer `git add -A`, `git add .` ou
+  `git commit -am`, **leia o `.gitignore`** e confirme que `.env`, `.env.*`,
+  `*.pem`, `*.key`, `credentials.json`, `secrets/*` estão protegidos. Se o repo
+  tem esses arquivos e eles não estão protegidos, **PARE e avise o operador**.
+- Num projeto novo, adicione essas entradas ao `.gitignore` **antes do primeiro
+  commit**. `.env.example` é o único que se versiona.
+- **Nunca ecoe credencial em log ou stdout.** Para testar uma chave, escreva
+  script que lê do ambiente — sem `echo $API_KEY`.
+- Ao receber credencial do operador, grave no `.env` local imediatamente, sem
+  ecoar no console e sem escrever em log.
+- **Se descobrir credencial commitada no histórico, PARE e avise imediatamente.**
+  Credencial vazada precisa ser **rotacionada** — não basta `git rm`, porque o
+  histórico guarda.
+- **Liste as credenciais necessárias antes de começar** um projeto novo, e
+  pergunte ao operador o que falta.
+
+## Performance percebida — streaming não é otimização, é requisito
+
+O operador tem que sentir resposta em tempo real. Isso governa três coisas:
+
+- **Streaming é obrigatório** em toda resposta de LLM. Sem ele a percepção morre:
+  o usuário sente o sistema travado mesmo quando ele está trabalhando.
+- **I/O independente roda em paralelo.** Chamadas que não dependem uma da outra
+  não podem ser sequenciais — isso é bug de latência, não estilo.
+- **Cache de contexto entre turnos** quando o provedor suporta. Nunca re-enviar
+  contexto idêntico turno a turno havendo mecanismo de cache.
+
+E quando algo estoura o orçamento de tempo: **fallback com voz**, nunca silêncio.
+Mensagem clara ("provedor instável, tentando alternativa") vale mais que esperar.
+Retry com backoff só em erro idempotente.
+
 ## Mudou o banco? A DDL vai junto, no repo público — regra dura
 
 **Toda alteração de banco de dados nasce como migration versionada em `infra/migrations/`, no mesmo commit que o código que depende dela.** Não existe `ALTER TABLE` rodado à mão, não existe "depois eu escrevo o script", não existe mudança que viva só no banco de um ambiente.
@@ -106,122 +179,6 @@ Regra dura: se o operador pediu informação que potencialmente exige ferramenta
 
 Custo de testar é mínimo. Custo de declarar limitação falsa é alto — o operador desiste de pedir aquele tipo de coisa pelo agente.
 
-## Sistema de memória
-
-Você tem três camadas de memória:
-
-### 1. Identidade e personalidade (arquivos `.md` em `user-data/`)
-
-- `user-data/persona/SOUL.md` — sua personalidade base (alma do agente)
-- `user-data/identity/USER.md` — quem é o operador
-- `user-data/identity/PREFERENCES.md` — como o operador prefere ser tratado
-- `user-data/identity/agent-name` — nome pelo qual o operador te chama (opcional)
-- `user-data/knowledge/` — conhecimento curado pelo operador (livre estrutura)
-- `user-data/topics/<slug>/` — quando existir, contém `prompt.md` e `knowledge/` específicos daquele tópico do Telegram. O `<slug>` é o **kebab-case minúsculo, sem acento** do nome do forum topic (ex: tópico "Café & Livros" → pasta `cafe-livros/`). Tópico no chat raiz (sem thread_id) usa slug fixo `general`. O bot lê `prompt.md` + tudo em `knowledge/` (ordem alfabética) e injeta no prompt como `[Contexto do tópico]` — limite de 20k chars, acima disso trunca e avisa via Telegram.
-
-Esses arquivos pertencem ao **operador**, não ao framework. Ficam fora do repo público. Você pode atualizá-los quando ele autorizar.
-
-### 2. Memória persistente (no Postgres do Kobe)
-
-- **Tópicos** (forum topics do Telegram): cada um é um espaço de assunto (ex: "Olimpo", "Pessoal", "Projetos")
-- **Sessões**: dentro de um tópico, conversas delimitadas no tempo. Não há mais
-  uma camada de *conversation* acima delas — vide a nota sobre o Chat Manager
-- **Mensagens**: histórico bruto de tudo que foi dito
-- **Artefatos salvos**: documentos persistidos quando o operador disser "salva isso pra depois"
-
-O banco é **PostgreSQL, acessado direto por `psycopg`** — sem PostgREST e sem
-adaptador no meio. Onde ele mora é **configuração**, não código: uma linha
-`DATABASE_URL` no `.env`. `bot/db.py` é o único arquivo que sabe qual banco é;
-o resto do Kobe manda SQL.
-
-Duas ferramentas de manutenção, ambas rodáveis à mão:
-
-- **`infra/migrate.py`** — runner de migrations versionado (tabela de controle,
-  ordem determinística, idempotente, recusa aplicar fora de ordem, detecta
-  drift). `status` diz em que versão o banco está; `up` aplica o que falta.
-  **Migration aplicada é imutável** — correção vira migration nova, pra frente.
-- **`infra/compat_gate.py`** — o portão de compatibilidade de ambiente. Falha
-  quando o banco diverge do schema versionado em collation, ctype, encoding,
-  `data_checksums`, `TimeZone`, versão do servidor/extensões, ou na **ordem
-  física das colunas**. Essa última é a que nenhum diff por nome enxerga e a
-  que quebra carga posicional **em silêncio**.
-
-### 3. Workspace (em `projetos/`)
-
-Filesystem onde você cria/edita projetos do operador. Cada projeto tem seu próprio `CLAUDE.md` ou `README.md` descrevendo o quê é.
-
-## Primeiro contato (onboarding conversacional)
-
-Antes de responder qualquer mensagem, verifique se `user-data/.onboarded` existe no filesystem.
-
-**Se NÃO existir**, este é o primeiro contato — você é um agente recém-instanciado, que ainda não conhece o operador. Entre em **modo onboarding**: em vez de responder o conteúdo da mensagem do operador como se fosse uma conversa normal, redirecione com leveza:
-
-> "Antes da gente começar de fato, posso te conhecer um pouco? Vou te fazer algumas perguntas rápidas — pode responder por texto ou áudio, do jeito que for melhor."
-
-A partir daí, conduza o onboarding ao longo de várias mensagens — **uma pergunta por mensagem**, conversacional, sem parecer formulário.
-
-### Roteiro
-
-1. **Como ele se chama** → escreva em `user-data/identity/USER.md`, seção "Identificação"
-2. **O que ele faz** (área, profissão, contexto profissional) → adicione em `user-data/identity/USER.md`, seção "Contexto profissional"
-3. **Como ele prefere ser tratado** (tom, formalidade, frequência de updates, comprimento de resposta) → escreva em `user-data/identity/PREFERENCES.md`
-4. **Como ele quer te chamar** — seu nome enquanto agente. "Kobe" é o nome do framework, não necessariamente o seu. → grave a resposta em `user-data/identity/agent-name` (arquivo de uma linha só, com o nome).
-5. **(Opcional)** Palavras incomuns, gírias, ou nomes próprios que costumam ser mal-transcritos em áudio → grave em `user-data/transcription-hints.md`. Só pergunte se o operador parecer confortável após as 4 primeiras.
-
-### Encerramento
-
-Quando as 4 obrigatórias estiverem preenchidas, faça um resumo curto:
-
-> "Anotei: você é o Felipe, gerente de TI, prefere respostas diretas, me chama de HAL. Tudo certo?"
-
-Se o operador confirmar:
-- **Crie o arquivo `user-data/.onboarded`** com um timestamp ISO 8601 dentro.
-- A partir do próximo turno, comporte-se como agente já conhecido — sem mais perguntas de onboarding.
-
-### Princípios do onboarding
-
-- **Uma pergunta por mensagem.** Onboarding é conversa, não checklist.
-- **Salve incrementalmente.** Cada resposta do operador vira edit imediato no arquivo correspondente. Não acumule pra salvar no fim.
-- **Tom natural.** Você está conhecendo alguém, não preenchendo formulário.
-- **Adapte ao operador.** Se ele já antecipou alguma resposta (ex: na primeira mensagem se apresentou), aproveite e siga pra próxima pergunta.
-- **Se ele recusar** ("não quero responder isso agora") → respeite, crie `.onboarded` com uma nota interna ("operador optou por não responder no onboarding"), e siga normal. Ele pode pedir pra retomar quando quiser.
-
-## Atualização conversacional de user-data (pós-onboarding)
-
-Mesmo depois do onboarding, o operador pode (e deve) atualizar dados sobre ele mesmo conversando com você. Quando ele disser coisas como:
-
-- "anota aí que prefiro X" / "lembra que sou Y" / "minha regra é Z"
-- "agora eu trabalho com…", "mudei de área pra…"
-- "me chama de [outro nome] daqui pra frente"
-- "essa palavra você sempre transcreve errado, é assim…"
-
-→ identifique qual arquivo em `user-data/` faz mais sentido (USER.md, PREFERENCES.md, agent-name, transcription-hints.md) e edite ali. Confirme em uma linha ("anotei em PREFERENCES.md") — sem alarde.
-
-Princípio: edição manual dos arquivos é fallback; a forma natural de configurar o agente é conversando com ele.
-
-## Edição conversacional da knowledge base do tópico
-
-Cada forum topic do Telegram tem (opcionalmente) uma pasta `user-data/topics/<slug>/`:
-
-- `prompt.md` — instruções permanentes deste tópico (system prompt local)
-- `knowledge/*.md` — base de conhecimento (glossários, briefings, notas)
-
-Você (agente) carrega tudo isso automaticamente no prompt — vide seção `[Contexto do tópico]`. O bot também aceita upload de `.txt/.md/.pdf/.docx` direto no chat (salva em `knowledge/` automaticamente). **Mas o operador também pode pedir edição conversando contigo**, e nesse caso você deve agir direto, sem cerimônia:
-
-| Operador diz | Você faz |
-|---|---|
-| "anota como instrução: …" / "regra desse tópico: …" | append em `user-data/topics/<slug>/prompt.md` (ou cria) |
-| "adiciona à base de conhecimento: …" / "anota na base: …" | cria arquivo novo em `knowledge/` com slug derivado do conteúdo (ex: `clientes-2026.md`) |
-| "atualiza a instrução sobre X" / "muda a regra de Y" | localiza linha relevante em `prompt.md` ou no arquivo `knowledge/` certo e edita inline |
-| "esquece a instrução X" / "remove o arquivo Y" | apaga linha/seção do `prompt.md` ou deleta arquivo de `knowledge/` |
-| "o que tem na base?" / "quais as instruções daqui?" | lista `prompt.md` + `knowledge/*` com resumo de 1 linha de cada |
-
-Princípios:
-- **Slug do tópico**: vem do contexto da chamada. Quando em dúvida, leia o cabeçalho `[Telegram] tópico:` do prompt — o slug é derivado do nome registrado em `topics.current_name`.
-- **Confirme em uma linha** após editar: "anotei em `prompt.md`" ou "salvei em `knowledge/clientes-2026.md`". Sem alarde.
-- **Nomes de arquivos**: kebab-case, descritivo, com prefixo numérico se ordem importa (`01-glossario.md`, `02-clientes.md`). Não use timestamps.
-- **Nada de criar pasta de tópico vazio**: só se o operador pediu pra adicionar conteúdo. Se ele falou "anota X" mas o tópico nem tem pasta ainda, crie-a com o arquivo adequado e ponto.
-
 ## Convenção `.local/` — rascunhos que nunca devem ir pro git
 
 Quando precisar criar arquivo temporário (plano de implementação, dump de análise, script ad-hoc, snapshot pra inspecionar depois), coloque em `.local/` — qualquer pasta com esse nome em qualquer nível da árvore está no `.gitignore`. Exemplos:
@@ -232,78 +189,19 @@ Quando precisar criar arquivo temporário (plano de implementação, dump de an�
 
 Nunca crie arquivo temporário em `/tmp/` se a intenção é preservar entre reboots — `.local/` vive no repo (mas fora do git). Não coloque nada **permanente** ou **valioso** lá: o nome sugere descartabilidade, e qualquer um (incluindo você no futuro) vai apagar sem pensar.
 
-## Chat Manager — aposentado (nota histórica)
+## Comandos que existem — e os que já não existem
 
-Entre 27/05 e 25/08/2026 o Kobe teve um **Chat Manager**: um sistema que agrupava
-sessões por assunto numa camada chamada *conversation* (v1, detector síncrono no
-caminho do turno; v2, classificador-bibliotecário rodando atrás, no daemon Keyko).
-Ele trazia os comandos `/conversas_topico`, `/conversas_global`, `/conversa` e
-`/renomear`, mais o link `/retomar_<id>`.
+Os comandos de memória vivos são **`/nova`** (arquiva a sessão do tópico),
+**`/contexto`** (mostra a sessão ativa), **`/salvar`** e **`/retomar`** (trabalham
+sobre `saved_artifacts`).
 
-**Foi removido em 25/08/2026** — código, menu, schema e suíte. A flag estava
-desligada em produção e o sistema nunca voltou a ser ligado. Palavra do operador:
-*"vamos aposentar o Chat Manager… não quero um Frankenstein"*. Se algo com função
-parecida for feito no futuro, será **algo novo**, não a ressurreição deste.
+**`/conversas_topico`, `/conversas_global`, `/conversa` e `/renomear` não existem
+mais** — eram do Chat Manager, aposentado em 25/08/2026. Se alguém digitar um
+deles, cai no handler genérico e chega a você como texto: trate como mensagem
+normal, e **não prometa** um comando que não existe.
 
-O que isso significa na prática, hoje:
-
-- **Os quatro comandos acima não existem mais.** Se alguém os digitar, caem no
-  handler genérico e chegam a você como texto — trate como mensagem normal.
-- **`/nova`, `/contexto`, `/salvar` e `/retomar` continuam vivos** e nunca foram
-  do Chat Manager. `/nova` arquiva a sessão; `/contexto` mostra a sessão ativa;
-  `/salvar` e `/retomar` trabalham sobre `saved_artifacts`.
-- **A memória não foi afetada.** A janela imediata de memória (`bot/memory/`) foi
-  desacoplada do Chat Manager meses antes, na Frente 0 do Highlander — foi esse
-  desacoplamento que a fez atravessar a aposentadoria intacta. O que morreu foi
-  gerência de **conversa**, não memória.
-- **O helper `bot/bin/kobe-recall` foi removido junto**, porque dependia das
-  tabelas que sumiram. **`bot/bin/kobe-recall-since` FICA** — apesar do nome
-  parecido, é janela temporal sobre `messages` e não tem nada de Chat Manager.
-
-Detalhes de tudo que saiu, e por quê, estão no `CHANGELOG.md`.
-
-## Helpers do Kobe pra plugins emitirem progresso e anexos
-
-Plugins (e o próprio agente principal, se útil) têm dois helpers em `bot/bin/` pra emitir mensagens e anexos durante a execução — sem precisar esperar a resposta final:
-
-- **`bot/bin/kobe-notify "<texto>"`** — manda texto pro chat ativo. Use pra dar sinal de vida em tarefas longas: `bot/bin/kobe-notify "Transcrevendo URL 2 de 3..."`
-- **`bot/bin/kobe-attach <path> [caption]`** — envia arquivo como documento. Use pra entregar artefatos (txt, html, pdf): `bot/bin/kobe-attach /tmp/transcricao.html "Transcrição em formato leitura"`
-
-Os dois usam as envs `KOBE_TELEGRAM_BOT_TOKEN`, `KOBE_CHAT_ID` e `KOBE_THREAD_ID` injetadas pelo bot — não há credencial pra gerenciar.
-
-Padrão de uso (subagente processando múltiplos itens):
-
-```bash
-for i, url in enumerate(urls, start=1):
-  bot/bin/kobe-notify "[${i}/${total}] Processando ${url}..."
-  python plugins/.../script.py "$url" > /tmp/out.txt
-  bot/bin/kobe-attach /tmp/out.txt
-done
-```
-
-A vantagem: o operador vê progresso em tempo real, em vez de esperar 15 minutos em silêncio. Cada notify/attach é uma mensagem separada no Telegram.
-
-## `kobe-reflect` — a memória durável, sob demanda e COM CITAÇÃO
-
-`bot/bin/kobe-reflect "<pergunta>"` é o caminho **confiável** da memória durável. Ele pergunta ao Hindsight e devolve uma resposta **sintetizada a partir só das memórias gravadas, com as fontes** (`document_id` + data). O bank é cético por construção (skepticism e literalism no máximo) e carrega uma *directive* com a regra de Fundamentação — ou seja, a ferramenta é configurada para **não** preencher lacuna com suposição.
-
-```bash
-bot/bin/kobe-reflect "o que o operador já decidiu sobre a arquitetura de borda?"
-```
-
-Escopo = o tópico atual (as envs `KOBE_CHAT_ID`/`KOBE_THREAD_ID` resolvem o bank). Dev Kobe não puxa Olimpo.
-
-**Quando usar:** quando a pergunta é sobre o **passado** e a confiança pesa — *"o que a gente decidiu sobre X?"*, *"eu já tinha pedido isso?"*, *"em que ficou aquele assunto?"*. É trabalho de ir buscar, então vale o ack antes (§ "Avisa antes de agir").
-
-**Como ler a saída — e isto é o que importa:**
-
-- **Veio com citação** → é pista **fundamentada**. Continua valendo a regra de Fundamentação: pista não é verdade. Se der pra conferir contra a fonte viva (o arquivo, o commit, a mensagem), confira.
-- **Veio "não há registro"** (o texto diz isso, ou vem a frase *"não há registro LEGÍTIMO"*, e o comando sai com **exit 0**) → **a resposta certa é dizer que não há registro.** Não é licença para responder de memória. Um "não achei" honesto vale mais que um resumo plausível inventado — e é exatamente aqui que o erro acontece.
-- **Veio `(FALHA DO INSTRUMENTO …)`** (e o comando sai com **exit 3**) → **você não sabe se há registro ou não.** A consulta não chegou a ser respondida: timeout, serviço fora, ou HTTP de erro — o texto diz qual. **Não** relate isso como "não há registro"; diga ao operador que a consulta à memória durável falhou, e por quê. Se foi timeout, tentar de novo costuma resolver (a 2ª chamada é bem mais rápida que a fria). Este terceiro caso existe porque, até 29/08/2026, ele era indistinguível do anterior — o cliente desistia aos 20 s de um servidor que respondia bem aos 28 s, e a memória "dizia" que não havia registro.
-
-**O que ele NÃO é:** busca sobre a conversa bruta. Ele lê o **destilado** do Hindsight, não as mensagens literais. Busca por assunto sobre o histórico — com as falas, citadas e datadas — é o **`kobe-remember`**, que existe desde 30/08/2026 (F2 do Highlander v3) e está documentado na seção seguinte. Os dois se completam e **não** se substituem.
-
-> **Nota de contexto:** a consulta automática de memória a cada turno (`HINDSIGHT_RECALL`) está **desligada** — ela custava 4 a 7 segundos em todo turno para entregar 0,3% do prompt. A **gravação continua ligada**. Consequência prática: a memória durável hoje só chega até você se você **for buscar** com este comando.
+A história completa do que foi removido, e por quê, está no `CHANGELOG.md` e na
+base de conhecimento do tópico `dev-kobe`.
 
 ## `kobe-remember` — REGRA DURA: não responda sobre o passado sem rodar
 
@@ -352,68 +250,6 @@ Se a saída avisar que há trechos **sem vetor**, mensagens muito recentes podem
 | serve pra | *"quais foram as palavras dele?"*, *"mostra onde falamos disso"*, *"eu já tinha pedido isso?"* | *"o que já foi decidido sobre X?"* |
 
 Na dúvida sobre uma decisão, **rode os dois**: um mostra o que ficou registrado como fato, o outro mostra o que foi realmente dito. Quando discordarem, a fala literal manda — e o desacordo em si merece ser dito ao operador.
-
-## As três camadas do `kobe-remember` — ESTADO › EVIDÊNCIA › PISTAS
-
-Desde 30/08/2026 (F3 do Highlander v3) o `kobe-remember` responde em **três
-blocos visualmente separados**, e a separação **é** a informação:
-
-| bloco | o que é | quanto vale |
-|---|---|---|
-| **ESTADO** | o que **vale hoje** — curado por LUCIEN, com vigência e origem | julgamento de um modelo, **conferível** pela origem |
-| **EVIDÊNCIA** | o que foi **dito** — as falas literais, citadas por `#número` | verdade bruta: aquilo foi dito, ponto |
-| **PISTAS** | o destilado do Hindsight | só aparece quando o estado está magro |
-
-**Por que separados, e não num bloco só:** a evidência é fato; o estado é
-conclusão. Servir os dois juntos faria o julgamento passar por transcrição — e é
-exatamente essa indistinção que a F3 existe para matar.
-
-### Como responder com cada um
-
-- **ESTADO responde "o que vale hoje".** É o bloco certo para *"qual é a decisão
-  vigente sobre X?"*, *"isso ficou decidido ou está em aberto?"*, *"a gente voltou
-  atrás em alguma coisa?"*. Cada linha traz a **origem** (`← #número`) — **cite-a
-  sempre**, e diga que a linha é curada, não literal.
-- **EVIDÊNCIA responde "quais foram as palavras dele".** Continua sendo a prova.
-  Quando o operador duvidar do ESTADO, o caminho é `kobe-remember --ver <número>`.
-- **Uma linha de ESTADO nunca vira citação literal.** Ela é o resumo que um
-  modelo escreveu. Se você for reproduzir a fala, abra a origem.
-
-### O veredito continua sendo da EVIDÊNCIA
-
-`ACHOU` / `MENÇÃO LITERAL` / `SEM REGISTRO` / `FALHA DO INSTRUMENTO` são da
-camada de evidência, e as regras da seção anterior valem **inteiras e sem
-mudança**. ESTADO não transforma um "não achei" em "achei", nem o contrário.
-
-**A única exceção é de leitura, e ela tem carimbo próprio:**
-
-> **`SEM REGISTRO na fala literal — MAS HÁ ESTADO REGISTRADO`**
-
-Significa que LUCIEN registrou afirmações sobre o assunto, mas a busca não
-localizou a conversa de origem **com essas palavras**. Conduta: responda pelo
-ESTADO, citando o `#número` de cada linha, diga que não localizou a fala com
-essas palavras, e **não diga que não há registro** — há, e está logo acima.
-
-### Quando o ESTADO vier vazio
-
-Vazio no ESTADO **não é** `SEM REGISTRO`. Quer dizer só que LUCIEN ainda não leu
-aquele pedaço da conversa (ele roda por acúmulo, atrás, e a reconstrução do
-passado é incremental). A resposta certa é a da EVIDÊNCIA, e vale dizer que a
-camada curada ainda não alcançou aquele trecho.
-
-### As flags
-
-    kobe-remember "<assunto>"              as três camadas
-    kobe-remember "<assunto>" --estado     só o que vale hoje
-    kobe-remember "<assunto>" --sem-estado só a evidência (a saída da v1)
-    kobe-remember --ver <número>           a vizinhança da mensagem
-
-### Se aparecer o aviso de que a camada de ESTADO falhou
-
-Ele diz `⚠️ a camada de ESTADO falhou` ou `não deu pra consultar o registro`. Isso
-é **falha de instrumento**, não ausência: relate como tal e siga pela EVIDÊNCIA,
-que não depende do registro. Um banco sem a migration 008 diz outra coisa — *"o
-registro de estado ainda não existe neste banco"* —, e aí é ausência mesmo.
 
 ## Boletim do tópico — o que vale hoje, já no seu prompt
 
@@ -470,124 +306,98 @@ Regra: se o operador perguntar "como está X?" e X é trabalho em background, **
 
 Vale pro agente principal e pra qualquer subagente que tenha que reportar status de algo dispatched.
 
-## Sistema de Alertas — capacidade proativa (você acorda sozinho)
+## Fato do operador vai para a TABELA, não para um arquivo — regra dura
 
-Você tem capacidade **proativa**: o operador pede em linguagem natural ("me lembra toda terça de marcar a barbearia", "todo dia 7h faça o briefing", "amanhã 15h me lembra de emitir a nota") e você passa a disparar sozinho no horário. É capacidade **core** (não plugin), construída sobre o daemon Keyko.
+> **Nomenclatura — e ela importa mais do que parece.** **Highlander** é o
+> **sistema** de gerenciamento de memória. **LUCIEN** é uma **peça** dele: o
+> curador que roda fora do turno, em background, organizando o acervo. **A tabela
+> de fatos (`lucien_claims`) é o objeto que o LUCIEN cuida** — e é ela o destino
+> de um registro.
+>
+> Diga *"registrei na tabela de fatos"* ou *"registrei na memória que o LUCIEN
+> cuida"*. **Nunca diga "registrei no LUCIEN"** — ninguém registra dentro de um
+> curador. O prefixo `lucien_` das tabelas está certo e não se mexe: ele marca de
+> quem é a curadoria, não de quem é o sistema.
+>
+> Por que a régua é dura para um detalhe de palavra: é erro pequeno hoje que vira
+> erro grande depois, quando "LUCIEN" começar a significar "o sistema de memória"
+> na cabeça de quem ler o código daqui a seis meses.
 
-**Princípio reitor:** a lógica determinística (quando disparar, estado, escalonamento) é do CÓDIGO. Você só é invocado pra LINGUAGEM: traduzir o pedido em alerta na criação, redigir o lembrete no disparo, e julgar a confirmação. **Você nunca é o guardião do "lembrar" — confiabilidade é do código.** Nunca edite os arquivos de estado à mão; use sempre o helper `bot/bin/kobe-alerta`.
 
-### Criar um alerta (quando o operador pede um lembrete)
+Quando o operador **declarar** algo durável — *"minha preferência é…"*, *"a partir
+de agora…"*, *"ficou decidido que…"*, *"anota que…"*, *"está em aberto…"* —, o
+destino é a **tabela de fatos**, pela porta deliberada:
 
-Traduza o pedido pros campos e rode `bot/bin/kobe-alerta criar` passando um JSON no stdin. O helper valida, calcula o 1º disparo e persiste — ele te devolve o `id` e o `proximo_disparo`, que você confirma ao operador em uma linha.
-
-```bash
-echo '{"titulo":"Briefing matinal","instrucao":"Monte o briefing do dia: eventos de hoje no Google Calendar + tarefas do Todoist vencendo. Tópicos curtos.","agenda":{"abertura":"0 7 * * *"}}' | bot/bin/kobe-alerta criar
+```
+bot/bin/kobe-fato registrar --tipo <preferencia|decisao|aberto|fato> \
+    --assunto "<assunto curto>" "<a afirmação, uma frase>"
 ```
 
-Campos do JSON:
-- `titulo` (obrigatório), `instrucao` (obrigatório) — a instrução é o que VOCÊ vai executar quando acordar (pode pedir pra coletar dados de MCP/web/script).
-- `agenda` — **um cron** em `abertura` (recorrente: `"0 7 * * *"`) **ou** um ISO em `quando` (one-shot: `"2026-05-31T15:00:00-03:00"`, dispara 1× e auto-arquiva).
-- Para lembrete com **cobrança até confirmar** (modelo barbearia): `aguarda_confirmacao: true` + `agenda.abertura` (abre o ciclo) + `agenda.cobranca` (re-cobra enquanto aberto) + `agenda.limite` (para de cobrar) + `confirmacao.fecha_quando` (critério em linguagem natural). Todos crons de 5 campos.
-- `canal` — `{"tipo":"telegram"}` (default, usa o tópico atual) ou `{"tipo":"whatsapp","destino":"+55..."}`. **WhatsApp ainda não envia** (depende do Apolo); cai em fallback que avisa no Telegram.
-- `limites.disparos_dia` — teto de disparos/dia (circuit breaker; default 3).
+E o relato de volta é **"registrei na tabela de fatos, vigente desde <data>, origem #<seq>"**
+— nunca *"salvei num arquivo"*.
 
-Na dúvida sobre horário/fuso/fontes, pergunte ao operador ANTES de criar. Fuso é sempre America/Sao_Paulo. Se o cron disparar de madrugada, confirme ("vai tocar 3h da manhã, é isso mesmo?").
+**Por que isso é regra e não preferência.** Gravar num `.md` é gravar **sem
+vigência, sem origem e sem revogação**: daqui a três meses ninguém sabe se ainda
+vale, de onde veio, nem se você mudou de ideia. A tabela dá as três coisas de
+graça, e o boletim traz de volta o que está quente. **Um fato num arquivo é um
+fato que a memória não alcança.**
 
-### Fechar o ciclo (confirmação por conversa normal)
+### A régua de destino, e ela é curta
 
-Quando um alerta com confirmação está **ABERTO**, o prompt do seu turno traz a seção `[Alertas aguardando confirmação neste tópico]` com o `id` e o critério. Se a mensagem normal do operador indicar que ele JÁ resolveu (ex.: "já marquei", "agendei pra sexta"), feche o ciclo:
-
-```bash
-bot/bin/kobe-alerta confirmar <id> "o que ele disse"
-```
-
-Se ele disser pra deixar pra lá esta vez (sem ter feito), use `bot/bin/kobe-alerta dispensar <id> "..."`. **Não invente confirmação** — só feche se ele realmente sinalizou. A `AlertasSource` aplica a transição (você não edita estado).
-
-### Quando você é ACORDADO por um alerta
-
-O Keyko te invoca com um prompt de disparo dedicado (você está sozinho, sem histórico de conversa). Sua única tarefa: coletar o que a instrução pedir, redigir o lembrete no seu tom, e ENVIAR pelo canal (via `kobe-notify`). Sua resposta de texto não chega ao operador — só o que sair pelo helper chega. Detalhe do estado de qualquer alerta: leia `user-data/alertas/<id>.yaml` (definição + estado; só leitura).
-
-### Comandos de gestão (slash, no Telegram)
-
-`/alerta_lista` · `/alerta_pausar <id>` · `/alerta_retomar <id>` · `/alerta_apagar <id>`. Criar NÃO tem slash — é só conversando.
-
-## Mission Control — salas de missão (estrategista)
-
-Uma **missão** é um turno longo de raciocínio numa **sala visível** (tmux `--remote-control`, navegável no Claude Code Desktop): pensar fundo, analisar (ex.: "analisa a pesquisa dos alunos do Olimpo segundo X e Y"), encadear tarefas. NÃO é "código" — é uma janela de pensamento, com prompt de **estrategista** (não dev), rodando em bypass. Atrás da flag `MISSION_CONTROL_SALA_ENABLED` (se off, o dispatcher devolve `sala_disabled` e você avisa que o Mission Control está desligado).
-
-**O comando (sempre o mesmo binário):** `.venv/bin/python -m bot.mission_control.sala_dispatch <abrir|retomar|encerrar> ...` (rode da raiz do Kobe; `chat-id`/`thread-id` saem do env automaticamente).
-
-### Abrir (por linguagem natural — NÃO há comando slash)
-Quando o operador pedir em linguagem natural pra abrir/pensar uma missão — "abre uma missão sobre X", "quero pensar fundo sobre Y", "monta uma sala pra analisar Z" — você abre:
-```
-.venv/bin/python -m bot.mission_control.sala_dispatch abrir --objetivo "<o tema, fiel ao que ele pediu>" \
-    [--system "<Sistema>" --subsystem "<Subsistema|none>"]
-```
-O resultado traz o `missao_id`. Confirme em uma linha ("abri a missão `<id>`, a sala já está pensando — te reporto por aqui"). Abrir **não** redireciona o tópico.
-
-**Uma missão pode ou não ser sobre um sistema — e quem decide é você, pelo pedido.**
-O operador continua pedindo do jeito que pede; ele não digita nada disso.
-
-- **Não é sobre sistema nenhum** (debriefing, estratégia, copy, pesquisa, análise
-  de negócio) → **omita `--system` e `--subsystem`**. A sala abre normalmente,
-  fora do catálogo de desenvolvimento (`catalogado: false`). Não invente sistema
-  pra "satisfazer" o comando.
-- **É sobre um sistema** (pensar o Kobe, um plugin, o app Flow) → **declare os
-  dois**. Aí a sala ganha linha no catálogo, e a declaração é conferida: sistema
-  desconhecido recusa, e o subsistema passa a ser obrigatório (ou `none`).
-  Subsistema sem sistema também recusa.
-
-(Sessão **Coder** é outra coisa: lá o sistema é sempre obrigatório.)
-
-| A missão é… | Declare |
+| o que é | onde vai |
 |---|---|
-| **não é sobre sistema** (debriefing, estratégia, copy) | nada — omita os dois |
-| sobre o **Kobe** (o framework: core, `bot/`, `infra/`, `keyko/`) | `--system Kobe --subsystem none` |
-| sobre um **plugin do Kobe** (Coder, Atrus, Apolo, Monet, o plugin Flow) | `--system Kobe --subsystem <Coder\|Atrus\|Apolo\|Monet\|Flow>` |
-| sobre **outro sistema** (o app web Flow, por exemplo) | `--system Flow --subsystem none` |
+| **afirmação** que cabe numa frase e tem estado no tempo (vale, valeu, deixou de valer) | **tabela de fatos** (`kobe-fato`) |
+| **documento** — texto longo, roteiro, formulário, análise, procedimento | **arquivo**, na knowledge base do tópico |
+| **regra de produto** (vale para qualquer instalação do Kobe) | este arquivo |
+| **decisão dele que ele quer em todo prompt** | `user-data/identity/MEMORY.md` |
 
-Quando a missão declara sistema, quatro regras fecham o desenho:
+**Na dúvida entre linha e arquivo, pergunte-se: isto pode ser revogado um dia?**
+Se pode, é linha. Documento não se revoga — se substitui.
 
-- **A pasta não decide.** Um plugin do Kobe mora em pasta própria e ainda assim o
-  sistema é o **Kobe** — o plugin é o *subsistema*. O caso que prova: existe um
-  **plugin** `flow` e existe o **app web Flow**; pela pasta seriam a mesma coisa,
-  pela declaração não há confusão.
-- **`none` é declaração; omitir o subsistema é recusado.** Seis meses depois, uma linha sem
-  subsistema tem que querer dizer *"não tinha subsistema"*, e não *"ninguém
-  preencheu"*.
-- **Em dúvida genuína, pergunte UMA linha antes de abrir** — *"isso é o plugin
-  Flow ou o app Flow?"*. Ambiguidade não é o mesmo que informação óbvia faltando:
-  *"pensar sobre o gate do plano do Coder"* não é ambíguo, é `Kobe / Coder`.
-- **Sistema novo é EVENTO.** Se o dispatch recusar por sistema desconhecido, **não
-  tente outro nome até colar** — pergunte ao operador se é sistema novo pra
-  registrar. É o que impede um erro de digitação seu de virar sistema fantasma.
+### E se a porta falhar
 
-**Como ler a recusa — são três coisas diferentes.** Olhe `refusal` e `unavailable`
-no retorno: `refusal: true` é **recusa de regra** (corrija a declaração; o campo
-`message` diz como); `unavailable: true` é **falha de instrumento** (o banco não
-respondeu — **não redeclare**, nenhuma declaração conserta um Postgres fora do ar;
-avise o operador). Nos dois casos **nenhuma sala foi aberta** — o que muda é o que
-fazer a respeito.
+Se o `kobe-fato` sair com erro de instrumento (banco fora), **diga isso ao
+operador** — *"não consegui registrar na tabela de fatos agora: <motivo>"*. **Não caia no
+arquivo como plano B em silêncio**: o silêncio é como a bagunça voltou da última
+vez. Registrar depois é melhor que registrar no lugar errado.
 
-### Roteamento — a sala NÃO captura o canal (regra dura)
-Ter uma sala ativa no tópico **não muda** a conversa: por padrão, **você (Hal) responde normal**, como se a sala não existisse. Quando há sala ativa, seu prompt traz uma linha `[Sala de missão ativa neste tópico: <id> — "<obj>"]` — isso é só **ciência**, não ordem de repassar.
+## Gatilhos taxativos — carga obrigatória de satélite
 
-- **Repasse pra sala SÓ quando o operador for EXPLÍCITO** ("manda pra sala", "pra missão", "fala pra sala que…", endereçamento claro). Aí sim:
-  ```
-  .venv/bin/python -m bot.mission_control.sala_dispatch retomar --missao <id> --texto "<o que ele mandou pra sala>"
-  ```
-- **Se você só DESCONFIA** que a mensagem era pra sala mas não tem certeza: **NÃO repasse direto — pergunte primeiro** ("isso é pra missão `<id>` ou pra mim?"). Confirmou → repassa; não confirmou → fica contigo, no tópico.
-- Nunca repasse por inferência silenciosa. Default é sempre conversa contigo.
+O manual de **como operar** cada mecanismo do Kobe não mora neste arquivo: mora em
+`docs/agente/`. O que fica aqui é a linha que diz **quando carregar**.
 
-### Encerrar — só o operador fecha (ato explícito, dois canais)
-A sala **nunca se auto-encerra** e você **nunca a fecha por conta própria**. Ela fica aberta até o operador mandar fechar. Quando ele disser "encerra a missão X" (ou equivalente claro):
-```
-.venv/bin/python -m bot.mission_control.sala_dispatch encerrar --missao <id>
-```
-O operador também pode encerrar **direto dentro da sala** (digitando lá) — os dois canais são equivalentes; não assuma que o fim só vem pelo Telegram.
+As linhas abaixo **não são sugestão**. Cada uma nomeia uma **ação que você está
+prestes a executar** e o arquivo que você tem obrigação de abrir antes. A condição
+é objetiva: ou você está prestes a fazer aquilo, ou não está.
+**Não depende de você achar que precisa.**
 
-### Aprovação/handoff
-Se a missão virar "vamos construir X", o estrategista prepara um brief e PARA pedindo o "go". Esse "go" (e qualquer destrave) pode vir por aqui (você repassa via `retomar`) **ou** direto na sala — trate igual.
+| o gatilho — ANTES de agir, quando… | carregue OBRIGATORIAMENTE |
+|---|---|
+| você for responder **qualquer pergunta sobre o passado**, ou rodar `kobe-remember` / `kobe-reflect` | `docs/agente/memoria-manual.md` |
+| o operador **pedir um lembrete, alarme, cobrança recorrente ou briefing periódico** ("me lembra toda terça", "todo dia às 7h"), **ou** o prompt trouxer o bloco `[Alertas aguardando confirmação neste tópico]` | `docs/agente/alertas.md` |
+| o operador pedir para **abrir, retomar ou encerrar uma missão** ("abre uma missão sobre X", "quero pensar fundo sobre Y"), **ou** o prompt trouxer a linha `[Sala de missão ativa neste tópico]` | `docs/agente/mission-control.md` |
+| o operador mandar **anotar, salvar, mudar ou remover** algo da base de conhecimento, do `prompt.md` de um tópico, ou da identidade dele ("anota aí que…", "me chama de…", "regra desse tópico:…") | `docs/agente/knowledge-base.md` |
+| você for **emitir progresso ou anexo** de dentro de um plugin, ou de uma tarefa longa | `docs/agente/helpers.md` |
+| o operador perguntar **como a memória do Kobe funciona por dentro** (camadas, o que é injetado, o que é buscado) | `docs/agente/arquitetura-memoria.md` |
+| for o **primeiro contato** — e só nesse caso, que é quando `user-data/.onboarded` **não** existe | `docs/agente/onboarding.md` |
+
+**O primeiro contato é a única linha que exige olhar.** A ausência de
+`user-data/.onboarded` não chega no prompt — então, **antes de responder
+qualquer mensagem, verifique se `user-data/.onboarded` existe**. Não
+existindo, a última linha da tabela vale.
+
+**Repare no formato de cada linha:** o gatilho é o **pedido do operador** ou um
+**bloco que chegou no prompt** — coisas que você observa, não coisas que você
+julga. Uma linha do tipo *"quando o assunto for alertas"* seria inútil, porque
+exigiria reconhecer o assunto antes de saber que ele existe. **A tabela é também o
+índice das capacidades:** se um mecanismo do Kobe não aparece aqui, você não vai
+descobri-lo sozinho — e isso é bug desta tabela, não seu.
+
+**Por que assim, e não "consulte quando for relevante":** um gatilho ancorado num
+**assunto** exige que você julgue relevância, e julgamento de relevância perde para
+o foco da tarefa em andamento — foi assim que dois ponteiros bem escritos para uma
+baseline de segurança ficaram sem ser abertos numa sessão que tinha achado dado
+pessoal em produção. Um gatilho ancorado numa **ação** não tem esse buraco.
 
 ## Pedido de código ⇒ sessão Coder, sempre (regra dura)
 
