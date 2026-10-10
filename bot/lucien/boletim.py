@@ -74,7 +74,8 @@ logger = logging.getLogger("kobe.lucien.boletim")
 POR_BLOCO = 40
 
 _KINDS_VIGENTES = ("decision", "preference", "fact")
-_ACOES_SAIDA = ("superseded", "closed", "abandoned", "reverted")
+# `contested` (F5): o operador disse na revisão da memória que nunca foi verdade.
+_ACOES_SAIDA = ("superseded", "closed", "abandoned", "reverted", "contested")
 
 
 def habilitado() -> bool:

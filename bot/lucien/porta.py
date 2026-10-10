@@ -96,13 +96,13 @@ def _mensagem_de_origem(cx, topic_id: str, *, seq: Optional[int]) -> dict:
     cur = cx.cursor()
     if seq is not None:
         cur.execute(
-            "SELECT id, seq, created_at, audio_transcribed, content"
+            "SELECT id, seq, created_at, audio_transcribed, content, topic_id"
             "  FROM messages WHERE topic_id = %s AND seq = %s",
             (topic_id, int(seq)),
         )
     else:
         cur.execute(
-            "SELECT id, seq, created_at, audio_transcribed, content"
+            "SELECT id, seq, created_at, audio_transcribed, content, topic_id"
             "  FROM messages WHERE topic_id = %s AND role = 'user'"
             " ORDER BY seq DESC LIMIT 1",
             (topic_id,),
@@ -281,3 +281,148 @@ def listar(cx, topic_id: str, *, limite: int = 30) -> list[dict]:
         (topic_id, limite),
     )
     return list(cur.fetchall())
+
+
+# ── A revisão da memória (F5): as correções que o operador pede ──────────────
+#
+# O operador recebe a revisão no PRIVADO e responde lá: "o 3 tá errado", "a 12 já
+# entreguei". O fato corrigido vive no tópico dele (Dev Kobe, Olimpo…); a fala que
+# pede a correção vive no privado. Então a origem destas operações é
+# **explicitamente de outro tópico** — e isso NÃO afrouxa a trava:
+#
+#   * a origem continua sendo uma mensagem REAL do operador, resolvida no banco,
+#     com `seq` (que é único no sistema inteiro — `kobe-remember --ver <seq>` abre
+#     de qualquer tópico);
+#   * na correção que cria afirmação nova, `source_message_id` continua
+#     `NOT NULL REFERENCES messages(id)` e aponta para essa fala;
+#   * o histórico grava `origem_seq` e `origem_topico` por escrito, junto com a
+#     frase dele — daqui a seis meses dá para saber quem pediu, quando, onde e
+#     com que palavras.
+#
+# Nenhuma destas funções commita (regra do módulo) e nenhuma apaga nada.
+
+ACOES_ENCERRAR = {"closed": "fechada", "abandoned": "abandonada"}
+FRASE_MAX = 500
+
+
+def origem_da_fala(cx, topic_id: str, *, seq: Optional[int] = None) -> dict:
+    """A fala do operador que origina uma correção — por padrão, a última dele
+    no tópico de onde o comando foi chamado (o privado, na revisão)."""
+    return _mensagem_de_origem(cx, topic_id, seq=seq)
+
+
+def _detalhe(origem: dict, frase: str, extra: Optional[dict]) -> dict:
+    frase = (frase or "").strip()
+    if not frase:
+        raise PortaRecusou(
+            "correção sem a frase do operador não entra — é a frase que explica, "
+            "daqui a seis meses, por que o registro mudou."
+        )
+    d = {
+        "porta": "revisao",
+        "frase": frase[:FRASE_MAX],
+        "origem_seq": int(origem["seq"]),
+        "origem_topico": str(origem["topic_id"]),
+    }
+    if extra:
+        d.update(extra)
+    return d
+
+
+def _vigente(cx, claim_id: str) -> dict:
+    antes = store._imagem(cx, claim_id)
+    if antes is None:
+        raise PortaRecusou(f"afirmação {claim_id} não existe.")
+    if antes["status"] != "vigente":
+        raise PortaRecusou(
+            f"afirmação {claim_id} já está com status {antes['status']!r} — "
+            "só se corrige o que está valendo."
+        )
+    return antes
+
+
+def _sair_de_vigencia(cx, claim_id: str, status: str, action: str, *,
+                      origem: dict, frase: str, extra: Optional[dict]) -> dict:
+    detalhe = _detalhe(origem, frase, extra)
+    antes = _vigente(cx, claim_id)
+    cx.cursor().execute(
+        "UPDATE lucien_claims SET status = %s, valid_to = %s, updated_at = NOW()"
+        " WHERE id = %s",
+        (status, datetime.now(timezone.utc), claim_id),
+    )
+    ev = store._evento(cx, claim_id, action, antes, detalhe, None, actor="operador")
+    return {"id": claim_id, "evento": ev, "status": status,
+            "statement": antes["statement"]}
+
+
+def contestar(cx, claim_id: str, *, origem: dict, frase: str,
+              extra: Optional[dict] = None) -> dict:
+    """"Isto está errado": a afirmação sai de vigência como **contestada** — ela
+    nunca foi verdade. Diferente de abandonar, que é desistir do que valia."""
+    return _sair_de_vigencia(cx, claim_id, "contestada", "contested",
+                             origem=origem, frase=frase, extra=extra)
+
+
+def encerrar(cx, claim_id: str, *, acao: str, origem: dict, frase: str,
+             extra: Optional[dict] = None) -> dict:
+    """"Já entreguei" (`closed` → fechada) ou "não vou fazer" (`abandoned` →
+    abandonada)."""
+    if acao not in ACOES_ENCERRAR:
+        raise PortaRecusou(f"encerramento {acao!r} não existe ({', '.join(ACOES_ENCERRAR)}).")
+    return _sair_de_vigencia(cx, claim_id, ACOES_ENCERRAR[acao], acao,
+                             origem=origem, frase=frase, extra=extra)
+
+
+def reconfirmar(cx, claim_id: str, *, origem: dict, frase: str,
+                extra: Optional[dict] = None) -> dict:
+    """"Ainda vale": a linha não muda; o histórico ganha a reconfirmação."""
+    detalhe = _detalhe(origem, frase, extra)
+    antes = _vigente(cx, claim_id)
+    ev = store._evento(cx, claim_id, "reconfirmed", None, detalhe, None,
+                       actor="operador")
+    return {"id": claim_id, "evento": ev, "status": "vigente",
+            "statement": antes["statement"]}
+
+
+def corrigir(cx, claim_id: str, *, novo_texto: str, origem: dict, frase: str,
+             extra: Optional[dict] = None) -> dict:
+    """"Não é X, é Y" / "isso é só pra dev": a afirmação é **substituída** por uma
+    versão nova, registrada como do operador, no MESMO tópico e assunto da
+    antiga. A antiga fica no histórico, apontando para a nova."""
+    detalhe = _detalhe(origem, frase, extra)
+    antes = _vigente(cx, claim_id)
+    texto = (novo_texto or "").strip()
+    _conferir(antes["subject"], texto, "fato")  # só o tamanho; o tipo é o da antiga
+    if texto.lower() == (antes["statement"] or "").strip().lower():
+        raise PortaRecusou("a correção é igual ao texto atual — nada a corrigir.")
+
+    cur = cx.cursor()
+    cur.execute(
+        "SELECT topic_id, subject_slug FROM lucien_claims WHERE id = %s", (claim_id,),
+    )
+    base = cur.fetchone()
+    confianca = "media" if origem["audio_transcribed"] else "alta"
+    cur.execute(
+        "INSERT INTO lucien_claims (topic_id, subject, subject_slug, statement,"
+        " kind, status, confidence, valid_from, source_message_id, source_seq,"
+        " created_by)"
+        " VALUES (%s,%s,%s,%s,%s,'vigente',%s,%s,%s,%s,'operador') RETURNING id",
+        (base["topic_id"], antes["subject"], base["subject_slug"], texto,
+         antes["kind"], confianca, origem["created_at"], origem["id"],
+         origem["seq"]),
+    )
+    novo = str(cur.fetchone()["id"])
+    ev_criado = store._evento(
+        cx, novo, "created", None,
+        {**detalhe, "corrige": claim_id, "confianca": confianca}, None,
+        actor="operador",
+    )
+    cur.execute(
+        "UPDATE lucien_claims SET status = 'superada', valid_to = %s,"
+        " superseded_by = %s, updated_at = NOW() WHERE id = %s",
+        (datetime.now(timezone.utc), novo, claim_id),
+    )
+    ev = store._evento(cx, claim_id, "superseded", antes,
+                       {**detalhe, "por": novo}, None, actor="operador")
+    return {"id": claim_id, "novo": novo, "evento": ev, "evento_criado": ev_criado,
+            "status": "superada", "statement": texto}

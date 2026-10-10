@@ -140,6 +140,19 @@ Primitivas CORE que o agente (e plugins) usam durante a execução:
 - `kobe-notify "<texto>"` — manda texto pro chat ativo (sinal de vida em tarefas longas). Aceita `--topic "<nome>"` pra endereçar um tópico pelo nome (resolve pela tabela `topics`) — útil em salas de código detached, que nascem sem `KOBE_CHAT_ID`.
 - `kobe-attach <path> [caption]` — envia arquivo como documento no Telegram. Também aceita `--topic "<nome>"`.
 - `kobe-alerta` — helper de alertas proativos (criar/confirmar/dispensar).
+- `kobe-revisao` — aplica a resposta do operador à **revisão da memória** (ver abaixo).
+
+### Revisão da memória (ligada por padrão)
+
+Toda **segunda às 9h** (horário de Brasília) o bot manda, por iniciativa própria,
+**uma** mensagem no seu privado com ele: o que o curador da memória (LUCIEN)
+deduziu da conversa na semana — *"confere pra mim?"* — e as pendências abertas há
+muito tempo — *"alguma já morreu?"*. Você responde solto, texto ou áudio (*"o 3 tá
+errado"*, *"a 12 eu já entreguei"*); o agente corrige e mostra como ficou. Se não
+responder, nada muda e ninguém cobra. Nada é apagado: toda correção se desfaz.
+
+Para não receber: `LUCIEN_REVIEW_ENABLED=false` no `.env` e reinicie o bot e o
+Keyko. Horário e tetos: ver o bloco "A REVISÃO DA MEMÓRIA" no `.env.example`.
 
 ## Keyko — o daemon de despertar por gatilho
 

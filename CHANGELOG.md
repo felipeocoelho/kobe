@@ -4,6 +4,112 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### feat(lucien): a revisão da memória — o LUCIEN pergunta, o operador corrige solto (2026-10-10)
+
+**Operador pediu:** a F5 do Highlander v3 — o LUCIEN grava durante a semana sem
+pedir nada e, uma vez por semana, manda UMA mensagem com dois blocos: (A) "gravei
+isso, confere pra mim" e (B) "estas pendências estão abertas há muito tempo,
+alguma já morreu?". Ele responde solto, em texto ou áudio, sem sintaxe; o sistema
+corrige e confirma mostrando como ficou. Decisões dele na aprovação: consolidado
+no privado do Hal, segunda-feira 9h, chave já ligada na produção.
+
+**Por quê:** 95 pendências abertas, 90 delas com mais de 30 dias — o curador só
+fecha pendência quando alguém diz no chat que fechou, e ninguém diz. E o que o
+curador deduz na semana nunca passava pelo olho do operador.
+
+**Foi feito:**
+- Migration `011_revisao_contestada.sql` (aditiva, repetível): status
+  `contestada` e ações de histórico `contested` / `reconfirmed`. Referência de
+  schema regenerada. O boletim traduz `contested` como "contestada".
+- `bot/lucien/porta.py` — funções irmãs da porta, todas sem commit interno e
+  todas gravando no histórico a frase do operador, o `seq` e o tópico da fala:
+  `contestar`, `corrigir` (substitui por versão registrada como do operador, no
+  mesmo tópico e assunto da antiga), `encerrar` (fechar/abandonar pendência),
+  `reconfirmar`, `origem_da_fala`. A origem continua obrigatória e real: a
+  diferença é que ela pode estar em **outro tópico** (o privado), e isso fica
+  escrito (`origem_topico`). `store._evento` devolve o id do evento;
+  `store.reverter` aceita um `detalhe` extra.
+- `bot/lucien/revisao.py` — seleção dos dois blocos em todos os tópicos (A: só
+  o deduzido pelo LUCIEN, confiança mais baixa primeiro, teto 30, o registrado
+  pelo operador vira contagem; B: pendência vigente com 30+ dias, mais antiga
+  primeiro, teto 10, sem repetir a perguntada/reconfirmada nas últimas 8
+  semanas), a mensagem (modelo fixo em código, voz do Lucien, numeração global
+  com etiqueta de tópico, ≤ 3.800 caracteres), a aplicação tudo-ou-nada, o
+  desfazer, e a foto de "como ficou". Estado do que foi perguntado em
+  `user-data/lucien/revisao.json` (atômico, sob trava).
+- `bot/lucien/revisao_source.py` + registro no Keyko — 6ª fonte,
+  `lucien-review`. Horário por cron (`LUCIEN_REVIEW_WHEN`, padrão segunda 9h,
+  Brasília); ligar não dispara na hora; reposição única se a máquina estava
+  fora; envio que falha não troca a revisão aberta e tenta de novo a cada 10 min
+  (aviso de saúde na 3ª falha seguida). Desligada ou sem destino: não registra.
+- `bot/bin/kobe-revisao` — o comando do Hal (`ver`, `aplicar`, `foto`,
+  `enviar --agora`). Só aplica no chat da revisão.
+- Bloco `[Revisão da memória aguardando tua resposta]` no prompt **só do
+  privado** configurado (`bot/lucien/revisao_context.py`, chamado em
+  `telegram_handler.py` e `resume.py`, no mesmo slot dos Alertas).
+- O curador não relê a foto da revisão como fato novo (`store.montar_lote`
+  neutraliza a mensagem do agente com a marca; `prompts.py` diz que resposta à
+  revisão por número não vira afirmação).
+- Instrução do Hal: `docs/agente/revisao-da-memoria.md` + linha de gatilho na
+  tabela do `CLAUDE.md`.
+- `.env.example`: `LUCIEN_REVIEW_ENABLED=true` — **ligada por padrão**, por
+  decisão do operador (10/10/2026: *"quero que a chave já inicie ligada"*, e que
+  saia ligada para todo mundo). Isto é exceção declarada à regra do projeto de
+  publicar feature nova com a flag desligada. Acima da linha, a frase para quem
+  instala: **o bot manda, por iniciativa própria, uma mensagem semanal de revisão
+  da memória no privado do operador, toda segunda às 9h; para não receber, mude
+  para `false` e reinicie o bot e o Keyko.** Instalação existente que só fizer
+  `git pull` não ganha a linha no `.env` — sem ela a chave vale desligada (mesmo
+  padrão do `LUCIEN_ENABLED`).
+- Conserto achado no teste de ponta a ponta: o envio passa o token do bot
+  explícito ao `kobe-notify` — no Keyko não existe `KOBE_TELEGRAM_BOT_TOKEN` no
+  ambiente (ele só é injetado em quem o Keyko acorda), e a revisão falhava com
+  "token ausente". **O mesmo defeito existe hoje em `bot/lucien/aviso.py`** (os
+  avisos de saúde do LUCIEN) — fora do escopo desta fase, registrado para o
+  operador decidir.
+
+**O que ligar a chave implica:** uma mensagem por semana no privado do operador
+com o bot, sem custo de modelo (a mensagem é montada em código); o Hal passa a
+ver o bloco da revisão no privado enquanto ela estiver aberta (~2–3 mil
+caracteres por turno, só lá); correções gravam na tabela de fatos real.
+
+**Testes:** `tests/test_lucien_revisao.py` (22, banco de dev em transação
+revertida — conferido: zero linhas sobraram): seleção dos dois blocos, teto,
+repergunta, mensagem dentro do limite com numeração global, envio, falha de
+envio sem corromper estado, silêncio (nada muda, não repergunta), contestar com
+origem no privado, corrigir com origem real cross-tópico, fechar/recusar,
+manter, recusas, foto, desfazer e desfazer de novo, bloco só no privado e só com
+a chave, curador neutralizando a foto, agendamento (ligar não dispara; uma vez
+por marco; reposição única), não registrar desligada/sem destino,
+`.env.example` desligada, token levado ao `kobe-notify`. Suíte inteira: 1.303
+passando, 0 falhas (banco de dev) e 1.211 passando, 0 falhas (banco
+recém-migrado, `en_US.UTF-8`, `UTC`).
+
+**Teste de ponta a ponta com a chave LIGADA, na instância de desenvolvimento**
+(bot de dev, banco `kobe_dev`, 9 fatos fictícios marcados "[teste F5]"): a
+revisão saiu no horário agendado e chegou de verdade no privado do operador com
+o bot de dev (11 itens, consolidados, numeração global, etiqueta de tópico); a
+resposta solta *"o 3 tá errado… o 2 é às 4h… a 10 eu já entreguei… a 9 ainda
+vale"*, injetada pelo `infra/dev_inject.py`, foi traduzida pelo Hal de dev em 4
+operações e aplicada (contestada / corrigida com origem na fala do privado /
+fechada / reconfirmada), com a foto de "como ficou" devolvida; "desfaz o 3"
+devolveu o item a vigente; uma mensagem sobre outro assunto não gerou correção;
+uma rodada real do curador sobre essas 10 mensagens criou 0 afirmações; o ciclo
+seguinte sem nada novo não mandou mensagem, não reperguntou nenhuma pendência e
+não mudou nenhum fato. O teste achou e o commit consertou o defeito do token.
+Na produção: nenhuma validação de comportamento, só o pós-deploy padrão.
+
+**Commits:** a4cab39 (migration 011), ff696f8 (a revisão), c1cd199 (token — achado no teste de ponta a ponta), e000708 (texto enviado guardado no estado), 729b7de (ligada por padrão), e o commit que fecha (README + este campo). Também o README ganhou a seção "Revisão da memória".
+
+**Pendente para outra sala (não feito aqui):** os avisos de saúde do LUCIEN (`bot/lucien/aviso.py`) disparados de dentro do Keyko não levam o token do Telegram ao `kobe-notify` — pela leitura do código, um "parei" do curador não chega hoje ao operador. Mesmo conserto de uma linha que a revisão recebeu.
+
+**Reversão:** desligar (`LUCIEN_REVIEW_ENABLED=false` + reinício do bot e do
+Keyko) tira a fonte, o bloco e o comando de cena; correções já feitas ficam e
+cada uma se desfaz (`kobe-revisao aplicar` com `desfazer`, ou
+`store.reverter`). Código: `git revert` dos commits + `git pull` + reinício. A
+migration 011 só se reverte se nenhuma linha estiver `contestada` (ver o
+cabeçalho dela).
+
 ### fix(lucien): a porta de registro gera o vetor de busca ao gravar (2026-10-10)
 
 **Operador pediu:** que o fato registrado pela porta deliberada (`kobe-fato

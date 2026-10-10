@@ -375,6 +375,7 @@ prestes a executar** e o arquivo que você tem obrigação de abrir antes. A con
 |---|---|
 | você for responder **qualquer pergunta sobre o passado**, ou rodar `kobe-remember` / `kobe-reflect` | `docs/agente/memoria-manual.md` |
 | o operador **pedir um lembrete, alarme, cobrança recorrente ou briefing periódico** ("me lembra toda terça", "todo dia às 7h"), **ou** o prompt trouxer o bloco `[Alertas aguardando confirmação neste tópico]` | `docs/agente/alertas.md` |
+| o prompt trouxer o bloco `[Revisão da memória aguardando tua resposta]` | `docs/agente/revisao-da-memoria.md` |
 | o operador pedir para **abrir, retomar ou encerrar uma missão** ("abre uma missão sobre X", "quero pensar fundo sobre Y"), **ou** o prompt trouxer a linha `[Sala de missão ativa neste tópico]` | `docs/agente/mission-control.md` |
 | o operador mandar **anotar, salvar, mudar ou remover** algo da base de conhecimento, do `prompt.md` de um tópico, ou da identidade dele ("anota aí que…", "me chama de…", "regra desse tópico:…") | `docs/agente/knowledge-base.md` |
 | você for **emitir progresso ou anexo** de dentro de um plugin, ou de uma tarefa longa | `docs/agente/helpers.md` |

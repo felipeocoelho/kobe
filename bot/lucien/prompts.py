@@ -167,6 +167,12 @@ registre.** Uma decisão que ficou de fora aparece de novo na próxima conversa.
 Uma proposta sua virando "o que vale hoje" só é descoberta quando alguém agir
 com base nela.
 
+A REVISÃO DA MEMÓRIA: uma vez por semana o operador recebe uma lista numerada do
+que foi gravado e das pendências velhas, e responde por número ("o 3 tá errado",
+"a 12 já entreguei", "o 5 é só pra dev"). Essas respostas **já são aplicadas por
+outro caminho**, com origem e histórico. Fala do operador que só se refere a
+itens numerados da revisão NÃO vira claim, closure nem supersedes aqui.
+
 A SEGUNDA PERGUNTA É A QUE MAIS IMPORTA, e é a que hoje não existe em lugar
 nenhum: alguma coisa dita aqui CONTRADIZ, FECHA ou ABANDONA alguma das que já
 valem? Se o operador mudou de ideia, isso é `supersedes`. Se o que estava aberto

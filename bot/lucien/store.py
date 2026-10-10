@@ -234,6 +234,16 @@ def fincar_marco_cursor(cx, topic_id: str, last_seq: int) -> bool:
     return cur.rowcount > 0
 
 
+# Ver `bot/lucien/revisao.py` (MARCA). Literal repetido aqui para o curador não
+# importar o módulo da revisão a cada lote.
+_MARCA_REVISAO = "🗂️ Revisão da memória"
+_CORPO_REVISAO = (
+    "[resposta do agente à revisão da memória: a foto dos itens corrigidos. As "
+    "correções JÁ foram gravadas pela porta — esta mensagem não estabelece, "
+    "não fecha e não substitui nada]"
+)
+
+
 def montar_lote(cx, topic_id: str, *, scope: str = "incremental",
                 teto_seq: Optional[int] = None) -> Lote:
     """As mensagens novas do tópico, respeitando os dois tetos.
@@ -270,6 +280,12 @@ def montar_lote(cx, topic_id: str, *, scope: str = "incremental",
     teto = cfg.lote_maximo_chars()
     for linha in cur.fetchall():
         corpo = linha["content"] or ""
+        # A revisão da memória (F5): a foto de "como ficou" que o agente devolve
+        # lista os títulos dos fatos — lida como conversa, viraria "fato novo"
+        # repetindo o que já está gravado. A mensagem fica no lote (o cursor anda
+        # normalmente), mas o corpo chega ao modelo como o que ela é.
+        if linha["role"] == "assistant" and _MARCA_REVISAO in corpo:
+            corpo = _CORPO_REVISAO
         if mensagens and total + len(corpo) > teto:
             break
         total += len(corpo)
@@ -803,7 +819,7 @@ def _encerrar(cx, lote: Lote, fim: Encerramento, por_seq: dict[int, Mensagem],
 # ── Reversão: o caminho de volta é um comando ────────────────────────────
 
 
-def reverter(cx, event_id: str) -> dict:
+def reverter(cx, event_id: str, *, detalhe: Optional[dict] = None) -> dict:
     """Desfaz UM evento, devolvendo a linha à imagem que `before` guardou.
 
     Existe porque superação errada é o modo de falha mais caro desta fase: ela
@@ -832,8 +848,11 @@ def reverter(cx, event_id: str) -> dict:
         (antes["status"], antes.get("valid_to"), antes.get("superseded_by"),
          ev["claim_id"]),
     )
+    # `detalhe` (F5): a revisão da memória junta a frase do operador e a origem
+    # da fala, para o "desfaz" ter a mesma trilha que a correção desfeita.
     _evento(cx, str(ev["claim_id"]), "reverted", agora,
-            {"evento_revertido": str(event_id)}, None, actor="operador")
+            {**(detalhe or {}), "evento_revertido": str(event_id)}, None,
+            actor="operador")
     return antes
 
 
@@ -892,17 +911,22 @@ def _imagem(cx, claim_id: str) -> Optional[dict]:
 
 def _evento(cx, claim_id: str, action: str, before: Optional[dict],
             detail: Optional[dict], run_id: Optional[str],
-            actor: str = "lucien") -> None:
+            actor: str = "lucien") -> str:
+    """Grava o evento e devolve o id dele — a revisão da memória (F5) precisa do
+    id para desfazer exatamente o que aplicou; os outros chamadores ignoram."""
     import psycopg
 
-    cx.cursor().execute(
+    cur = cx.cursor()
+    cur.execute(
         "INSERT INTO lucien_events (claim_id, action, before, detail, actor, run_id)"
-        " VALUES (%s,%s,%s,%s,%s,%s)",
+        " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
         (claim_id, action,
          psycopg.types.json.Jsonb(before) if before else None,
          psycopg.types.json.Jsonb(detail) if detail else None,
          actor, run_id),
     )
+    linha = cur.fetchone()
+    return str(linha["id"]) if linha else ""
 
 
 def _avancar_cursor(cx, scope: str, topic_id: str, last_seq: int) -> None:

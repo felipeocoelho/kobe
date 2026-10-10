@@ -26,7 +26,8 @@
     "007",
     "008",
     "009",
-    "010"
+    "010",
+    "011"
   ],
   "tables": {
     "contacts": {
@@ -709,7 +710,7 @@
         },
         {
           "name": "lucien_claims_status_check",
-          "definition": "CHECK ((status = ANY (ARRAY['vigente'::text, 'superada'::text, 'fechada'::text, 'abandonada'::text])))"
+          "definition": "CHECK ((status = ANY (ARRAY['vigente'::text, 'superada'::text, 'fechada'::text, 'abandonada'::text, 'contestada'::text])))"
         },
         {
           "name": "lucien_claims_superseded_by_check",
@@ -893,7 +894,7 @@
       "constraints": [
         {
           "name": "lucien_events_action_check",
-          "definition": "CHECK ((action = ANY (ARRAY['created'::text, 'superseded'::text, 'closed'::text, 'abandoned'::text, 'reverted'::text])))"
+          "definition": "CHECK ((action = ANY (ARRAY['created'::text, 'superseded'::text, 'closed'::text, 'abandoned'::text, 'reverted'::text, 'contested'::text, 'reconfirmed'::text])))"
         },
         {
           "name": "lucien_events_actor_check",

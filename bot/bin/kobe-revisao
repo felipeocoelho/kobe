@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""kobe-revisao — aplica a resposta do operador à revisão da memória.
+
+Uma vez por semana o LUCIEN manda ao operador, no privado, o que gravou e as
+pendências velhas, numeradas de 1 a N. O operador responde solto; **o agente
+traduz a frase em operações** e chama este comando, que valida e grava pela porta
+de escrita. O agente nunca edita estado à mão e nunca escreve SQL.
+
+USO
+---
+    kobe-revisao ver                 # a revisão aberta: número → [tópico] título
+    kobe-revisao aplicar < ops.json  # aplica e imprime a foto de como ficou
+    kobe-revisao foto                # só a foto, sem aplicar nada
+    kobe-revisao enviar --agora      # manda a revisão já (operação/teste)
+
+O JSON DE `aplicar`
+-------------------
+    {"frase": "o 3 tá errado, o 5 é só pra dev e a 12 eu já entreguei",
+     "operacoes": [
+        {"item": 3,  "acao": "contestar"},
+        {"item": 5,  "acao": "corrigir", "texto": "<a afirmação como passa a valer>"},
+        {"item": 12, "acao": "fechar"}
+     ]}
+
+`frase` é o que o operador disse, com as palavras dele. Ações:
+
+    confere    está certo (não muda nada)
+    contestar  está errado — nunca foi verdade (sai da memória, fica no histórico)
+    corrigir   vale outra coisa — `texto` é a afirmação nova, numa frase que se
+               sustente sozinha (20 a 400 caracteres)
+    fechar     pendência resolvida / entregue
+    abandonar  pendência que não vai mais acontecer
+    manter     pendência (ou fato) que ainda vale — fica registrado que ele reconfirmou
+    desfazer   desfaz o que esta revisão já aplicou naquele item
+
+**Tudo ou nada:** se uma operação for recusada, nenhuma é gravada, e a mensagem
+diz qual e por quê.
+
+ONDE PODE SER CHAMADO
+---------------------
+Só no chat da revisão (o privado do operador com o bot), porque a origem de toda
+correção é a fala dele ali — a última mensagem dele nesse chat, com o número
+(`seq`) dela gravado no histórico. Correção sem fala real que a sustente não entra.
+
+SAÍDA: 0 ok · 1 recusado (a mensagem diz por quê) · 3 falha do instrumento.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def _kobe_home() -> Path:
+    return Path(os.environ.get("KOBE_HOME") or Path(__file__).resolve().parents[2])
+
+
+def _url() -> str:
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        print("kobe-revisao: sem banco. Defina DATABASE_URL.", file=sys.stderr)
+        raise SystemExit(3)
+    return url
+
+
+def _topico_do_chat(cx) -> tuple[str | None, int | None, int]:
+    chat = os.environ.get("KOBE_CHAT_ID")
+    thread = os.environ.get("KOBE_THREAD_ID") or None
+    if not chat:
+        return None, None, 0
+    try:
+        chat_id = int(chat)
+        thread_id = int(thread) if thread not in (None, "") else 0
+    except ValueError:
+        return None, None, 0
+    cur = cx.cursor()
+    cur.execute(
+        "SELECT id FROM topics WHERE telegram_chat_id = %s AND telegram_thread_id = %s",
+        (chat_id, thread_id),
+    )
+    linha = cur.fetchone()
+    return (str(linha["id"]) if linha else None), chat_id, thread_id
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="kobe-revisao", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("ver", help="a revisão aberta, com os números")
+    sub.add_parser("aplicar", help="aplica as operações (JSON no stdin)")
+    sub.add_parser("foto", help="como estão os itens da revisão aberta")
+    p = sub.add_parser("enviar", help="manda a revisão agora (operação/teste)")
+    p.add_argument("--agora", action="store_true", required=True,
+                   help="obrigatório: confirma que é para mandar fora do horário")
+    args = ap.parse_args(argv)
+
+    from bot import lucien as cfg
+    from bot.lucien import porta, revisao, store
+
+    if not cfg.revisao_habilitada():
+        print("kobe-revisao: a revisão da memória está desligada "
+              "(LUCIEN_REVIEW_ENABLED). Nada a fazer.", file=sys.stderr)
+        return 1
+    home = _kobe_home()
+
+    if args.cmd == "ver":
+        rev = revisao.aberta(home)
+        if not rev:
+            print("nenhuma revisão aberta.")
+            return 0
+        print(f"revisão {rev['id']} (enviada {rev.get('enviada_em', '?')}):")
+        for i in rev["itens"]:
+            tipo = "pendência" if i["bloco"] == "pendencia" else "gravado"
+            print(f"  {i['n']}. [{i['topico']}] {i['titulo']} ({tipo})")
+        return 0
+
+    try:
+        cx = store.conectar(_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-revisao: (FALHA DO INSTRUMENTO) banco: {exc}", file=sys.stderr)
+        return 3
+
+    try:
+        if args.cmd == "enviar":
+            r = revisao.rodar_ciclo(cx, home)
+            cx.rollback()
+            if r.get("enviada"):
+                print(f"revisão {r['id']} enviada com {r['itens']} itens.")
+                return 0
+            print(f"não enviada: {r.get('motivo')}")
+            return 0 if r.get("ok") else 1
+
+        rev = revisao.aberta(home)
+        if not rev:
+            print("kobe-revisao: não há revisão aberta — nada a aplicar. Se o operador "
+                  "quer corrigir um fato fora da revisão, use `kobe-fato`.",
+                  file=sys.stderr)
+            return 1
+
+        if args.cmd == "foto":
+            print(revisao.foto(cx, rev))
+            cx.rollback()
+            return 0
+
+        # aplicar
+        topic_id, chat_id, thread_id = _topico_do_chat(cx)
+        if topic_id is None or chat_id != int(rev.get("chat_id") or 0) or thread_id != 0:
+            print("kobe-revisao RECUSOU: só aplico no chat da revisão (o privado do "
+                  "operador com o bot) — é a fala dele ali que sustenta a correção.",
+                  file=sys.stderr)
+            return 1
+        try:
+            entrada = json.loads(sys.stdin.read() or "{}")
+        except json.JSONDecodeError as exc:
+            print(f"kobe-revisao RECUSOU: o stdin não é JSON válido ({exc}).",
+                  file=sys.stderr)
+            return 1
+        with revisao.travado(home):
+            # Relê sob a trava: se a revisão foi trocada entre a leitura e agora,
+            # os números do operador eram de outra lista.
+            atual = revisao.aberta(home)
+            if not atual or atual["id"] != rev["id"]:
+                print("kobe-revisao RECUSOU: a revisão mudou neste instante (saiu uma "
+                      "nova). Os números da resposta eram da anterior — peça ao "
+                      "operador para olhar a nova.", file=sys.stderr)
+                return 1
+            origem = porta.origem_da_fala(cx, topic_id)
+            feito = revisao.aplicar(cx, rev, entrada.get("operacoes"),
+                                    frase=str(entrada.get("frase") or ""), origem=origem)
+            cx.commit()
+        # Vetor de busca das afirmações novas (correções) — depois do commit, e
+        # falha só é dita.
+        for f in feito:
+            if f.get("novo"):
+                v = porta.gerar_vetor(cx, f["novo"])
+                if v["ok"]:
+                    cx.commit()
+        print(revisao.foto(cx, rev))
+        cx.rollback()
+        return 0
+    except (revisao.RevisaoRecusou, porta.PortaRecusou) as exc:
+        cx.rollback()
+        print(f"kobe-revisao RECUSOU (nada foi gravado): {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        cx.rollback()
+        print(f"kobe-revisao: (FALHA DO INSTRUMENTO) {exc}", file=sys.stderr)
+        return 3
+    finally:
+        cx.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

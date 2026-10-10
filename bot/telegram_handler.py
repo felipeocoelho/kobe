@@ -44,6 +44,7 @@ from bot.handoff.paths import ensure_topic_handoff_dirs
 from bot.markdown import to_telegram_html
 from bot.mission_control import sala_dispatch as mission_control_sala
 from bot.alertas.context import render_alertas_abertos
+from bot.lucien.revisao_context import juntar_ciclos_abertos, render_revisao_aberta
 from bot.memory import (
     get_immediate_messages,
     load_boletim,
@@ -1073,6 +1074,13 @@ async def _handle_user_text(
     # kobe-alerta. Best-effort; None quando não há alerta aberto aqui.
     alertas_abertos_info = render_alertas_abertos(
         config.kobe_home, message.chat_id, thread_id,
+    )
+    # Revisão da memória aberta (F5) — mesmo slot dos Alertas: os dois são
+    # "ciclo que o código abriu e espera resposta em conversa normal". Só no
+    # privado configurado; None com a chave desligada ou sem revisão aberta.
+    alertas_abertos_info = juntar_ciclos_abertos(
+        alertas_abertos_info,
+        render_revisao_aberta(config.kobe_home, message.chat_id, thread_id),
     )
 
     # Núcleo curado global (Highlander Frente 1.2): identidade + fatos duráveis

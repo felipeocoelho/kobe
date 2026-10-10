@@ -46,6 +46,7 @@ from bot.db import KobeDB
 from telegram.ext import Application
 
 from bot.alertas.context import render_alertas_abertos
+from bot.lucien.revisao_context import juntar_ciclos_abertos, render_revisao_aberta
 from bot.memory import (
     get_immediate_messages,
     load_boletim,
@@ -210,6 +211,11 @@ def _load_resume_context(
     if chat_id is not None:
         alertas_abertos_info = render_alertas_abertos(
             config.kobe_home, chat_id, thread_id
+        )
+        # Revisão da memória aberta (F5) — mesmo slot; ver telegram_handler.
+        alertas_abertos_info = juntar_ciclos_abertos(
+            alertas_abertos_info,
+            render_revisao_aberta(config.kobe_home, chat_id, thread_id),
         )
 
     return {

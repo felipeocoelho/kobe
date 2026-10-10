@@ -148,7 +148,9 @@ SUBJECT_MIN = 3
 SUBJECT_MAX = 80
 
 KINDS = ("decision", "open", "preference", "fact")
-STATUS = ("vigente", "superada", "fechada", "abandonada")
+# `contestada` (migration 011, F5): o operador disse, na revisão da memória,
+# que a afirmação nunca foi verdade — diferente de abandonar o que valia.
+STATUS = ("vigente", "superada", "fechada", "abandonada", "contestada")
 ENCERRAMENTOS = ("closed", "abandoned")
 
 # ── A escala de confiança, e o que ela mede ──────────────────────────────
@@ -251,3 +253,63 @@ def maximo_rodadas_hora() -> int:
     """Teto de cota. LUCIEN não tem pressa; um pico de conversa não pode virar
     um pico de chamadas de modelo."""
     return int(_num("LUCIEN_MAX_RUNS_HORA", 6, minimo=1))
+
+
+# ── A revisão da memória (F5) ────────────────────────────────────────────
+# Uma vez por semana o LUCIEN manda ao operador, no privado, o que gravou e as
+# pendências velhas; ele responde solto e o Hal corrige pela porta. A chave vem
+# LIGADA no `.env.example` (decisão do operador, 10/10/2026), com a frase que diz a
+# quem instala o que ela faz e como desligar — mesmo padrão do `LUCIEN_ENABLED`:
+# variável AUSENTE é desligada. Desligada, a fonte não se registra no Keyko, o
+# bloco não entra no prompt e o comando recusa.
+
+def revisao_habilitada() -> bool:
+    return _env("LUCIEN_REVIEW_ENABLED").lower() in ("1", "true", "yes", "on", "sim")
+
+
+def revisao_chat_id() -> "int | None":
+    """Onde a revisão cai: o privado do operador com o bot.
+
+    `LUCIEN_REVIEW_CHAT_ID` manda. Sem ela, vale o ÚNICO chat privado (id
+    positivo) da whitelist `TELEGRAM_ALLOWED_CHAT_IDS` — numa instalação de um
+    operador só, é exatamente o privado dele. Zero ou mais de um: `None`, e a
+    fonte não se registra. Escolher sozinho entre dois privados seria mandar a
+    memória de alguém para outra pessoa.
+    """
+    bruto = _env("LUCIEN_REVIEW_CHAT_ID")
+    if bruto:
+        try:
+            return int(bruto)
+        except ValueError:
+            return None
+    privados = []
+    for parte in _env("TELEGRAM_ALLOWED_CHAT_IDS").split(","):
+        parte = parte.strip()
+        try:
+            n = int(parte)
+        except ValueError:
+            continue
+        if n > 0:
+            privados.append(n)
+    return privados[0] if len(set(privados)) == 1 else None
+
+
+def revisao_quando() -> str:
+    """Cron de 5 campos, fuso America/Sao_Paulo. Padrão: segunda-feira 9h."""
+    return _env("LUCIEN_REVIEW_WHEN") or "0 9 * * 1"
+
+
+def revisao_teto_gravadas() -> int:
+    return int(_num("LUCIEN_REVIEW_MAX_RECORDED", 30, minimo=1))
+
+
+def revisao_teto_pendencias() -> int:
+    return int(_num("LUCIEN_REVIEW_MAX_OPEN", 10, minimo=0))
+
+
+def revisao_idade_pendencia_dias() -> float:
+    return _num("LUCIEN_REVIEW_OPEN_AGE_DAYS", 30, minimo=1)
+
+
+def revisao_repergunta_semanas() -> float:
+    return _num("LUCIEN_REVIEW_REASK_WEEKS", 8, minimo=1)

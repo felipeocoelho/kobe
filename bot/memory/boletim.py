@@ -136,6 +136,7 @@ _ROTULO_SAIDA = {
     "closed": "fechada",
     "abandoned": "abandonada",
     "reverted": "revertida",
+    "contested": "contestada",
 }
 
 _CABECALHO = (

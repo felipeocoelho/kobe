@@ -103,4 +103,23 @@ def build_sources(
         else:
             logger.info("source lucien NÃO registrada (LUCIEN_ENABLED off)")
 
+    # RevisaoSource — 6ª fonte (gatilho de tempo: a revisão da memória da F5).
+    # Uma vez por semana manda ao operador, no privado, o que o LUCIEN gravou e
+    # as pendências velhas. Nunca devolve despertar: a mensagem é montada em
+    # código. Vem ligada no `.env.example` (`LUCIEN_REVIEW_ENABLED`); desligada não registra.
+    try:
+        from bot.lucien.revisao_source import build as build_revisao
+    except ImportError:
+        logger.exception("RevisaoSource indisponível — pacote bot.lucien faltando?")
+    else:
+        revisao = build_revisao(kobe_home=kobe_home, bot_token=bot_token)
+        if revisao is not None:
+            sources.append(revisao)
+            logger.info("source registrada: lucien-review")
+        else:
+            logger.info(
+                "source lucien-review NÃO registrada (LUCIEN_REVIEW_ENABLED off "
+                "ou sem destino)"
+            )
+
     return sources
