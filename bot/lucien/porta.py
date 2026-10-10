@@ -53,6 +53,7 @@ permanente já aconteceu neste acervo.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -72,6 +73,9 @@ TIPOS = {
 
 STATEMENT_MIN = 20
 STATEMENT_MAX = 400
+
+# Quanto o comando espera pelo vetor antes de desistir e deixar para o curador.
+TETO_VETOR_S = 10.0
 
 
 class PortaRecusou(Exception):
@@ -196,6 +200,47 @@ def registrar(
         "valid_from": origem["created_at"],
         "confianca": confianca,
     }
+
+
+def gerar_vetor(cx, claim_id: str, *, cliente=None) -> dict[str, Any]:
+    """Gera o vetor de busca da afirmação recém-gravada. **Nunca levanta.**
+
+    Chamar SÓ depois do commit do `registrar` — é a lei do
+    `consulta.embeddar_pendentes`: a afirmação não pode deixar de ser gravada
+    porque o serviço de embedding estava fora. O trabalho roda num bloco de
+    transação próprio (`cx.transaction()`): dentro de uma transação aberta vira
+    savepoint e quem commita é o chamador — é o que mantém os testes isolados;
+    fora dela, o bloco abre e fecha a sua. Se falhar, desfaz só o vetor, e a
+    afirmação fica como sempre ficou (sem vetor, achável por palavra e
+    identificador, completada pelo curador).
+
+    Por que existe: sem isto a perna de sentido só alcançava o fato na próxima
+    passada do curador — medido, 2 de 8 fatos recém-gravados achados contra 6 de
+    8 com o vetor na hora. E a falha **não pode ser muda**: o retorno traz o
+    motivo, para o comando dizer em uma linha.
+
+    Teto de espera de `TETO_VETOR_S`, sem nova tentativa: a porta é caminho
+    interativo — o operador está esperando a resposta. O curador segue com o
+    teto dele.
+    """
+    from bot.lucien import consulta
+
+    inicio = time.monotonic()
+    try:
+        cli = cliente
+        if cli is None:
+            from bot.search import embedder
+            cli = embedder._client().with_options(
+                timeout=TETO_VETOR_S, max_retries=0)
+        with cx.transaction():  # savepoint: a falha desfaz só o vetor
+            n = consulta.embeddar_pendentes(cx, limite=1, ids=[claim_id],
+                                            cliente=cli)
+        return {"ok": True, "gerados": n, "motivo": None,
+                "segundos": time.monotonic() - inicio}
+    except Exception as exc:  # noqa: BLE001 — qualquer falha aqui é a mesma: sem vetor por ora
+        logger.warning("porta: vetor de %s não saiu: %s", claim_id, exc)
+        return {"ok": False, "gerados": 0, "motivo": f"{type(exc).__name__}: {exc}",
+                "segundos": time.monotonic() - inicio}
 
 
 def revogar(cx, claim_id: str, *, motivo: str) -> dict[str, Any]:

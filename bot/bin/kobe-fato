@@ -41,6 +41,10 @@ O QUE O COMANDO GARANTE
 - **Confiança `alta`**, exceto quando a origem veio de áudio — aí cai para `media`,
   porque transcrição erra.
 - **O boletim é regenerado na hora**, então o registro aparece já no próximo turno.
+- **O vetor de busca é gerado na hora**, depois da gravação confirmada, então a
+  busca por sentido já acha o fato. Se o serviço de embedding falhar, o registro
+  vale do mesmo jeito (código 0) e sai uma linha `(aviso: registrado, mas a
+  busca por sentido só alcança …)` — **repasse essa linha ao operador**.
 
 SAÍDA
 -----
@@ -153,6 +157,17 @@ def main(argv=None) -> int:
             dia = str(r["valid_from"])[:10]
             print(f"registrei na tabela de fatos: [{args.tipo}] vigente desde {dia}, "
                   f"origem #{r['seq']}, confiança {r['confianca']} · id {r['id']}")
+            # O vetor vem DEPOIS do commit acima — a afirmação já está gravada e
+            # nada daqui a desfaz. Falha não muda o código de saída, mas é dita.
+            v = porta.gerar_vetor(cx, r["id"])
+            if v["ok"]:
+                try:
+                    cx.commit()
+                except Exception as exc:  # noqa: BLE001 — o registro já está salvo
+                    v = {"ok": False, "motivo": f"{type(exc).__name__}: {exc}"}
+            if not v["ok"]:
+                print(f"  (aviso: registrado, mas a busca por sentido só alcança "
+                      f"este fato na próxima passada do curador: {v['motivo']})")
 
         elif args.cmd == "revogar":
             r = porta.revogar(cx, args.id, motivo=args.motivo)

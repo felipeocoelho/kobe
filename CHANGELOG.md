@@ -4,6 +4,61 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix(lucien): a porta de registro gera o vetor de busca ao gravar (2026-10-10)
+
+**Operador pediu:** que o fato registrado pela porta deliberada (`kobe-fato
+registrar`) já saia achável pela busca por sentido, sem esperar o curador — com
+o deploy até a produção autorizado, testando tudo no ambiente de
+desenvolvimento.
+
+**Por quê:** a porta gravava a afirmação sem o vetor de busca, que só aparecia
+na próxima passada do curador. Nesse intervalo o fato era achável por palavra e
+por identificador, mas não por paráfrase: na medição da faxina, de 8 fatos
+recém-registrados a reconferência achou 2; com o vetor gerado na hora, 6.
+
+**Foi feito:**
+- `porta.gerar_vetor` (novo): gera o vetor da afirmação recém-gravada, em bloco
+  de transação próprio, **nunca levanta**, devolve se deu certo, o motivo e o
+  tempo. Teto de espera de 10 s, sem nova tentativa — a porta é interativa; o
+  curador segue com os 60 s dele.
+- `kobe-fato registrar` chama `gerar_vetor` **depois** do commit da afirmação.
+  Falha não muda o código de saída (0) e sai numa linha: *"(aviso: registrado,
+  mas a busca por sentido só alcança este fato na próxima passada do curador:
+  <motivo>)"*. Duplicata não regera vetor.
+- `consulta.embeddar_pendentes` ganhou dois parâmetros opcionais: `ids` (mira só
+  nas afirmações pedidas) e `cliente` (teto de espera de quem chama). Sem `ids`,
+  "as N primeiras sem vetor" vêm em ordem de UUID, não de chegada — com fila
+  acumulada o fato recém-gravado podia ficar fora do lote e o conserto falharia
+  calado. Sem os parâmetros, o comportamento é idêntico (o curador não muda).
+- Desvio deliberado do brief: o vetor não é gerado **dentro** de
+  `porta.registrar` porque `registrar` não commita (por desenho); gerar ali seria
+  gerar antes da confirmação, o oposto da lei "a escrita confirma primeiro".
+- Nada no curador, na busca, no boletim, nem no banco (sem migration).
+
+**Testes:**
+- `tests/test_lucien_porta.py` (+6), serviço de embedding simulado: (a) embedding
+  OK → sai com vetor; (b) embedding quebrado → a afirmação continua gravada e o
+  motivo volta; (b') sem chave do serviço → não levanta; (b'') o comando de ponta
+  a ponta sai 0 e imprime exatamente uma linha de aviso com o motivo; (c) a
+  afirmação gravada é achada pela perna de sentido de `buscar_estado` com uma
+  pergunta sem nenhuma palavra em comum; (d) com outra pendente na fila, só a
+  pedida ganha vetor. Tudo em transação revertida — conferido: zero linhas
+  sobraram no `kobe_test`.
+- Suíte inteira com banco recém-migrado (`en_US.UTF-8`, `UTC`): **1.188
+  passando, 0 falhas**. No `kobe_test` compartilhado, as 9 falhas de
+  `test_db_integration` **também ocorrem na `main` pura** (conferido) — resíduo
+  daquele banco.
+- Tempo real, serviço de embedding de verdade, no ambiente de desenvolvimento
+  (transação revertida): **~0,9 s por comando a frio** (3 processos: 0,96 / 0,91
+  / 0,93 s), ~0,2 s a quente. A gravação em si leva ~2 ms.
+- Validação na produção: **nenhuma**, por regra do operador (validação de
+  comportamento é no ambiente de desenvolvimento). Na produção só o pós-deploy
+  padrão: serviço ativo e journal sem erro.
+
+**Commits:** (este)
+**Reversão:** `git revert` deste commit + `git pull` na produção + reinício do
+serviço. Nada no banco a desfazer.
+
 ### docs+fix(lucien): token de longa duração NÃO instalado nesta instalação; aviso de vencimento de hora em hora (2026-10-07)
 
 **Operador pediu:** não instalar o token de longa duração do LUCIEN (decisão

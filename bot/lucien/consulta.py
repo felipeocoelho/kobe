@@ -411,35 +411,51 @@ def _ligar_substitutas(db, r: ResultadoEstado) -> None:
 # ── O vetor das afirmações ───────────────────────────────────────────────
 
 
-def embeddar_pendentes(db_ou_cx, *, limite: int = 200) -> int:
+def embeddar_pendentes(
+    db_ou_cx,
+    *,
+    limite: int = 200,
+    ids: Optional[Iterable[str]] = None,
+    cliente=None,
+) -> int:
     """Preenche o vetor das afirmações que ainda não têm.
 
     Roda DEPOIS da escrita, nunca dentro dela: uma afirmação não pode deixar de
     ser gravada porque um serviço de embedding estava fora. Sem vetor ela ainda
     é achável por palavra e por identificador — perde só a perna da paráfrase, e
     só até a próxima passada.
+
+    `ids` restringe às afirmações pedidas. Existe para a porta deliberada: sem
+    ele, "as N primeiras sem vetor" vêm em ordem de UUID, não de chegada, e com
+    fila acumulada a afirmação recém-gravada podia ficar fora do lote — falhando
+    calada justo no dia ruim. `cliente` deixa quem chama impor o próprio teto de
+    espera (a porta é interativa; o curador não). Sem os dois, nada muda.
     """
     from bot.search import embedder
 
+    sql_sel = ("SELECT id, subject, statement FROM lucien_claims"
+               " WHERE embedding IS NULL")
+    params_sel: tuple = ()
+    if ids is not None:
+        ids = [str(i) for i in ids]
+        if not ids:
+            return 0
+        sql_sel += " AND id = ANY(%s::uuid[])"
+        params_sel = (ids,)
+    sql_sel += " ORDER BY id LIMIT %s"
+    params_sel += (limite,)
+
     cur = db_ou_cx.cursor() if hasattr(db_ou_cx, "cursor") else None
     if cur is not None:
-        cur.execute(
-            "SELECT id, subject, statement FROM lucien_claims"
-            " WHERE embedding IS NULL ORDER BY id LIMIT %s",
-            (limite,),
-        )
+        cur.execute(sql_sel, params_sel)
         linhas = cur.fetchall()
     else:
-        linhas = db_ou_cx.query(
-            "SELECT id, subject, statement FROM lucien_claims"
-            " WHERE embedding IS NULL ORDER BY id LIMIT %s",
-            (limite,),
-        )
+        linhas = db_ou_cx.query(sql_sel, params_sel)
     if not linhas:
         return 0
 
     textos = [f"{l['subject']}: {l['statement']}" for l in linhas]
-    vetores = embedder.embed(textos)
+    vetores = embedder.embed(textos, cliente=cliente)
     modelo = embedder.modelo()
     for linha, vetor in zip(linhas, vetores):
         sql = ("UPDATE lucien_claims SET embedding = %s::vector, model = %s,"

@@ -237,3 +237,206 @@ def test_imagem_traz_created_by(cx, topico):
     assert img is not None
     assert "created_by" in img, "sem esta coluna a trava T5 vira no-op silencioso"
     assert img["created_by"] == "operador"
+
+
+# ── o vetor de busca gerado ao gravar ─────────────────────────────────────
+#
+# Sem isto a perna de sentido só alcançava o fato recém-registrado na próxima
+# passada do curador. O serviço de embedding é simulado: os testes não gastam
+# chamada paga e não dependem de rede.
+
+def _vetor_marcado(indice: int = 7) -> list[float]:
+    from bot.search import embedder
+    v = [0.0] * embedder.DIM
+    v[indice] = 1.0
+    return v
+
+
+@pytest.fixture
+def embedding_ok(monkeypatch):
+    from bot.search import embedder
+    chamadas: list[list[str]] = []
+
+    def _falso(textos, *, cliente=None):
+        chamadas.append(list(textos))
+        return [_vetor_marcado() for _ in textos]
+
+    monkeypatch.setattr(embedder, "embed", _falso)
+    embedder._CACHE_PERGUNTA.clear()
+    yield chamadas
+    embedder._CACHE_PERGUNTA.clear()
+
+
+@pytest.fixture
+def embedding_quebrado(monkeypatch):
+    from bot.search import embedder
+
+    def _explode(textos, *, cliente=None):
+        raise embedder.EmbeddingIndisponivel("serviço fora (simulado)")
+
+    monkeypatch.setattr(embedder, "embed", _explode)
+
+
+def _embedding_de(cx, claim_id):
+    cur = cx.cursor()
+    cur.execute("SELECT embedding IS NOT NULL AS tem, statement FROM lucien_claims"
+                " WHERE id = %s", (claim_id,))
+    return cur.fetchone()
+
+
+def test_a_registro_com_embedding_ok_sai_com_vetor(cx, topico, embedding_ok):
+    r = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor ok"),
+        afirmacao="Afirmação que tem que sair da porta já com o vetor de busca preenchido.",
+        tipo="fato",
+    )
+    v = porta.gerar_vetor(cx, r["id"], cliente=object())
+    assert v["ok"] is True and v["gerados"] == 1, v
+    assert _embedding_de(cx, r["id"])["tem"] is True
+
+
+def test_b_embedding_quebrado_ainda_grava_e_diz_por_que(cx, topico, embedding_quebrado):
+    """A lei: a afirmação não pode deixar de ser gravada porque o serviço de
+    embedding estava fora. E a falha não pode ser muda."""
+    r = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor quebrado"),
+        afirmacao="Afirmação gravada com o serviço de embedding fora do ar, de propósito.",
+        tipo="fato",
+    )
+    v = porta.gerar_vetor(cx, r["id"], cliente=object())
+    assert v["ok"] is False
+    assert "serviço fora" in v["motivo"], "o motivo tem que chegar a quem chamou"
+    linha = _embedding_de(cx, r["id"])
+    assert linha is not None, "a afirmação sobreviveu à falha do vetor"
+    assert linha["tem"] is False
+    # e a conexão continua utilizável (o savepoint desfez só o vetor)
+    cx.cursor().execute("SELECT 1")
+
+
+def test_b_cliente_que_nao_monta_tambem_nao_levanta(cx, topico, monkeypatch):
+    """Sem OPENAI_API_KEY o cliente nem nasce — e a porta não pode levantar."""
+    from bot.search import embedder
+
+    def _sem_chave():
+        raise embedder.EmbeddingIndisponivel("OPENAI_API_KEY não configurada")
+
+    monkeypatch.setattr(embedder, "_client", _sem_chave)
+    r = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor sem chave"),
+        afirmacao="Afirmação gravada sem chave do serviço de embedding configurada.",
+        tipo="fato",
+    )
+    v = porta.gerar_vetor(cx, r["id"])
+    assert v["ok"] is False and "OPENAI_API_KEY" in v["motivo"]
+    assert _embedding_de(cx, r["id"]) is not None
+
+
+class _Db:
+    """O mínimo da interface que `buscar_estado` usa, sobre a conexão do teste
+    — assim a busca enxerga a transação ainda não commitada."""
+
+    def __init__(self, cx):
+        self.cx = cx
+
+    def query(self, sql, params=None):
+        cur = self.cx.cursor()
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+    def scalar(self, sql, params=None):
+        cur = self.cx.cursor()
+        cur.execute(sql, params)
+        linha = cur.fetchone()
+        return None if linha is None else next(iter(linha.values()))
+
+
+def test_c_afirmacao_gravada_e_achada_pela_perna_de_sentido(cx, topico, embedding_ok):
+    from bot.lucien import consulta
+
+    r = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor sentido"),
+        afirmacao="Afirmação que a busca por paráfrase tem que achar logo depois de gravada.",
+        tipo="fato",
+    )
+    assert porta.gerar_vetor(cx, r["id"], cliente=object())["ok"]
+    # pergunta sem nenhuma palavra em comum: só a perna de sentido pode achar
+    res = consulta.buscar_estado(_Db(cx), "zzqx wvkj", topic_id=topico, janela_eco=0)
+    assert res.sentido_ativo
+    achada = [a for a in res.vigentes if str(a.id) == r["id"]]
+    assert achada, "a afirmação recém-gravada não apareceu na busca"
+    assert "sentido" in achada[0].pernas
+
+
+def test_d_mira_so_na_afirmacao_pedida(cx, topico, embedding_ok):
+    """Com fila de pendentes, 'as N primeiras sem vetor' vêm em ordem de UUID —
+    a recém-gravada podia ficar de fora. O `ids` mira nela e só nela."""
+    outra = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor fila"),
+        afirmacao="Afirmação pendente que NÃO foi pedida e deve continuar sem vetor.",
+        tipo="fato",
+    )
+    alvo = porta.registrar(
+        cx, topic_id=topico, assunto=_assunto("teste vetor alvo"),
+        afirmacao="Afirmação pedida, a única que deve ganhar o vetor nesta chamada.",
+        tipo="fato",
+    )
+    v = porta.gerar_vetor(cx, alvo["id"], cliente=object())
+    assert v["gerados"] == 1
+    assert _embedding_de(cx, alvo["id"])["tem"] is True
+    assert _embedding_de(cx, outra["id"])["tem"] is False
+    assert len(embedding_ok) == 1 and len(embedding_ok[0]) == 1
+
+
+def _carregar_kobe_fato():
+    import importlib.machinery
+    import importlib.util
+    caminho = str(RAIZ / "bot" / "bin" / "kobe-fato")
+    loader = importlib.machinery.SourceFileLoader("kobe_fato_cli", caminho)
+    spec = importlib.util.spec_from_loader("kobe_fato_cli", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class _CxSemCommit:
+    """A conexão do teste, com `commit`/`close` neutralizados: o comando roda
+    de ponta a ponta e a transação ainda é revertida no teardown."""
+
+    def __init__(self, cx):
+        self._cx = cx
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
+
+    def __getattr__(self, nome):
+        return getattr(self._cx, nome)
+
+
+def test_b_comando_sai_0_e_avisa_em_uma_linha(cx, topico, embedding_quebrado,
+                                              monkeypatch, capsys):
+    """O que o agente lê é a SAÍDA do comando. Gravou sem vetor → sai 0, diz
+    que gravou, e diz numa linha por que a busca por sentido ainda não alcança."""
+    from bot.lucien import boletim
+
+    cur = cx.cursor()
+    cur.execute("SELECT telegram_chat_id, telegram_thread_id FROM topics WHERE id = %s",
+                (topico,))
+    t = cur.fetchone()
+    monkeypatch.setenv("KOBE_CHAT_ID", str(t["telegram_chat_id"]))
+    monkeypatch.setenv("KOBE_THREAD_ID", str(t["telegram_thread_id"] or 0))
+    monkeypatch.setenv("DATABASE_URL", "postgresql:///nao-usado-pelo-teste")
+    monkeypatch.setattr(store, "conectar", lambda url: _CxSemCommit(cx))
+    monkeypatch.setattr(boletim, "gerar", lambda *a, **k: None)
+
+    cli = _carregar_kobe_fato()
+    rc = cli.main(["registrar", "--tipo", "fato", "--assunto", _assunto("teste cli vetor"),
+                   "Afirmação gravada pelo comando com o serviço de embedding fora do ar."])
+    out = capsys.readouterr().out
+    assert rc == 0, "falha do vetor NUNCA faz a porta sair com erro"
+    assert "registrei na tabela de fatos" in out
+    avisos = [l for l in out.splitlines() if "busca por sentido" in l]
+    assert len(avisos) == 1, out
+    assert "serviço fora" in avisos[0]
