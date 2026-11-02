@@ -239,7 +239,9 @@ def test_o_cerebro_roda_sem_ferramenta_e_sem_mcp():
     fonte = (RAIZ / "bot" / "lucien" / "brain.py").read_text(encoding="utf-8")
     assert '"--tools", ""' in fonte
     assert '"--strict-mcp-config"' in fonte
-    assert '"--system-prompt", SYSTEM' in fonte
+    # F7.1: o agrupamento de assuntos troca o prompt de sistema por outro
+    # igualmente curto — mas SEMPRE há um, e nunca o do agente.
+    assert '"--system-prompt", system or SYSTEM' in fonte
 
 
 def test_a_CLI_ausente_vira_CerebroIndisponivel_e_nao_FileNotFound(monkeypatch):

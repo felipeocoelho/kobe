@@ -175,6 +175,14 @@ def _processar(cx, lote: Lote, *, kobe_home: str, modo: str, scope: str,
         total.encerradas += parcial.encerradas
         total.recusas.extend(parcial.recusas)
         total.divisoes += parcial.divisoes
+        total.assuntos_criados += parcial.assuntos_criados
+        total.assuntos_reusados += parcial.assuntos_reusados
+        total.assuntos_evitados += parcial.assuntos_evitados
+        total.assuntos_invalidos += parcial.assuntos_invalidos
+        total.mensagens_marcadas += parcial.mensagens_marcadas
+        total.palavras_achadas += parcial.palavras_achadas
+        total.palavras_faltando += parcial.palavras_faltando
+        total.herancas_pelo_principal += parcial.herancas_pelo_principal
         total.cursor_avancou_para = parcial.cursor_avancou_para or total.cursor_avancou_para
     return total
 
@@ -208,6 +216,12 @@ def _partir(lote: Lote) -> Optional[list[Lote]]:
         # O estado vigente mostrado é o mesmo — ele não depende do recorte, e
         # remontá-lo custaria uma consulta por metade sem mudar nada.
         novo.estado = lote.estado
+        novo.assuntos = lote.assuntos
+        novo.vetor_sql = lote.vetor_sql
+        novo.marcar = lote.marcar
+        novo.abertas = lote.abertas
+        novo.conversas = lote.conversas
+        novo.temas = lote.temas
         partes.append(novo)
     return partes
 
@@ -283,6 +297,13 @@ def uma_rodada(
                 cx.commit()
                 if n:
                     logger.info("lucien: %d afirmação(ões) ganharam vetor", n)
+                from bot.lucien import assuntos
+
+                if assuntos.ativo(cx):
+                    n = assuntos.embeddar_pendentes(cx)
+                    cx.commit()
+                    if n:
+                        logger.info("lucien: %d assunto(s) ganharam vetor", n)
             except Exception as exc:  # noqa: BLE001
                 cx.rollback()
                 logger.warning(

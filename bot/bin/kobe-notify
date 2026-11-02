@@ -65,6 +65,16 @@ def _read_token_from_env_file() -> str:
     return (read_dotenv({"TELEGRAM_BOT_TOKEN"}).get("TELEGRAM_BOT_TOKEN") or "").strip()
 
 
+_ULTIMO_ID: list = [None]   # o message_id do Telegram do último envio (F7: gravar)
+
+
+def _message_id(resposta: bytes):
+    try:
+        return int(json.loads(resposta.decode("utf-8")).get("result", {}).get("message_id"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _send(token: str, chat_id: int, thread_id: int | None, text: str) -> int:
     """Envia o texto (HTML, com fallback plain) pro Telegram. Retorna exit code."""
     html_text = to_telegram_html(text)
@@ -82,7 +92,8 @@ def _send(token: str, chat_id: int, thread_id: int | None, text: str) -> int:
         headers={"Content-Type": "application/json"},
     )
     try:
-        urllib.request.urlopen(req, timeout=15).read()
+        resposta = urllib.request.urlopen(req, timeout=15).read()
+        _ULTIMO_ID[0] = _message_id(resposta)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
         # Se HTML deu ruim (tag órfã etc), tenta de novo como texto plain.
@@ -95,7 +106,7 @@ def _send(token: str, chat_id: int, thread_id: int | None, text: str) -> int:
                 headers={"Content-Type": "application/json"},
             )
             try:
-                urllib.request.urlopen(req, timeout=15).read()
+                _ULTIMO_ID[0] = _message_id(urllib.request.urlopen(req, timeout=15).read())
                 return 0
             except Exception as exc2:  # noqa: BLE001
                 print(f"kobe-notify falhou (fallback plain): {exc2}", file=sys.stderr)
@@ -153,7 +164,13 @@ def main() -> int:
         chat_id = int(chat_id_env)
         thread_id = int(thread_env) if thread_env else None
 
-    return _send(token, chat_id, thread_id, text)
+    code = _send(token, chat_id, thread_id, text)
+    if code == 0:
+        # F7: a notificação também entra na conversa (chave desligada por padrão).
+        from _kobe_topic import gravar_notificacao
+
+        gravar_notificacao(chat_id, thread_id, text, _ULTIMO_ID[0])
+    return code
 
 
 if __name__ == "__main__":

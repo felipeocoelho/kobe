@@ -238,6 +238,14 @@ def _imprimir_achados(r) -> None:
         print(f"#{a.seq} · {_data(a.created_at)} · {quem} · tópico {a.topico}")
         print(f'   "{_cortar(a.corpo)}"')
         print(f"   ({' · '.join(pernas)})")
+        # F7 — a moldura: de que assunto é o trecho achado (só mensagem marcada).
+        do_trecho = getattr(a, "assunto_do_trecho", None)
+        principal = getattr(a, "assunto_principal", None)
+        if do_trecho and principal and do_trecho != principal:
+            print(f'   ↪ o trecho achado está numa parte sobre "{do_trecho}"; '
+                  f'a mensagem é principalmente sobre "{principal}"')
+        elif principal:
+            print(f'   assunto: "{principal}"')
         print()
 
 

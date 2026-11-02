@@ -92,3 +92,70 @@ Ele diz `⚠️ a camada de ESTADO falhou` ou `não deu pra consultar o registro
 é **falha de instrumento**, não ausência: relate como tal e siga pela EVIDÊNCIA,
 que não depende do registro. Um banco sem a migration 008 diz outra coisa — *"o
 registro de estado ainda não existe neste banco"* —, e aí é ausência mesmo.
+
+---
+
+## `kobe-assunto` — retomar um ASSUNTO inteiro (F7.1)
+
+Quando o operador pede para **retomar um assunto** — *"retoma o assunto X"*, *"em
+que pé está X?"*, *"me traz tudo sobre X"* —, a ferramenta é esta:
+
+    bot/bin/kobe-assunto ver "<assunto ou frase>"
+
+Assunto é o que, num aplicativo de chat, seria uma **thread**: uma conversa sobre
+uma coisa, do tamanho de um documento. A lista é única para a casa inteira; cada
+afirmação continua com o tópico dela, e o dossiê rotula de onde veio cada uma.
+
+### Como ler o dossiê
+
+- **O que vale hoje** — decisões, preferências, pendências e fatos vigentes, cada
+  um com `#número`. É ESTADO curado: confira a fala com `kobe-remember --ver` antes
+  de afirmar que algo foi decidido.
+- **O que mudou** — o que **não vale mais**, com a data e o que entrou no lugar.
+  **Nunca** apresente como em aberto algo que está nesta seção: é exatamente o
+  defeito que o Highlander existe para impedir.
+- **A conversa** (F7, quando as mensagens do assunto estão marcadas) — as mensagens
+  **inteiras**, em ordem, da mais recente para trás. Uma mensagem que trata de mais
+  de um assunto aparece inteira em cada um; a parte que é de **outro** assunto vem
+  depois de uma linha `↪` e marcada com `┆`. Ao responder, **não atribua a este
+  assunto o que está numa parte `┆`** — ela só está ali porque foi dita na mesma
+  mensagem. Se o cabeçalho disser que partes foram recolhidas ou que há páginas
+  mais antigas, e a pergunta precisar delas, abra com
+  `bot/bin/kobe-assunto conversa "<título>" [--inteira] [--pagina N]`.
+- **Conversas dentro deste assunto** (F7) — um assunto largo (um *tema*, a pasta)
+  traz a lista das conversas (os *subassuntos*) que moram nele, e o dossiê junta as
+  afirmações e as mensagens de todas. Se a pergunta é sobre uma delas, peça essa
+  pelo título: vem o dossiê só dela.
+- **Também achado pela busca** (F7) — o que a mesma busca do `kobe-remember`
+  (palavra, literal e sentido) acha com a frase do operador **fora** das mensagens
+  marcadas com o assunto. A etiqueta pode errar; isto é o que garante que a
+  mensagem mal etiquetada (ou ainda sem etiqueta) apareça. Leia e julgue cada
+  uma: responde à pergunta? cite; não responde? ignore. Se a busca não rodou, a
+  seção diz isso — **não é "não há mais nada"**.
+- **Onde se conversou** (quando o assunto ainda não tem mensagens marcadas) — os
+  números das mensagens. Abra as que importam; o dossiê é o índice, a fala literal
+  é a prova.
+
+### Os desfechos
+
+| saída | o que fazer |
+|---|---|
+| dossiê de **um** assunto | responda a partir dele, citando `#número` e data |
+| dossiê de **vários** (pergunta larga, ex.: "Highlander v3") | é de propósito: a frase está no título de todos. Resuma por assunto |
+| **ambíguo** (código 2, lista de candidatos) | pergunte ao operador qual — não escolha |
+| **nada encontrado** (código 1) | **não é "não há registro"**: só o que já foi agrupado tem assunto. Rode `kobe-remember` com a mesma frase antes de concluir ausência |
+| código 3 | falha do instrumento — diga isso, não "não existe" |
+
+### `kobe-assunto` × `kobe-remember`
+
+Não são dois buscadores para a mesma pergunta. **Pergunta sobre o passado em
+geral → `kobe-remember`.** **Pedido para retomar um assunto inteiro →
+`kobe-assunto ver`.** Se o dossiê levantar uma dúvida pontual, aí sim um
+`kobe-remember` sobre ela.
+
+### Arrumação da lista
+
+Assunto com uma afirmação só há mais de 30 dias, ou com mais de 40, aparece no
+**bloco C da revisão de segunda** — o operador responde ali ("junta o 3", "pode
+dividir o 5"). Fora da revisão, só arrume com pedido explícito dele:
+`kobe-assunto fundir | renomear | dividir`, todos com caminho de volta.

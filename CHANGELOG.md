@@ -4,6 +4,446 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### fix(lucien): "retoma o assunto" cabe no teto com a busca, e o tema não aparece repetido com a conversa dele (2026-11-02)
+
+**Operador pediu:** testar no ambiente de dev, de ponta a ponta, o "retoma o assunto tal" antes de subir (ordem de 02/11: ele não faz mais teste de uso).
+**Por quê:** o teste no dev achou dois defeitos: (1) o complemento da busca era somado DEPOIS de o dossiê ser cortado no teto — saiu com 12.022 caracteres para um teto de 12.000; (2) uma frase que acerta um tema e a conversa de dentro dele mostrava os dois resumidos, em vez do tema com a conversa.
+**Foi feito:**
+- `kobe-assunto ver` calcula o complemento antes e passa ao dossiê o teto que sobra.
+- `dossie_assunto._sem_filho_do_pai`: se o tema está entre os candidatos, a conversa de dentro dele sai da lista (o tema já a traz).
+**Testes:** banco de dev (`kobe_dev`, migrations 012–014 aplicadas pelo runner): agrupamento (15 afirmações → 4 assuntos), rodada do curador com a marcação ligada num tópico real (30 lidas, 28 marcadas, palavras de sustentação 2 de 2), `kobe-assunto ver` numa conversa (11.676 caracteres, dentro do teto) e num tema (o tema, a lista das conversas e a conversa inteira). Suíte no banco do zero: 1.342 verdes.
+**Commits:** (este)
+**Reversão:** `git revert` deste commit.
+
+### fix(lucien): o dossiê soma a conversa etiquetada à lista das afirmações, não troca uma pela outra (2026-11-02)
+
+**Operador pediu:** resolver o empate da régua das 30 perguntas antes de subir — "busca de hoje + 140 temas" deu 100% / 92%, "busca + etiqueta nova" 93% / 91%; se a etiqueta não acrescenta nada mensurável, não subir a etiqueta como caminho de busca, subir a combinação que vence.
+**Por quê:** recombinado das listas já medidas (sem custo): o caminho pelas afirmações (temas) e o caminho pela etiqueta erram em perguntas DIFERENTES (ex.: Q03, rsync — temas 4/5, etiqueta 0/5; Q07 e Q15 — temas 0, etiqueta 2/7 e 2/4). Os dois juntos: 100% / 93% — nunca abaixo de nenhum sozinho. Sem caminho por assunto nenhum: 93% / 90%. Mas o dossiê, quando havia etiqueta, TROCAVA a lista das afirmações pela conversa etiquetada — ficava só com a etiqueta.
+**Foi feito:**
+- `dossie_assunto._origens_fora_da_conversa`: depois de "A conversa", a seção "Também de onde vieram as afirmações deste assunto" lista as mensagens de origem das afirmações que não estão etiquetadas com o assunto.
+- A etiqueta não ordena busca nenhuma (o `kobe-remember` só a usa como moldura, desde `a53387b`) — nada a desligar.
+**Testes:** suíte inteira no banco do zero: 1.341 verdes. Novo: afirmação nascida em mensagem sem a etiqueta continua no dossiê.
+**Commits:** (este)
+**Reversão:** `git revert` deste commit.
+
+### feat(lucien): assunto (tema) e subassunto (conversa) — a mensagem é marcada com a conversa (2026-10-31)
+
+**Operador pediu:** os 140 temas largos da F7.1 viram o ASSUNTO (a pasta grande); cada mensagem recebe um SUBASSUNTO do tamanho de uma conversa, e é ele que manda na etiquetagem (decisão de 31/10/2026 ~19:30). E: se o resgate depende só da etiqueta, dizer; se não, otimizar pelo "retoma o assunto tal".
+**Por quê:** com a lista feita de temas largos que se sobrepõem, Opus e Gemini concordaram no principal de 87,0% das 486 mensagens da amostra (85,5% quando o principal era tema, 94,0% quando era conversa). E o `kobe-assunto ver` dependia só da etiqueta — mensagem mal etiquetada sumia do "retoma o assunto".
+**Foi feito:**
+- Migration `014_assunto_e_subassunto.sql` (aditiva): `lucien_subjects.kind` (`tema` | `conversa`, default `tema` — tudo que existe vira tema); a trava de um nível da 013 fica mais estrita: só conversa fica dentro de tema, e o pai tem que ser tema de topo. Referência `tests/fixtures/schema_expected.json` regenerada.
+- Marcação (no curador e na retroativa): o modelo vê duas listas — conversas (C…, para marcar) e temas (T…, só para o `dentro_de` de conversa nova). Tema usado como rótulo é apelido inválido (contado, nunca gravado). Conversa nova nasce `kind='conversa'`; se o título colide com um tema, nasce com a data no título, dentro desse tema. Conversas abertas só listam conversas. Banco sem a 014: comportamento de antes.
+- Dossiê: o tema junta as afirmações e as mensagens das conversas de dentro, e lista as conversas ("Conversas dentro deste assunto").
+- `kobe-assunto ver` acrescenta **"Também achado pela busca"**: a mesma busca do `kobe-remember` com a frase do operador, mostrando o que ela acha FORA das mensagens etiquetadas com o assunto. Falha da busca vira aviso, não silêncio. `--sem-busca` desliga. `docs/agente/memoria-manual.md` atualizado.
+**Testes:** suíte inteira no banco do zero (com 013+014): 1.340 verdes, 0 falhas. Novos: tema recusado como rótulo; conversa com título de tema nasce dentro dele; tema dentro de tema recusado pelo banco; tema traz as conversas de dentro; complemento da busca mostra só o que está fora da etiqueta e avisa quando a busca falha. No laboratório, `kobe-assunto ver "bug do emoji no telegram"` trouxe #3326 (o fix do emoji) que estava etiquetada em outro assunto. **Medição única** (20 conversas, 486 mensagens; Opus pelo código de produção × Gemini 3.1 Pro com a lista do Opus, US$ 1,28): principal igual em **95,5%** (antes, com temas, 87,0%); 97,7% contando secundário; 5 conversas totalmente diferentes (antes 36). A meta de 98% deixou de ser portão por decisão do operador (31/10).
+**Commits:** `4d48265`
+**Reversão:** `git revert` deste commit. A 014 é aditiva (coluna com default) e o código anterior não a lê; para voltar a trava de um nível, reaplicar o corpo da função da 013.
+
+### perf(lucien): a marcação retroativa paga o cabeçalho fixo menos vezes (2026-10-31)
+
+**Operador pediu:** (achado da execução) a carga do histórico tinha estimativa de ~2
+milhões de tokens de cota no desenho aprovado.
+**Por quê:** medido no primeiro lote real, ~79,5 mil tokens por chamada, dos quais
+~32,5 mil são cabeçalho fixo da CLI. Com 80 mil caracteres por lote seriam 83 lotes
+(~6,7 milhões de tokens).
+**Foi feito:**
+- `marcacao_retro.TETO_CHARS_LOTE` 80 mil → **150 mil** caracteres;
+- `MOSTRAR_AGENTE` 3 mil → **1.500** caracteres por resposta do agente — o corte
+  com que a rodada 2 mediu 98–99% de concordância; o resto da resposta herda o
+  principal.
+
+Simulado sobre as 4.042 mensagens sem marcação do laboratório: **30 lotes em vez de
+83**.
+**Testes:** as 20 conversas da amostra da rodada 2 marcadas pelo código de produção
+nos novos valores: 4 lotes, 466 mensagens vistas, 454 marcadas, 12 apartes, 10
+assuntos criados, 0 apelido inválido, 1 principal suprido. Custo medido: ~389 mil
+tokens de entrada + 21 mil de saída (~97 mil por lote), 3 min 15 s.
+`test_lucien_marcacao.py`: 39 verdes.
+**Commits:** (este)
+**Reversão:** os dois números voltam no `git revert`.
+
+### feat(helpers): as notificações das salas entram na conversa (2026-10-31)
+
+**Operador pediu:** item 9 do desenho aprovado em 31/10 — gravar as notificações das
+salas na conversa, em commit próprio.
+**Por quê:** medido na rodada 2 da F7, 37 de 90 vezes em que o operador respondeu
+citando uma mensagem, a citada não existia em `messages`. Eram notificações de
+sala (`[coder]`, `[mission]`), legendas de anexo e lembretes, e o elo "isto é
+resposta àquilo" se perdia.
+**Foi feito:**
+- `bot/bin/_kobe_topic.py`: `gravar_notificacao` grava o que foi enviado como fala
+  do agente começando por `[notificação] `, no tópico do par (chat, thread) e na
+  sessão ativa dele, com o `telegram_message_id` devolvido pelo Telegram. Sem
+  tópico ou sem sessão conhecidos, não grava. **Nunca** faz a notificação falhar:
+  erro vira um aviso no stderr.
+- `kobe-notify` e `kobe-attach` chamam o gravador depois de um envio bem-sucedido.
+  O anexo é gravado como `[anexo: <arquivo>] <legenda>`.
+- `KOBE_NOTIFY_RECORD_ENABLED` — **desligada quando ausente**. O `.env.example`
+  diz o efeito colateral a saber antes de ligar: essas mensagens passam a
+  aparecer no histórico imediato do turno e a ser lidas pelo curador, como
+  qualquer fala do agente.
+**Testes:** `tests/test_notificacao_gravada.py`, 4 verdes:
+- chave desligada não toca em banco;
+- banco fora não derruba;
+- ligada grava fala do agente marcada, no tópico e com o id;
+- tópico desconhecido não grava.
+
+O teste usa a própria conexão em transação revertida; nada ficou no banco
+(conferido). Testes de helpers: 16 verdes.
+**Commits:** (este)
+**Reversão:** a chave desligada (o padrão) não grava nada; `git revert` do commit.
+
+### feat(search): o `kobe-remember` diz de que assunto é o trecho achado (2026-10-31)
+
+**Operador pediu:** item 8 do desenho aprovado em 31/10. Quando a busca acerta numa
+parte de outro assunto, o resultado diz isso.
+**Por quê:** com a mensagem inteira em cada assunto, uma mensagem achada pela busca
+pode ser principalmente sobre outra coisa. Sem a moldura, o agente leria o
+acerto como se a mensagem inteira fosse sobre aquilo.
+**Foi feito:**
+- `bot/search/query.py`: `Achado` ganha `assunto_do_trecho` e
+  `assunto_principal`, preenchidos depois da busca (`_anotar_assuntos`) só para
+  mensagem marcada. O lugar do trecho é achado por `marcacao.localizar`. **Não
+  ordena, não filtra, não esconde nada**: a recuperação continua mecânica.
+  Qualquer falha aqui deixa o achado como antes.
+- `bot/bin/kobe-remember`: uma linha a mais no achado de mensagem marcada —
+  `↪ o trecho achado está numa parte sobre "X"; a mensagem é principalmente sobre
+  "Y"`, ou `assunto: "Y"` quando é o mesmo.
+**Testes:** +2 em `tests/test_lucien_marcacao.py`: trecho do meio apontado para o
+outro assunto e trecho do começo para o principal; mensagem sem marcação não é
+anotada. Testes de busca e do `kobe-remember`: 108 verdes.
+**Commits:** (este)
+**Reversão:** `git revert` do commit.
+
+### fix(test): o teste da marcação retroativa não grava mais de verdade (2026-10-31)
+
+**Operador pediu:** (achado da execução) os testes de banco rodam em transação
+desfeita e não podem deixar rastro.
+**Por quê:** `marcacao_retro.rodar` commita lote a lote (é isso que o torna
+retomável), e a primeira versão do teste não desarmou o commit. Uma execução
+gravou de verdade **na cópia de laboratório**: 1 tópico "teste f7 marcação" com 3
+mensagens, 2 assuntos de teste e 3 marcações. Produção e banco de dev não foram
+tocados. Os 2 assuntos foram arquivados (status); apagar o resto é deleção e
+espera OK do operador.
+**Foi feito:**
+- o teste usa uma conexão com `commit` desarmado (`_SemCommit`) e títulos com
+  sufixo único.
+**Testes:** 37 verdes no laboratório e no banco montado do zero. A contagem de
+marcações no laboratório não mudou depois da suíte (3 antes, 3 depois).
+**Commits:** (este)
+**Reversão:** `git revert` do commit.
+
+### feat(lucien): marcação retroativa do histórico — `kobe-assunto marcar` (2026-10-31)
+
+**Operador pediu:** *"marcar o histórico inteiro fica para a sala que codar, junto
+com o agrupamento retroativo"* (aprovado em 31/10/2026).
+**Por quê:** o curador marca daqui para a frente; a dor é retomar o passado.
+**Foi feito:**
+- `bot/lucien/marcacao_retro.py` (novo):
+  - as mensagens sem marcação, por tópico, em trechos de conversa (6 h sem
+    mensagem fecham o trecho), juntos até ~80 mil caracteres por chamada (o
+    cabeçalho fixo da CLI, ~32,5 mil tokens, pesa mais que o conteúdo em
+    chamadas pequenas). Um trecho maior que o teto é partido entre mensagens,
+    nunca no meio de uma;
+  - lotes sequenciais com o vocabulário inteiro acumulado; assunto novo pela T11,
+    com subassunto de um nível;
+  - a interpretação e a gravação são as do curador (`marcacao.interpretar`,
+    `marcacao.gravar`);
+  - a resposta longa do agente aparece até 3 mil caracteres; o resto herda o
+    principal, e o prompt diz isso;
+  - cada lote é uma transação; para na primeira falha; `--retomar <run_id>` não
+    paga de novo (marcadas são puladas, os apartes ficam no estado da rodada);
+  - tokens de cada chamada somados no relatório.
+- `kobe-assunto marcar [--retomar] [--limite-lotes] [--topico] [--de --ate]` e
+  `kobe-assunto desfazer-marcacao <run_id>`. Desfazer tira as marcações da rodada
+  e arquiva os assuntos que ela criou e ficaram sem afirmação e sem mensagem. O
+  texto das mensagens nunca é tocado.
+**Testes:** +4 em `tests/test_lucien_marcacao.py` (37 verdes no laboratório):
+- lotes que juntam trechos inteiros e partem só o gigante;
+- prompt com vocabulário e partes, sem o campo de afirmação;
+- resposta longa do agente mostrada pela metade, com aviso;
+- de ponta a ponta com pensador falso: marca, cria assunto, aparte, dois trechos
+  num lote só; retomar não chama o modelo de novo; desfazer tira as 3 marcações
+  e arquiva o assunto criado.
+**Commits:** (este)
+**Reversão:** `kobe-assunto desfazer-marcacao <run_id>`; `git revert` do commit.
+
+### feat(lucien): a conversa do assunto — mensagens inteiras, partes de outro assunto sinalizadas (2026-10-31)
+
+**Operador pediu:** *"pense numa forma de levar a mensagem inteira… sinalize que tal
+parte da mensagem é uma referência a outro assunto"* (23/10). E, aprovado em
+31/10: acima do limite, recolher primeiro as partes de outro assunto, com a marca
+visível; a parte do próprio assunto nunca é recolhida.
+**Por quê:** é a "lista de chats" que ele quer emular — abrir o assunto e ler a
+conversa como ela aconteceu, não só as frases destiladas.
+**Foi feito:**
+- `bot/lucien/conversa_assunto.py` (novo), determinístico, sem modelo:
+  - as mensagens marcadas com o assunto (e com os fundidos nele), cada uma
+    inteira;
+  - a parte de outro assunto vem precedida de `↪ a parte abaixo é do assunto "X" —
+    está aqui porque foi dita nesta mesma mensagem` e marcada com `┆`. O
+    cabeçalho de cada mensagem diz em que outros assuntos ela também está;
+  - acima do teto, primeiro recolhe as partes de outro assunto (`↪ parte sobre "X"
+    recolhida (N caracteres)`); se ainda não couber, pagina da mais recente para
+    trás, dizendo no cabeçalho o que ficou e o comando que abre. A parte do
+    próprio assunto nunca sai.
+- Dossiê (`kobe-assunto ver`): com marcação, a última seção vira **"A conversa"**,
+  no espaço que sobra do teto. Sem marcação, continua a lista de `#número` da
+  F7.1. Ler a marcação não depende da chave do curador, só da 013 estar aplicada.
+- `kobe-assunto conversa "<assunto>" [--pagina N] [--inteira] [--teto N]` (novo).
+- `docs/agente/memoria-manual.md`: como o Hal lê "A conversa", incluindo a regra
+  de **não atribuir a este assunto o que está numa parte `┆`**.
+**Testes:** +6 em `tests/test_lucien_marcacao.py`:
+- sem banco: a mensagem renderizada contém todas as palavras da fala; a
+  sinalização se inverte sob o outro assunto; recolher tira só a parte do outro;
+- com banco: a conversa inteira nos dois assuntos; acima do teto recolhe o outro
+  e mantém o próprio, e `--inteira` devolve tudo; o dossiê traz "A conversa".
+
+33 verdes no laboratório. `test_lucien_assuntos`, `test_lucien_marcacao` e
+`test_lucien_revisao`: 87 verdes no laboratório e 73 no banco montado do zero (14
+pulados por falta de acervo).
+**Commits:** (este)
+**Reversão:** `git revert` do commit. Sem marcação no banco, o dossiê é o da F7.1.
+
+### feat(lucien): o curador marca a mensagem inteira — principal, partes e sustentação literal (2026-10-31)
+
+**Operador pediu:** o desenho aprovado em 31/10/2026 — a mensagem vai inteira para
+cada assunto, com as partes de outro assunto só sinalizadas; um principal declarado
+por mensagem; a afirmação herda o assunto pelas palavras literais que a sustentam.
+**Por quê:** medido na rodada 2 da F7, com a lista de assuntos fixa, dois leitores
+concordam sobre o assunto de cada parte em 98–99% dos casos; deduzir o principal
+caía para ~97% por empate, então ele passa a ser declarado.
+**Foi feito:**
+- `bot/lucien/marcacao.py` (novo):
+  - corte mecânico em frases e unidades de ~350 caracteres, com posições exatas
+    sobre o texto original (nunca no meio de frase);
+  - `localizar` acha as palavras literais ignorando acento, caixa e pontuação, e
+    devolve a posição no original;
+  - `interpretar` valida o que o modelo devolve: só mensagem do lote; apelido
+    inexistente ignorado e contado; parte sem rótulo herda o principal; principal
+    ausente ou sem parte → o de mais texto, contado;
+  - `gravar` não remarca mensagem já marcada;
+  - `assuntos_da_mensagem` segue a fusão na leitura;
+  - `assunto_por_posicao`;
+  - as "conversas abertas" do tópico (onde cada uma parou), que entram na lista
+    de assuntos para dar continuidade.
+- Prompt (`prompts.py`): com a chave ligada, cada mensagem aparece cortada em
+  partes numeradas (`[1234.1]` — fatia literal do original), com a instrução de
+  marcação, as conversas abertas e o contrato (`mensagens`, `assuntos_novos`
+  com `dentro_de`, e `palavras` em cada afirmação). **Desligada, o prompt é
+  idêntico ao da F7.1.**
+- `store.aplicar`: a marcação é aplicada antes das afirmações. Os assuntos novos
+  (N…) passam pela T11, viram subassunto quando cabe em um nível, e servem às
+  afirmações da mesma rodada.
+- Herança da afirmação: as palavras achadas determinam o assunto da parte onde
+  caem, e as posições são gravadas em `support_quote/from/to`. Palavras não
+  achadas → o escolhido, se for um dos assuntos da mensagem; senão o principal
+  (contado). Mensagem sem marcação → como na F7.1.
+- Contadores em `lucien_runs`: `messages_marked`, `quotes_found`,
+  `quotes_missing`, `subject_fallbacks`, que aparecem também no resumo da
+  rodada.
+- Fusão de assuntos (`assuntos.fundir`) **não reescreve** a marcação: ela segue
+  apontando para o assunto fundido e a leitura segue a fusão (mesmo princípio da
+  012, "fundir é apontar"). Desfazer a fusão não precisa restaurar nada.
+- A foto da revisão da memória (corpo trocado no lote) não é marcada.
+- `LUCIEN_MARCACAO_ENABLED` — **desligada quando ausente**, documentada no
+  `.env.example`. Exige a 013; banco sem ela degrada para a F7.1.
+- Limite conhecido: `agrupamento.dividir` (divisão de assunto, F7.1) move
+  afirmações, não marcações; a divisão continua sendo decisão do operador e o
+  bloco C está em aberto.
+**Testes:** `tests/test_lucien_marcacao.py`, 27 testes. Sem banco: corte com
+posições exatas e cobertura total, frase longa inteira, texto vazio; localização
+com e sem acento, curta, ausente; chave desligada com prompt sem nada da
+marcação; foto da revisão; parser; interpretação (ida e volta, sem partes,
+apelido inventado, principal suprido, parte inexistente, aparte, mensagem de
+fora); posição. Com banco: mensagem inteira nos dois assuntos com o texto
+intocado; aparte sem assunto; releitura não remarca; herança pela posição
+vencendo a escolha do curador; palavras não achadas → principal e contadores;
+assunto novo servindo a afirmação e virando subassunto; contadores gravados; fusão
+seguida na leitura sem mexer na marcação; chave desligada. Verdes no banco
+montado do zero e no laboratório.
+
+**Suíte inteira:** no laboratório, 1.376 verdes e 4 falhas em
+`test_lucien_saude_integracao.py`. As 4 são do banco de laboratório: ele tem 159
+rodadas falhadas do curador desde 31/08, inclusive de 16/10, e o teste assume
+histórico limpo. No banco montado do zero, esse arquivo passa (5 de 5).
+**Commits:** (este)
+**Reversão:** `LUCIEN_MARCACAO_ENABLED=false` (o padrão) desliga tudo; `git revert`
+do commit tira o código.
+
+### feat(db): migration 013 — a mensagem inteira em cada assunto (2026-10-31)
+
+**Operador pediu:** codar a F7 do Highlander v3 pelo desenho aprovado em 31/10/2026
+(*"Ok, aceito as quatro recomendações. Pode mandar a sala do Coder prosseguir."*;
+*"Prossegue com essa aí mesmo"*).
+**Por quê:** na F7.1 só a afirmação recebia assunto — mensagem sem afirmação ficava
+fora de qualquer conversa. E a decisão de 23/10: a mensagem com mais de um assunto
+vai **inteira** para cada um, com as partes do outro só sinalizadas.
+**Foi feito:**
+- `infra/migrations/013_mensagem_e_assunto.sql` (aditiva, repetível):
+  - tabela `message_subjects` — (mensagem, assunto, `principal|secundario`, partes
+    em posições de caractere sobre o texto, hash do texto, rodada de origem);
+  - **exatamente um principal por mensagem marcada**, garantido pelo banco: índice
+    único parcial (no máximo um) + gatilho de restrição diferido (ao menos um, no
+    fim da transação);
+  - `lucien_subjects.parent_id` — subassunto, com gatilho que recusa o segundo
+    nível;
+  - `lucien_claims.support_quote/support_from/support_to` — as palavras literais
+    que sustentam a afirmação e onde estão, nulas por desenho, com a coerência
+    entre as duas posições numa restrição;
+  - contadores `messages_marked`, `quotes_found`, `quotes_missing` e
+    `subject_fallbacks` em `lucien_runs`, e o modo de rodada `marcacao`.
+  - Não toca nas travas de origem da 008 nem no texto de `messages`.
+- Referência do portão regenerada (`tests/fixtures/schema_expected.json`) a partir
+  de um banco montado do zero.
+- Testes: `tests/test_mensagem_assunto_schema.py`.
+**Testes:** banco montado do zero (`provision_db` + `migrate up`): 14 migrations; a
+segunda passada do runner não aplica nada; o SQL da 013 reexecutado direto no
+mesmo banco não falha. Aplicada na cópia de laboratório (que já tinha a 012) e
+reexecutada: sem erro. `compat_gate` verde no laboratório. Testes de schema: 12
+verdes com banco (dois principais, mensagem sem principal, partes vazias, papel
+desconhecido, neto de assunto, pai virando filho, sustentação incoerente, modo
+`marcacao`); 4 verdes sem banco.
+**Commits:** (este)
+**Reversão:** a migration é aditiva. O estado anterior volta esvaziando
+`message_subjects` e pondo as três colunas de sustentação em NULL; a chave
+`LUCIEN_MARCACAO_ENABLED` (desligada por padrão) impede qualquer escrita nova.
+
+### fix(test): a falha intermitente da F7.1 tinha nome (2026-10-31)
+
+**Operador pediu:** resolver a falha intermitente da suíte antes de qualquer subida
+(16/10, *"teve uma falha intermitente e tal, cara, a gente precisa resolver isso"*).
+**Por quê:** `test_lucien_porta.py::test_b_comando_sai_0_e_avisa_em_uma_linha`
+simula "serviço de vetor fora", mas sem `OPENAI_API_KEY` no ambiente de quem roda
+o código para um passo antes ("chave não configurada") e o teste falha — não era
+acaso, era dependência do ambiente.
+**Foi feito:**
+- a fixture `embedding_quebrado` passa a definir uma chave falsa
+  (`monkeypatch.setenv("OPENAI_API_KEY", "sk-teste")`).
+**Testes:** a versão antiga do arquivo, rodada sem a variável: 1 falha (o teste
+nomeado), 17 verdes. A versão nova: 18 verdes com e sem a variável, no banco de
+laboratório.
+**Commits:** (este)
+**Reversão:** `git revert` do commit.
+
+### feat(lucien): o assunto como unidade — F7.1 do Highlander v3 (2026-10-13)
+
+**Operador pediu:** a F7 do Highlander v3 — o assunto passa a existir de verdade,
+para que *"retoma o assunto tal"* traga tudo o que foi conversado. Plano aprovado
+em 13/10/2026 condicionado à revisão `revisao-f7-naturezas-do-documento`: a F7.1
+(assunto + agrupamento retroativo) executa já; a 7.2 e a 7.3 (documentos) voltam
+para redesenho. Decisões dele: lista de assuntos **única e plana** (vale para
+todos os tópicos), agrupamento do passado **aprovado**, com a régua *"tamanho de
+documento, não tamanho de tópico"*.
+
+**Por quê:** medido em 13/10/2026 — 1.166 afirmações e 1.163 assuntos distintos.
+O campo de assunto existia e não agrupava nada.
+
+**Foi feito:**
+- Migration `012_assuntos.sql` (aditiva, repetível): tabela `lucien_subjects`
+  (título, slug único, status `ativo|fundido|arquivado`, data do primeiro e do
+  último fato, tópico de casa, sistema/subsistema opcionais, busca por palavra,
+  trigrama e vetor), tabela `lucien_subject_events` (histórico com imagem de
+  antes), coluna **nula** `lucien_claims.subject_id`, contadores
+  `subjects_created/reused/avoided` em `lucien_runs` e o modo de rodada
+  `assuntos`. **Não toca** nas travas de origem da 008. Referência de schema
+  regenerada. Testes: `tests/test_assuntos_schema.py`.
+- **O curador reusa assunto** (`bot/lucien/assuntos.py`, `prompts.py`,
+  `store.py`, `brain.py`, `models.py`, `worker.py`). Cada rodada mostra ao
+  modelo a lista **ASSUNTOS VIVOS** (até 40, por recência ∪ palavra ∪ sentido,
+  de qualquer tópico) com apelidos `A1…`, e a régua do operador escrita no
+  prompt. O contrato ganha `assunto` (apelido) ou `assunto_novo`
+  `{titulo, por_que}`; nenhum dos dois = afirmação avulsa, que é permitido.
+- **Trava T11** (código, não só prompt): assunto novo só nasce se nenhum
+  existente tiver o mesmo slug (seguindo fusão), título parecido (trigrama
+  ≥ 0,60) ou mesmo sentido (cosseno ≥ 0,80). Cada desvio é contado em
+  `lucien_runs.subjects_avoided`. Assunto errado **nunca** custa a afirmação:
+  no pior caso ela entra avulsa. A afirmação que supera outra herda o assunto
+  da superada.
+- Fusão (`assuntos.fundir`) e os caminhos de volta (`desfazer_fusao`,
+  `desfazer_rodada`), todos por evento com a lista das afirmações movidas.
+- Vetor dos assuntos preenchido depois do commit da rodada, como o das
+  afirmações.
+- `LUCIEN_ASSUNTOS_ENABLED` — **ligada quando ausente** (só muda o prompt do
+  curador; sem custo em dinheiro, sem dado saindo). `false` devolve o prompt
+  de antes, byte a byte. Código novo sobre banco sem a 012 degrada sozinho para
+  o comportamento antigo. Documentada no `.env.example`.
+- **Agrupamento retroativo** (`bot/lucien/agrupamento.py`): ordena as
+  afirmações sem assunto por vizinhança de sentido dentro de cada tópico (busca
+  exata no Postgres, sem modelo), manda em lotes sequenciais ao modelo padrão
+  do curador com o vocabulário acumulado, faz UMA repescagem das que ficaram
+  avulsas e UMA revisão do vocabulário (fundir/renomear). Cada lote é uma
+  transação; para na primeira falha e é retomável (`--retomar <run_id>`). Tudo
+  gravado com o `run_id` de uma rodada `mode='assuntos'`.
+- **Divisão** de assunto que virou tópico (`agrupamento.dividir`, uma chamada de
+  modelo). Desfazer devolve as afirmações ao assunto de origem e o reativa.
+- **O dossiê do assunto** (`bot/lucien/dossie_assunto.py` + `bot/bin/kobe-assunto`):
+  `ver "<frase>"` resolve a frase (slug → literal no título → trigrama e
+  sentido, com piso) e monta, sem modelo: cabeçalho, o que vale hoje, o que
+  mudou (com o que entrou no lugar), onde se conversou. Pergunta larga
+  ("Highlander v3") junta todos os assuntos com a frase no título, resumidos;
+  frase ambígua lista os candidatos e sai com código 2; teto de 12 mil
+  caracteres; datas no fuso do operador. Também `listar`, `fila`, `fundir`,
+  `renomear`, `dividir`, `desfazer-fusao`, `agrupar`, `desfazer-agrupamento`.
+- **Bloco C na revisão de segunda** (`revisao.py`): até 5 assuntos pedindo
+  arrumação — os com mais de 40 afirmações ("virou tópico, divido?") e os de
+  uma afirmação só há mais de 30 dias que têm um assunto de sentido próximo
+  ("junto em Y?"). Ações novas `fundir` e `dividir`; `manter` e `desfazer`
+  valem também aqui; nada se mexe sozinho, e o perguntado não volta antes de N
+  semanas. `LUCIEN_REVIEW_MAX_SUBJECTS` (padrão 5; 0 desliga o bloco).
+- `brain.chamar` aceita outro prompt de sistema curto; `brain.extrair_json`
+  aceita o formato de resposta de quem chama.
+- Instrução do Hal: seção `kobe-assunto` em `docs/agente/memoria-manual.md` e
+  linha de gatilho na tabela do `CLAUDE.md` ("retoma o assunto X").
+- Testes: `tests/test_lucien_assuntos.py` — chave, prompt com e sem assunto,
+  parser, T11 por apelido/slug/trigrama, apelido inválido sem perder a
+  afirmação, irmãos de um mesmo projeto não fundidos, herança na superação,
+  datas do fato, fusão e desfazer, contadores, agrupamento (novo, existente,
+  avulsa, apelido inventado, afirmação esquecida), divisão e desfazer, dossiê
+  (vale × mudou, corte com contagem, resolução slug/literal), bloco C da
+  revisão (texto, fundir, desfazer, recusa em item que não é assunto).
+
+**Testes:** no **laboratório** — um Postgres descartável na dev VPS com uma
+cópia de leitura da produção (13/10/2026: 4.136 mensagens, 1.179 afirmações).
+- Suíte: 1.348 testes verdes com banco, 1.097 sem banco.
+- A 012 aplicada duas vezes num banco montado do zero e na cópia — a segunda não
+  faz nada; `compat_gate` verde.
+- Agrupamento sobre as 1.179: 140 assuntos, 1.128 com assunto (95,7%), 51
+  avulsas, 13 chamadas de modelo, zero falhas. Distribuição: 6 assuntos de 1
+  afirmação, 114 de 2 a 15, 18 de 16 a 40, 2 acima de 40 (73 e 57 — vão para o
+  bloco C).
+- Julgador cego (chamada separada, só com a régua do operador), amostra de 30
+  assuntos: 26 coerentes, 25 no tamanho certo (3 largos, 2 estreitos).
+  Avulsas: depois da repescagem, 19 de 25 pontuais de fato (antes: 13 de 25).
+- Divisão testada no assunto de 73: 11 ficaram, 62 foram para 7 assuntos (um
+  deles reusado pela T11); desfeita em seguida, voltou exatamente ao estado de
+  antes.
+- Calibração com o vocabulário real: entre assuntos distintos o título mais
+  parecido dá 0,477 (trigrama; limiar 0,60) e o sentido mais parecido 0,771;
+  duplicatas verdadeiras dão de 0,73 a 0,95 → limiar de sentido 0,82 (pega 6
+  de 8). Resolução de frase: perguntas com resposta entre 0,491 e 0,734,
+  perguntas sem resposta entre 0,276 e 0,407 → piso 0,45.
+- `kobe-assunto ver` de ponta a ponta: um assunto ~4 mil caracteres em ~1,4 s;
+  "Highlander v3" juntou 11 assuntos em 11,7 mil caracteres; frase sem assunto
+  sai com código 1 e manda rodar `kobe-remember`.
+- Replay do curador com o modelo de verdade, 10 lotes reais (#3686–#4079), em
+  transação desfeita: 99 afirmações, 93% em assunto existente (8 delas porque a
+  T11 barrou a duplicata), 2% em assunto novo, 5% avulsas. Limite conhecido: os
+  2 assuntos novos eram quase-duplicatas (0,60 e 0,68 de sentido, abaixo do que
+  assuntos distintos alcançam) — ficam para a revisão.
+- Uma falha intermitente da suíte em 23 execuções, não reproduzida nas 22
+  seguintes e não identificada.
+
+**Commits:** `685fedc` (migration 012), `6c3d032` (curador + T11), `399f1a1`
+(agrupamento, dossiê, bloco C), e este (registro dos testes).
+
+**Reversão:** `LUCIEN_ASSUNTOS_ENABLED=false` devolve o prompt do curador ao de
+antes, byte a byte. O agrupamento se desfaz com
+`kobe-assunto desfazer-agrupamento <run_id>`; para desfazer tudo de uma vez,
+`UPDATE lucien_claims SET subject_id = NULL;` — o estado em que a 012 deixa o
+banco. Fusões e divisões se desfazem uma a uma, pelo histórico. As tabelas
+novas ficam inertes. Os rótulos antigos (`subject`) nunca são tocados.
+
 ### feat(lucien): a revisão da memória — o LUCIEN pergunta, o operador corrige solto (2026-10-10)
 
 **Operador pediu:** a F5 do Highlander v3 — o LUCIEN grava durante a semana sem

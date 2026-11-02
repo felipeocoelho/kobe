@@ -9,12 +9,14 @@
 ## O que é
 
 Uma vez por semana o LUCIEN (o curador da tabela de fatos) manda ao operador,
-no **privado** dele com o bot, **uma** mensagem com dois blocos, numerados de 1
+no **privado** dele com o bot, **uma** mensagem com até três blocos, numerados de 1
 a N atravessando todos os tópicos:
 
 - **o que ele gravou** desde a última revisão, deduzido da conversa — *"confere
   pra mim?"*;
-- **pendências abertas há muito tempo** — *"alguma já morreu?"*.
+- **pendências abertas há muito tempo** — *"alguma já morreu?"*;
+- **assuntos pedindo arrumação** (F7.1) — os que viraram tópico (*"divido?"*) e
+  os de uma afirmação só que parecem caber em outro (*"junto em Y?"*).
 
 A mensagem é montada por código; não foi você que escreveu. Enquanto ela está
 aberta, o prompt do privado traz o bloco com os números e os títulos.
@@ -56,6 +58,22 @@ echo '{"frase": "<o que ele disse, com as palavras dele>",
 | "desisti", "não vou fazer", "esquece essa" (pendência) | `abandonar` |
 | "ainda vale", "continua aberta" | `manter` |
 | "desfaz", "me enganei no 3" | `desfazer` no item |
+
+**Itens de ASSUNTO** (o bloco *"estes assuntos pedem arrumação"*, F7.1). Cada
+item é um assunto — uma conversa, do tamanho de um documento — e não uma
+afirmação:
+
+| ele diz | ação |
+|---|---|
+| "pode juntar", "junta o 14" (item *"junto em Y?"*) | `fundir` — junta no assunto sugerido no próprio item |
+| "pode dividir", "divide o 12" (item *"virou tópico. Divido?"*) | `dividir` — **custa uma chamada de modelo** e leva ~1 min; a foto diz em quantos assuntos ficou |
+| "deixa como está", "não junta" | `manter` (ou nada) |
+| "desfaz o 12" | `desfazer` — devolve exatamente o que era |
+
+`contestar`, `corrigir`, `fechar` e `abandonar` não valem para item de assunto
+(o comando recusa). Se ele quiser juntar num assunto **diferente** do sugerido,
+ou dar outro nome, isso é fora da revisão: `kobe-assunto fundir` / `renomear`,
+com o pedido dele.
 
 Regras:
 

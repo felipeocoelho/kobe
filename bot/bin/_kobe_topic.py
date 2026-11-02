@@ -223,3 +223,72 @@ def parse_topic_arg(argv: list[str]) -> tuple[str | None, list[str]]:
         rest.append(arg)
         i += 1
     return topic, rest
+
+
+# ── F7: gravar a notificação na conversa ─────────────────────────────────
+
+
+def registro_ligado() -> bool:
+    """`KOBE_NOTIFY_RECORD_ENABLED` — desligada quando ausente.
+
+    Ligada, o que `kobe-notify` e `kobe-attach` mandam para o chat também entra
+    em `messages`, como fala do agente marcada com `[notificação]`. Por que:
+    medido na F7 (rodada 2), 37 de 90 vezes em que o operador respondeu CITANDO
+    uma mensagem, a citada não existia na conversa gravada — eram notificações
+    de sala e legendas de anexo. O elo "isto é resposta àquilo" se perdia.
+    """
+    v = (read_dotenv({"KOBE_NOTIFY_RECORD_ENABLED"}).get("KOBE_NOTIFY_RECORD_ENABLED") or "")
+    return v.strip().lower() in ("1", "true", "yes", "on", "sim")
+
+
+MARCA_NOTIFICACAO = "[notificação] "
+
+
+def gravar_notificacao(chat_id, thread_id, texto: str,
+                       telegram_message_id: int | None, *, conninfo: str | None = None,
+                       conn=None) -> bool:
+    """Grava a notificação enviada como mensagem do agente. NUNCA falha a
+    notificação: qualquer erro vira um aviso no stderr e `False`.
+
+    O tópico sai do par (chat, thread) — o mesmo que o bot usa. Sem tópico ou sem
+    sessão ativa conhecidos, não grava (não inventa onde a conversa está)."""
+    if conninfo is None and conn is None and not registro_ligado():
+        return False
+    try:
+        thread = int(thread_id) if thread_id not in (None, "", 0, "0") else None
+        if conn is not None:          # quem chamou é dono da transação (os testes)
+            return _gravar(conn, int(chat_id), thread, texto, telegram_message_id)
+        _garantir_psycopg()
+        import psycopg
+        from psycopg.rows import dict_row
+
+        url = conninfo or (read_dotenv({"DATABASE_URL"}).get("DATABASE_URL") or "").strip()
+        if not url:
+            return False
+        with psycopg.connect(url, row_factory=dict_row, connect_timeout=10) as c:
+            ok = _gravar(c, int(chat_id), thread, texto, telegram_message_id)
+            c.commit()
+        return ok
+    except Exception as exc:  # noqa: BLE001 — a notificação já saiu; gravar é extra
+        print(f"aviso: a notificação foi enviada mas não foi gravada na conversa ({exc})",
+              file=sys.stderr)
+        return False
+
+
+def _gravar(conn, chat_id: int, thread, texto: str, telegram_message_id) -> bool:
+    """O INSERT, sem commit (quem chamou é dono da transação). `False` quando o
+    par (chat, thread) não é um tópico com sessão ativa."""
+    r = conn.execute(
+        "SELECT t.id, s.id AS session_id FROM topics t"
+        "  JOIN sessions s ON s.topic_id = t.id AND s.status = 'active'"
+        " WHERE t.telegram_chat_id = %s"
+        "   AND COALESCE(NULLIF(t.telegram_thread_id, 0), -1) = COALESCE(%s, -1)"
+        " ORDER BY s.started_at DESC LIMIT 1",
+        (chat_id, thread)).fetchone()
+    if r is None:
+        return False
+    conn.execute(
+        "INSERT INTO messages (session_id, topic_id, telegram_message_id, role, content)"
+        " VALUES (%s, %s, %s, 'assistant', %s)",
+        (r["session_id"], r["id"], telegram_message_id, MARCA_NOTIFICACAO + texto))
+    return True

@@ -33,6 +33,11 @@ O JSON DE `aplicar`
     manter     pendência (ou fato) que ainda vale — fica registrado que ele reconfirmou
     desfazer   desfaz o que esta revisão já aplicou naquele item
 
+Só para itens de ASSUNTO (o bloco "estes assuntos pedem arrumação"):
+
+    fundir     junta o assunto no que o próprio item sugere
+    dividir    divide o assunto que virou tópico (UMA chamada de modelo, ~1 min)
+
 **Tudo ou nada:** se uma operação for recusada, nenhuma é gravada, e a mensagem
 diz qual e por quê.
 

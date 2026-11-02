@@ -311,6 +311,11 @@ class Achado:
     literal: bool = False
     rrf: float = 0.0
     pernas: list[str] = field(default_factory=list)
+    # F7 — a que assunto pertence o TRECHO mostrado, e o principal da mensagem
+    # (só quando a mensagem está marcada). A busca não usa isto para ordenar:
+    # é moldura, e a recuperação não depende de classificação.
+    assunto_do_trecho: Optional[str] = None
+    assunto_principal: Optional[str] = None
 
 
 @dataclass
@@ -676,5 +681,49 @@ def buscar(
             _corpo_de_exibicao(db, achados, pesos)
         except Exception:  # noqa: BLE001 — sem trecho, mostra-se o que houver
             pass
+        try:
+            _anotar_assuntos(db, achados)
+        except Exception:  # noqa: BLE001 — moldura a menos nunca derruba a busca
+            pass
     r.achados = achados
     return r
+
+
+def _anotar_assuntos(db, achados: list[Achado]) -> None:
+    """F7 — diz, em cada achado de mensagem marcada, de que assunto é o trecho
+    mostrado e qual é o principal da mensagem. Assim, quando a busca acerta numa
+    parte de OUTRO assunto, o resultado diz isso em vez de parecer que a
+    mensagem inteira é sobre aquilo.
+
+    Não ordena, não filtra e não esconde nada: a recuperação continua mecânica
+    (aprovado pelo operador em 18/10/2026)."""
+    if not db.query("SELECT to_regclass('message_subjects') IS NOT NULL AS ok")[0]["ok"]:
+        return
+    ids = [a.message_id for a in achados]
+    linhas = db.query(
+        "SELECT ms.message_id, ms.role, ms.parts, m.content,"
+        "       COALESCE(d.title, s.title) AS title"
+        "  FROM message_subjects ms JOIN messages m ON m.id = ms.message_id"
+        "  JOIN lucien_subjects s ON s.id = ms.subject_id"
+        "  LEFT JOIN lucien_subjects d ON d.id = s.merged_into"
+        " WHERE ms.message_id = ANY(%s)", (ids,))
+    por_msg: dict[str, list[dict]] = {}
+    for l in linhas:
+        por_msg.setdefault(str(l["message_id"]), []).append(l)
+    for a in achados:
+        ms = por_msg.get(a.message_id)
+        if not ms:
+            continue
+        principal = next((x["title"] for x in ms if x["role"] == "principal"), None)
+        a.assunto_principal = principal
+        from bot.lucien import marcacao
+
+        lugar = marcacao.localizar(ms[0]["content"] or "", " ".join((a.corpo or "").split())[:200])
+        if lugar is None:
+            continue
+        pos = lugar[0]
+        for x in ms:
+            if any(i <= pos < f for i, f in (x["parts"] or [])):
+                a.assunto_do_trecho = x["title"]
+                if x["role"] == "principal":
+                    break

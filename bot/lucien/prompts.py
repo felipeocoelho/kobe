@@ -182,6 +182,50 @@ resolver.
 """
 
 
+ASSUNTO = """\
+ASSUNTO — A QUE CONVERSA ESTA AFIRMAÇÃO PERTENCE
+
+Além do `subject` (o rótulo curto da própria afirmação), cada afirmação pode
+pertencer a um ASSUNTO. Assunto é o que, num aplicativo de chat, seria uma
+THREAD: uma conversa sobre UMA coisa, que o operador vai querer retomar depois
+("retoma o assunto X"). A régua é dele: **tamanho de DOCUMENTO, não tamanho de
+TÓPICO**.
+
+  bom:  "Highlander v3 — F5, revisão semanal da memória"
+        "Faxina dos depósitos de conhecimento do Kobe"
+        "Migração do banco do Kobe para Postgres direto"
+  ruim, grande demais (cabe em "tudo que a gente faz aqui"):
+        "Manutenção do Kobe" · "Melhorias do Coder" · "Memória" · "Olimpo"
+  ruim, pequeno demais (é o rótulo de uma afirmação só):
+        "Timeout do kobe-reflect subido para 90s"
+
+Quando o assunto é parte de um projeto com nome, ponha o nome do projeto no
+título ("Highlander v3 — …", "Coder — …"): é assim que uma pergunta larga acha
+todos os assuntos do projeto.
+
+REGRAS:
+  1. **REUSE.** A lista ASSUNTOS VIVOS tem os assuntos que já existem. Se a
+     afirmação pertence a um deles, responda `"assunto": "A3"`. Criar assunto é a
+     EXCEÇÃO — e assunto criado à toa é o defeito que esta lista existe para
+     curar.
+  2. Só use `"assunto_novo": {"titulo": "...", "por_que": "..."}` quando NENHUM
+     da lista serve. O título cabe na régua acima; `por_que` diz em uma frase
+     por que nenhum existente servia.
+  3. Afirmação pontual, que não pertence a conversa nenhuma (o horário de um
+     jogo, um pedido avulso), fica SEM assunto: omita os dois campos. Isso é
+     permitido e é o certo nesses casos.
+  4. Afirmações do mesmo lote sobre a mesma conversa vão para o MESMO assunto.
+"""
+
+CONTRATO_ASSUNTO = """\
+CAMPOS DE ASSUNTO, em cada item de "claims" (além dos de cima):
+      "assunto": "A3",
+      "assunto_novo": {"titulo": "…", "por_que": "…"}
+  — um OU outro, ou nenhum. Apelido que não está na lista ASSUNTOS VIVOS é
+  ignorado.
+"""
+
+
 def montar(lote: Lote) -> str:
     """O prompt de uma rodada."""
     linhas = [
@@ -199,14 +243,33 @@ def montar(lote: Lote) -> str:
         "O QUE JÁ VALE (o estado vigente deste tópico)",
         "─" * 60,
     ]
+    # O apelido do assunto ao lado da afirmação mostra ao modelo como as
+    # afirmações que já valem estão agrupadas — o exemplo mais forte de reuso.
+    por_assunto = {str(a["id"]): ap for ap, a in (lote.assuntos or {}).items()}
     if lote.estado:
         for apelido, c in lote.estado.items():
             data = c["valid_from"].strftime("%d/%m/%Y") if c.get("valid_from") else "?"
+            marca = ""
+            if lote.assuntos is not None and c.get("subject_id"):
+                ap = por_assunto.get(str(c["subject_id"]))
+                marca = f"({ap}) " if ap else ""
             linhas.append(
-                f"{apelido}  [{c['kind']}] {data} — {c['subject']}: {c['statement']}"
+                f"{apelido}  [{c['kind']}] {data} — {marca}{c['subject']}: {c['statement']}"
             )
     else:
         linhas.append("(nada ainda — este tópico não tem estado registrado)")
+
+    if lote.assuntos is not None:
+        linhas += ["", "─" * 60, "ASSUNTOS VIVOS (reuse; criar é exceção)", "─" * 60]
+        if lote.assuntos:
+            for apelido, a in lote.assuntos.items():
+                n = a.get("n")
+                qtd = f" · {n} afirmação(ões)" if n is not None else ""
+                desc = f" — {a['description']}" if a.get("description") else ""
+                linhas.append(f"{apelido}  {a['title']}{desc}{qtd}")
+        else:
+            linhas.append("(nenhum ainda — se precisar, crie com `assunto_novo`)")
+        linhas += ["", ASSUNTO]
 
     linhas += [
         "",
@@ -214,12 +277,26 @@ def montar(lote: Lote) -> str:
         "A CONVERSA NOVA",
         "─" * 60,
     ]
+    if lote.marcar:
+        from bot.lucien import marcacao
     for m in lote.mensagens:
         marca = " (transcrito de áudio)" if m.audio else ""
         data = m.created_at.strftime("%d/%m/%Y %H:%M")
         linhas.append(f"#{m.seq} · {data} · {m.quem}{marca}:")
-        linhas.append(m.content.strip())
+        if lote.marcar and m.marcavel:
+            # F7: a mesma fala, cortada em partes numeradas para a marcação. O
+            # texto de cada parte é a fatia literal do original.
+            linhas += marcacao.bloco_da_mensagem(m.seq, m.content)
+        else:
+            linhas.append(m.content.strip())
         linhas.append("")
 
     linhas += ["─" * 60, "", LEGIBILIDADE, "", CONTRATO]
+    if lote.assuntos is not None:
+        linhas += ["", CONTRATO_ASSUNTO]
+    if lote.marcar:
+        if lote.conversas or lote.temas:
+            linhas += marcacao.bloco_vocabulario(lote.conversas, lote.temas)
+        linhas += marcacao.bloco_abertas(lote.abertas)
+        linhas += ["", marcacao.INSTRUCAO, "", marcacao.CONTRATO]
     return "\n".join(linhas)

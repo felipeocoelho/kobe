@@ -22,6 +22,10 @@ class Mensagem:
     created_at: datetime
     content: str
     audio: bool
+    # F7 — a foto da revisão da memória chega ao modelo com o corpo trocado; ela
+    # não é conversa e não recebe marcação de assunto (as posições seriam sobre
+    # um texto que não é o gravado).
+    marcavel: bool = True
 
     @property
     def quem(self) -> str:
@@ -44,6 +48,27 @@ class Lote:
     mensagens: list[Mensagem] = field(default_factory=list)
     # As afirmações vigentes mostradas, por apelido (`E1`, `E2`, …).
     estado: dict[str, dict] = field(default_factory=dict)
+    # F7.1 — os assuntos que o curador pode reusar, por apelido (`A1`, `A2`, …).
+    # `None` quer dizer "assunto desligado" (`LUCIEN_ASSUNTOS_ENABLED=false`), e
+    # aí o prompt sai idêntico ao de antes da F7. Dicionário vazio quer dizer
+    # "ligado, e ainda não há assunto nenhum" — são estados diferentes.
+    assuntos: Optional[dict[str, dict]] = None
+    # O vetor do lote, calculado uma vez em `estado_vigente` e reusado pela
+    # lista de assuntos — uma chamada de embedding por rodada, não duas.
+    vetor_sql: Optional[str] = None
+    radicais: str = ""
+    # F7 — a marcação da mensagem (`LUCIEN_MARCACAO_ENABLED`). Desligada, o
+    # prompt sai idêntico ao da F7.1.
+    marcar: bool = False
+    # As conversas recentes do tópico e onde cada uma parou (continuidade).
+    abertas: list[dict] = field(default_factory=list)
+    # F7 (014) — na marcação, a mensagem é marcada com SUBASSUNTOS (conversas, `C…`);
+    # os ASSUNTOS (temas largos, `T…`) só servem de pasta para conversa nova.
+    conversas: dict[str, dict] = field(default_factory=dict)
+    temas: dict[str, dict] = field(default_factory=dict)
+    # Preenchido por `store._marcar`: apelido (A… e N…) → subject_id, para as
+    # afirmações da mesma rodada.
+    apelidos_da_rodada: dict[str, str] = field(default_factory=dict)
 
     @property
     def seqs(self) -> set[int]:
@@ -87,6 +112,16 @@ class ClaimProposta:
     # SUSTENTA esta afirmação?".
     legibility_doubt: bool = False
     legibility_reason: str = ""
+    # F7.1 — a que assunto a afirmação pertence. `assunto` é um apelido da
+    # lista mostrada (`A3`); `assunto_novo` é `{"titulo", "por_que"}` quando
+    # nada da lista serve. Os dois vazios = afirmação avulsa, que é permitido
+    # (régua do operador: "não é tudo que vai precisar ter um assunto").
+    assunto: str = ""
+    assunto_novo: Optional[dict] = None
+    # F7 — as palavras literais da mensagem de origem que sustentam a afirmação.
+    # O código as acha no texto e a afirmação herda o assunto da PARTE onde elas
+    # caem (`marcacao.localizar`). Não achadas = herança pelo principal, contada.
+    palavras: str = ""
 
 
 @dataclass
@@ -111,6 +146,9 @@ class Proposta:
     claims: list[ClaimProposta] = field(default_factory=list)
     closures: list[Encerramento] = field(default_factory=list)
     nothing_durable: bool = False
+    # F7 — a marcação das mensagens, crua: {"1234": {"principal": "A3", "partes": {...}}}
+    marcacao: dict = field(default_factory=dict)
+    assuntos_novos: list = field(default_factory=list)
 
 
 @dataclass
@@ -139,6 +177,16 @@ class ResultadoDaRodada:
     # gravado, o cursor não andou, e quem chamou tem que partir o lote ao meio.
     excedeu: bool = False
     divisoes: int = 0
+    # F7.1 — a T11 à vista. Ver `bot/lucien/assuntos.py`.
+    assuntos_criados: int = 0
+    assuntos_reusados: int = 0
+    assuntos_evitados: int = 0
+    assuntos_invalidos: int = 0
+    # F7 — a marcação à vista.
+    mensagens_marcadas: int = 0
+    palavras_achadas: int = 0
+    palavras_faltando: int = 0
+    herancas_pelo_principal: int = 0
 
     @property
     def rejeitadas(self) -> int:
@@ -154,6 +202,14 @@ class ResultadoDaRodada:
         if self.excedeu:
             return "passou do teto — nada gravado, o lote vai ser dividido"
         divid = f" · {self.divisoes} divisão(ões)" if self.divisoes else ""
+        if self.assuntos_criados or self.assuntos_reusados or self.assuntos_evitados:
+            divid += (f" · assuntos: {self.assuntos_reusados} reusado(s),"
+                      f" {self.assuntos_criados} criado(s),"
+                      f" {self.assuntos_evitados} criação(ões) evitada(s)")
+        if self.mensagens_marcadas:
+            divid += (f" · {self.mensagens_marcadas} mensagem(ns) marcada(s);"
+                      f" palavras de sustentação achadas {self.palavras_achadas},"
+                      f" não achadas {self.palavras_faltando}")
         return (
             f"{self.mensagens_vistas} mensagem(ns) lidas · "
             f"{self.criadas} afirmação(ões) criada(s) · "

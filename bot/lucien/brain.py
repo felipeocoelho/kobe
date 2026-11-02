@@ -122,15 +122,19 @@ def _ambiente(kobe_home: str, config_dir: str) -> dict:
 
 
 def chamar(prompt: str, *, kobe_home: str, reconstrucao: bool = False,
-           timeout: Optional[float] = None) -> str:
-    """Manda o prompt e devolve a saída crua. Levanta `CerebroIndisponivel`."""
+           timeout: Optional[float] = None, system: Optional[str] = None) -> str:
+    """Manda o prompt e devolve a saída crua. Levanta `CerebroIndisponivel`.
+
+    `system` troca o prompt de sistema curto por outro igualmente curto — o
+    agrupamento de assuntos (F7.1) não extrai afirmação, organiza as que já
+    existem, e chamá-lo de "extrator" mudaria o que ele faz."""
     modelo = cfg.modelo(reconstrucao=reconstrucao)
     cmd = [
         "claude", "-p", "--output-format", "json",
         # Ver o cabeçalho: 43k → 13k tokens de contexto por chamada, medido.
         "--tools", "",
         "--strict-mcp-config",
-        "--system-prompt", SYSTEM,
+        "--system-prompt", system or SYSTEM,
     ]
     if modelo:
         cmd += ["--model", modelo]
@@ -205,9 +209,14 @@ def causa_do_envelope(saida: str) -> str:
 _CERCA = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 
 
-def extrair_json(bruto: str) -> dict:
+def extrair_json(bruto: str, *, reconhece=None) -> dict:
     """As três formas, nesta ordem. Levanta `CerebroIndisponivel` se nenhuma
-    servir — nunca devolve um dicionário vazio se passando por resposta."""
+    servir — nunca devolve um dicionário vazio se passando por resposta.
+
+    `reconhece` diz o que é uma resposta de verdade (e não o envelope da CLI).
+    O padrão é o formato de proposta do curador; o agrupamento de assuntos
+    (F7.1) passa o dele."""
+    _parece = reconhece or _parece_proposta
     texto = (bruto or "").strip()
 
     # 1. O envelope da CLI: {"type": "result", "result": "<a resposta>"}.
@@ -216,12 +225,12 @@ def extrair_json(bruto: str) -> dict:
     except ValueError:
         env = None
     if isinstance(env, dict):
-        if _parece_proposta(env):
+        if _parece(env):
             return env
         interno = env.get("result")
         if isinstance(interno, str):
             return _do_texto(interno)
-        if isinstance(interno, dict) and _parece_proposta(interno):
+        if isinstance(interno, dict) and _parece(interno):
             return interno
         raise CerebroIndisponivel(
             "a CLI devolveu um envelope JSON sem proposta reconhecível "
@@ -289,6 +298,9 @@ def parsear(bruto: str) -> Proposta:
             supersede_reason=str(item.get("supersede_reason") or ""),
             legibility_doubt=bool(item.get("legibility_doubt")),
             legibility_reason=str(item.get("legibility_reason") or ""),
+            assunto=str(item.get("assunto") or "").strip(),
+            assunto_novo=item.get("assunto_novo") if isinstance(item.get("assunto_novo"), dict) else None,
+            palavras=str(item.get("palavras") or "").strip(),
         ))
 
     closures = []
@@ -302,8 +314,11 @@ def parsear(bruto: str) -> Proposta:
             reason=str(item.get("reason") or ""),
         ))
 
+    marcacao = d.get("mensagens") if isinstance(d.get("mensagens"), dict) else {}
+    novos = [x for x in _lista(d.get("assuntos_novos")) if isinstance(x, dict)]
     return Proposta(claims=claims, closures=closures,
-                    nothing_durable=bool(d.get("nothing_durable")))
+                    nothing_durable=bool(d.get("nothing_durable")),
+                    marcacao=marcacao, assuntos_novos=novos)
 
 
 def _lista(v) -> list:

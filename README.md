@@ -141,6 +141,9 @@ Primitivas CORE que o agente (e plugins) usam durante a execução:
 - `kobe-attach <path> [caption]` — envia arquivo como documento no Telegram. Também aceita `--topic "<nome>"`.
 - `kobe-alerta` — helper de alertas proativos (criar/confirmar/dispensar).
 - `kobe-revisao` — aplica a resposta do operador à **revisão da memória** (ver abaixo).
+- `kobe-assunto ver "<assunto>"` — o **dossiê de um assunto**: o que vale hoje, o que
+  mudou e onde se conversou, com a origem de cada linha. É o "retoma o assunto X"
+  (ver abaixo).
 
 ### Revisão da memória (ligada por padrão)
 
@@ -153,6 +156,18 @@ responder, nada muda e ninguém cobra. Nada é apagado: toda correção se desfa
 
 Para não receber: `LUCIEN_REVIEW_ENABLED=false` no `.env` e reinicie o bot e o
 Keyko. Horário e tetos: ver o bloco "A REVISÃO DA MEMÓRIA" no `.env.example`.
+
+### O assunto como unidade
+
+Cada afirmação da memória pertence (ou não) a um **assunto** — o que, num app de
+chat, seria uma thread: uma conversa sobre uma coisa, do tamanho de um documento.
+A lista é única para todos os tópicos e plana. O curador reusa os assuntos que
+existem em vez de criar um por afirmação, e uma trava no código impede duplicata.
+Pedir *"retoma o assunto X"* faz o agente rodar `kobe-assunto ver "X"`. Assuntos que
+viraram tópico, ou que ficaram com uma afirmação só, aparecem na revisão de segunda
+para você decidir. Numa instalação que já tinha memória, o passado é agrupado uma
+vez com `kobe-assunto agrupar` (chamadas de modelo pela assinatura; desfaz com
+`kobe-assunto desfazer-agrupamento <run_id>`). Desligar: `LUCIEN_ASSUNTOS_ENABLED=false`.
 
 ## Keyko — o daemon de despertar por gatilho
 

@@ -284,8 +284,10 @@ def montar_lote(cx, topic_id: str, *, scope: str = "incremental",
         # lista os títulos dos fatos — lida como conversa, viraria "fato novo"
         # repetindo o que já está gravado. A mensagem fica no lote (o cursor anda
         # normalmente), mas o corpo chega ao modelo como o que ela é.
+        marcavel = True
         if linha["role"] == "assistant" and _MARCA_REVISAO in corpo:
             corpo = _CORPO_REVISAO
+            marcavel = False
         if mensagens and total + len(corpo) > teto:
             break
         total += len(corpo)
@@ -297,12 +299,55 @@ def montar_lote(cx, topic_id: str, *, scope: str = "incremental",
                 created_at=linha["created_at"],
                 content=corpo,
                 audio=bool(linha["audio_transcribed"]),
+                marcavel=marcavel,
             )
         )
 
     lote = Lote(topic_id=topic_id, topico_nome=cab["topico"], mensagens=mensagens)
+    from bot.lucien import assuntos
+
+    usar_assunto = assuntos.ativo(cx)
+    if usar_assunto:
+        lote.assuntos = {}   # ligado: `estado_vigente` passa a trazer o subject_id
     lote.estado = estado_vigente(cx, topic_id, lote=lote)
+    if usar_assunto and mensagens:
+        lote.assuntos = assuntos.vivos(cx, topic_id, estado=lote.estado,
+                                       vetor_sql=lote.vetor_sql, radicais=lote.radicais)
+        _marcacao_do_lote(cx, lote)
     return lote
+
+
+def _marcacao_do_lote(cx, lote: Lote) -> None:
+    """F7 — liga a marcação e põe as conversas abertas do tópico na lista.
+
+    As conversas abertas (onde cada uma parou) entram com apelido na lista de
+    assuntos: é com elas que o curador sabe se o lote CONTINUA uma conversa."""
+    from bot.lucien import marcacao
+
+    if not marcacao.ativo(cx):
+        return
+    from bot.lucien import assuntos
+
+    lote.marcar = True
+    kw = dict(estado=lote.estado, vetor_sql=lote.vetor_sql, radicais=lote.radicais)
+    if assuntos.tem_natureza(cx):
+        lote.conversas = assuntos.vivos(cx, lote.topic_id, kind="conversa", prefixo="C", **kw)
+        lote.temas = assuntos.vivos(cx, lote.topic_id, kind="tema", prefixo="T", **kw)
+    else:   # banco sem a 014: a lista de antes, toda ela como rótulo
+        lote.conversas = assuntos.vivos(cx, lote.topic_id, prefixo="C", **kw)
+        lote.temas = {}
+    abertas = marcacao.abertas(cx, lote.topic_id, antes_de_seq=lote.de_seq)
+    por_id = {str(a["id"]): ap for ap, a in lote.conversas.items()}
+    for a in abertas:
+        ap = por_id.get(a["id"])
+        if ap is None:
+            ap = f"C{len(lote.conversas) + 1}"
+            lote.conversas[ap] = {"id": a["id"], "title": a["title"],
+                                  "description": a["description"],
+                                  "last_touched_at": a["last_touched_at"], "kind": "conversa"}
+            por_id[a["id"]] = ap
+        a["apelido"] = ap
+    lote.abertas = abertas
 
 
 def estado_vigente(cx, topic_id: str, *, lote: Optional[Lote] = None) -> dict[str, dict]:
@@ -343,6 +388,8 @@ def estado_vigente(cx, topic_id: str, *, lote: Optional[Lote] = None) -> dict[st
     cur = cx.cursor()
     limite = cfg.estado_maximo()
     campos = "id, subject, statement, kind, valid_from, confidence, source_seq"
+    if lote is not None and lote.assuntos is not None:
+        campos += ", subject_id"
 
     cur.execute(
         f"SELECT {campos} FROM lucien_claims"
@@ -360,6 +407,8 @@ def estado_vigente(cx, topic_id: str, *, lote: Optional[Lote] = None) -> dict[st
     # ── Relevância por PALAVRA (radicais raros, ligados por OU) ───────────
     try:
         consulta = _radicais_raros(cx, texto)
+        if lote is not None:
+            lote.radicais = consulta or ""
         if consulta:
             cur.execute(
                 f"SELECT {campos} FROM lucien_claims"
@@ -380,6 +429,8 @@ def estado_vigente(cx, topic_id: str, *, lote: Optional[Lote] = None) -> dict[st
         from bot.search import embedder
 
         vetor = embedder.para_sql(embedder.embed_um(texto[:6000]))
+        if lote is not None:
+            lote.vetor_sql = vetor
         cur.execute(
             f"SELECT {campos} FROM lucien_claims"
             " WHERE topic_id = %s AND status = 'vigente' AND embedding IS NOT NULL"
@@ -487,6 +538,23 @@ def fechar_rodada(cx, run_id: str, r: ResultadoDaRodada) -> None:
         " WHERE id = %s",
         (r.ok, r.erro, r.criadas, r.superadas + r.encerradas, r.rejeitadas, run_id),
     )
+    # Os contadores da T11 só existem com a 012 aplicada — e só são escritos
+    # quando houve assunto na rodada, para que banco sem a 012 nunca os veja.
+    if r.assuntos_criados or r.assuntos_reusados or r.assuntos_evitados:
+        cx.cursor().execute(
+            "UPDATE lucien_runs SET subjects_created = %s, subjects_reused = %s,"
+            " subjects_avoided = %s WHERE id = %s",
+            (r.assuntos_criados, r.assuntos_reusados, r.assuntos_evitados, run_id),
+        )
+    # Os da F7 só existem com a 013 — e só são escritos quando houve marcação.
+    if (r.mensagens_marcadas or r.palavras_achadas or r.palavras_faltando
+            or r.herancas_pelo_principal):
+        cx.cursor().execute(
+            "UPDATE lucien_runs SET messages_marked = %s, quotes_found = %s,"
+            " quotes_missing = %s, subject_fallbacks = %s WHERE id = %s",
+            (r.mensagens_marcadas, r.palavras_achadas, r.palavras_faltando,
+             r.herancas_pelo_principal, run_id),
+        )
 
 
 def aplicar(cx, lote: Lote, proposta: Proposta, *, run_id: str,
@@ -521,6 +589,12 @@ def aplicar(cx, lote: Lote, proposta: Proposta, *, run_id: str,
     ja_vale = _chaves_vigentes(cx, lote.topic_id)
     consumidos: set[str] = set()   # apelidos já superados/encerrados nesta rodada
 
+    # F7 — a marcação vem ANTES das afirmações: é dela que a afirmação herda o
+    # assunto (pela posição das palavras que a sustentam), e os assuntos novos
+    # declarados na marcação (N…) podem ser usados pelas afirmações.
+    if lote.marcar:
+        _marcar(cx, lote, proposta, r, run_id)
+
     for prop in proposta.claims[:teto]:
         novo_id = _criar(cx, lote, prop, por_seq, ja_vale, r, run_id)
         if novo_id is None:
@@ -549,6 +623,25 @@ def aplicar(cx, lote: Lote, proposta: Proposta, *, run_id: str,
         _avancar_cursor(cx, scope, lote.topic_id, lote.ate_seq)
         r.cursor_avancou_para = lote.ate_seq
     return r
+
+
+def _marcar(cx, lote: Lote, proposta: Proposta, r: ResultadoDaRodada, run_id: str) -> None:
+    """Interpreta e grava a marcação; deixa no lote o mapa de apelidos (A… e N…)
+    para as afirmações desta mesma rodada."""
+    from bot.lucien import assuntos, marcacao
+
+    res = marcacao.ResultadoMarcacao()
+    quando = lote.mensagens[0].created_at if lote.mensagens else None
+    mapa = marcacao.resolver_apelidos(cx, lote, proposta.assuntos_novos,
+                                      run_id=run_id, quando=quando, res=res)
+    marcacao.interpretar(proposta.marcacao, lote, mapa, res,
+                         so_conversas=assuntos.tem_natureza(cx))
+    marcacao.gravar(cx, lote, res, run_id=run_id)
+    lote.apelidos_da_rodada = mapa
+    r.mensagens_marcadas += res.marcadas
+    r.assuntos_criados += res.criados
+    r.assuntos_evitados += res.evitados
+    r.assuntos_invalidos += res.invalidos
 
 
 # ── As travas, uma a uma ─────────────────────────────────────────────────
@@ -669,6 +762,20 @@ def _criar(cx, lote: Lote, p: ClaimProposta, por_seq: dict[int, Mensagem],
     novo_id = str(cur.fetchone()["id"])
     ja_vale[chave] = novo_id
 
+    # T11 — o assunto (F7.1). Só com a chave ligada; desligada, a linha nasce
+    # exatamente como antes. Assunto errado NUNCA custa a afirmação: no pior
+    # caso ela entra avulsa, que é um estado legítimo.
+    if lote.assuntos is not None:
+        sid = _assunto_da_afirmacao(cx, lote, p, valid_from, r, run_id)
+        if lote.marcar:
+            sid = _herdar_da_mensagem(cx, origem, p, sid, novo_id, r)
+        if sid:
+            cur.execute("UPDATE lucien_claims SET subject_id = %s WHERE id = %s",
+                        (sid, novo_id))
+            from bot.lucien import assuntos as _assuntos
+
+            _assuntos.tocar(cx, sid, valid_from)
+
     # `seq` de evidência fora do lote é descartado em silêncio de propósito:
     # evidência a mais não é afirmação a mais, e recusar a afirmação inteira por
     # causa de um número extra seria desperdício.
@@ -686,6 +793,84 @@ def _criar(cx, lote: Lote, p: ClaimProposta, por_seq: dict[int, Mensagem],
              "legibility_reason": (p.legibility_reason or "").strip()[:300]},
             run_id)
     return novo_id
+
+
+def _assunto_da_afirmacao(cx, lote: Lote, p: ClaimProposta, quando,
+                          r: ResultadoDaRodada, run_id: str) -> Optional[str]:
+    """O assunto da afirmação nova, pela T11. `None` = avulsa.
+
+    Ordem: o apelido da lista; senão o assunto novo, conferido contra
+    duplicata; senão — e só quando a afirmação SUPERA outra — o assunto da que
+    ela substitui, porque mudar de ideia sobre uma coisa não muda a coisa.
+    """
+    from bot.lucien import assuntos as _assuntos
+
+    apelido = (p.assunto or "").strip().upper()
+    if apelido and apelido in getattr(lote, "apelidos_da_rodada", {}) and apelido.startswith("N"):
+        r.assuntos_reusados += 1
+        return lote.apelidos_da_rodada[apelido]
+    if apelido:
+        alvo = (lote.assuntos or {}).get(apelido)
+        if alvo is not None:
+            r.assuntos_reusados += 1
+            return _assuntos._seguir_fusao(cx.cursor(), str(alvo["id"]))
+        r.assuntos_invalidos += 1
+
+    novo = p.assunto_novo or {}
+    titulo = " ".join(str(novo.get("titulo") or "").split())
+    if _assuntos.TITULO_MIN <= len(titulo) <= _assuntos.TITULO_MAX:
+        sid, desfecho = _assuntos.resolver_novo(
+            cx, titulo, quando=quando, home_topic_id=lote.topic_id, run_id=run_id,
+            motivo=str(novo.get("por_que") or ""),
+        )
+        if desfecho == "criado":
+            r.assuntos_criados += 1
+        else:
+            r.assuntos_evitados += 1
+        return sid
+    if titulo:
+        r.assuntos_invalidos += 1
+
+    for apelido_sup in p.supersedes:
+        alvo = lote.estado.get(str(apelido_sup).strip())
+        if alvo is not None and alvo.get("subject_id"):
+            r.assuntos_reusados += 1
+            return _assuntos._seguir_fusao(cx.cursor(), str(alvo["subject_id"]))
+    return None
+
+
+def _herdar_da_mensagem(cx, origem: Mensagem, p: ClaimProposta, escolhido: Optional[str],
+                       claim_id: str, r: ResultadoDaRodada) -> Optional[str]:
+    """F7 — a afirmação herda o assunto da PARTE de onde saiu.
+
+    1. as palavras literais achadas no texto → o assunto da parte onde elas caem
+       (o escolhido pelo curador, se ele cobre aquele lugar; senão o principal;
+       senão o de maior sobreposição) — e a posição é gravada;
+    2. não achadas → o escolhido, se ele é um dos assuntos da mensagem; senão o
+       principal da mensagem — contado como herança pelo principal;
+    3. mensagem sem marcação (aparte, ou foto da revisão) → a escolha da F7.1.
+    """
+    from bot.lucien import marcacao
+
+    principal, partes = marcacao.assuntos_da_mensagem(cx, origem.id)
+    lugar = marcacao.localizar(origem.content, p.palavras) if origem.marcavel else None
+    if lugar is not None:
+        r.palavras_achadas += 1
+        cx.cursor().execute(
+            "UPDATE lucien_claims SET support_quote = %s, support_from = %s, support_to = %s"
+            " WHERE id = %s", (p.palavras[:400], lugar[0], lugar[1], claim_id))
+    elif p.palavras or partes:
+        r.palavras_faltando += 1
+    if not partes:
+        return escolhido
+    if lugar is not None:
+        sid = marcacao.assunto_por_posicao(principal, partes, lugar, preferido=escolhido)
+        if sid:
+            return sid
+    if escolhido in partes:
+        return escolhido
+    r.herancas_pelo_principal += 1
+    return principal
 
 
 def _superar(cx, lote: Lote, apelido: str, novo_id: str, p: ClaimProposta,

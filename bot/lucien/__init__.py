@@ -307,6 +307,11 @@ def revisao_teto_pendencias() -> int:
     return int(_num("LUCIEN_REVIEW_MAX_OPEN", 10, minimo=0))
 
 
+def revisao_teto_assuntos() -> int:
+    """F7.1 — quantos assuntos pedindo arrumação (bloco C) cabem numa revisão."""
+    return int(_num("LUCIEN_REVIEW_MAX_SUBJECTS", 5, minimo=0))
+
+
 def revisao_idade_pendencia_dias() -> float:
     return _num("LUCIEN_REVIEW_OPEN_AGE_DAYS", 30, minimo=1)
 

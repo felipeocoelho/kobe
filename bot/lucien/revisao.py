@@ -48,7 +48,7 @@ import fcntl
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -71,7 +71,11 @@ TEXTO_MAXIMO = 3800
 TITULO_MAXIMO = 70
 FOTO_TEXTO_MAXIMO = 160
 
-ACOES = ("confere", "contestar", "corrigir", "fechar", "abandonar", "manter", "desfazer")
+ACOES = ("confere", "contestar", "corrigir", "fechar", "abandonar", "manter", "desfazer",
+         "fundir", "dividir")
+# F7.1 — o bloco C: assuntos pedindo arrumação. A chave no `perguntadas` leva
+# este prefixo para não colidir com o id de uma afirmação.
+_PREFIXO_ASSUNTO = "assunto:"
 
 ARQUIVO = "revisao.json"
 
@@ -158,10 +162,12 @@ class Selecao:
     pendencias: list[dict]     # bloco B, já cortado no teto
     desde: datetime
     ate: datetime
+    # bloco C (F7.1) — assuntos para fundir ou dividir. Nada se mexe sozinho.
+    assuntos: list[dict] = field(default_factory=list)
 
     @property
     def vazia(self) -> bool:
-        return not self.gravadas and not self.pendencias
+        return not self.gravadas and not self.pendencias and not self.assuntos
 
 
 def selecionar(cx, *, desde: datetime, ate: datetime,
@@ -230,7 +236,50 @@ def selecionar(cx, *, desde: datetime, ate: datetime,
         pendencias=pend,
         desde=desde,
         ate=ate,
+        assuntos=_assuntos_para_arrumar(cx, recentes),
     )
+
+
+def _assuntos_para_arrumar(cx, recentes: set[str]) -> list[dict]:
+    """O bloco C. Divisão primeiro (assunto que virou tópico é o defeito mais
+    caro: o "retoma" devolve um caminhão), depois fusão — e só a fusão que tem
+    para onde ir (um assunto de sentido próximo); sem destino plausível, o
+    assunto de uma afirmação só fica como está, que é legítimo."""
+    from bot.lucien import assuntos as _assuntos, dossie_assunto
+
+    teto = cfg.revisao_teto_assuntos()
+    if teto <= 0:
+        return []
+    try:
+        if not _assuntos.ativo(cx):
+            return []
+        fila = dossie_assunto.fila_de_arrumacao(cx)
+    except Exception:  # noqa: BLE001 — o bloco C nunca derruba a revisão
+        logger.warning("revisao: fila de assuntos indisponível", exc_info=True)
+        return []
+    saida: list[dict] = []
+    for r in fila["divisao"]:
+        if _PREFIXO_ASSUNTO + str(r["id"]) in recentes:
+            continue
+        saida.append({"tipo": "divisao", "subject_id": str(r["id"]), "titulo": r["title"],
+                      "n_afirmacoes": int(r["n"])})
+    cur = cx.cursor()
+    for r in fila["fusao"]:
+        if _PREFIXO_ASSUNTO + str(r["id"]) in recentes:
+            continue
+        cur.execute(
+            "SELECT o.id, o.title, 1 - (o.embedding <=> s.embedding) AS cos"
+            "  FROM lucien_subjects s, lucien_subjects o"
+            " WHERE s.id = %s AND o.id <> s.id AND o.status = 'ativo'"
+            "   AND s.embedding IS NOT NULL AND o.embedding IS NOT NULL"
+            " ORDER BY o.embedding <=> s.embedding LIMIT 1", (r["id"],))
+        alvo = cur.fetchone()
+        if alvo is None or float(alvo["cos"]) < 0.55:
+            continue
+        saida.append({"tipo": "fusao", "subject_id": str(r["id"]), "titulo": r["title"],
+                      "n_afirmacoes": int(r["n"]), "sugestao_id": str(alvo["id"]),
+                      "sugestao": alvo["title"]})
+    return saida[:teto]
 
 
 # ── A mensagem ───────────────────────────────────────────────────────────
@@ -247,10 +296,19 @@ def _itens(sel: Selecao) -> list[dict]:
         itens.append({"n": len(itens) + 1, "bloco": "pendencia", "claim_id": str(r["id"]),
                       "topico": r["topico"], "titulo": _titulo(r["subject"]),
                       "kind": r["kind"], "desde": _dia(r["valid_from"])})
+    for a in sel.assuntos:
+        itens.append({"n": len(itens) + 1, "bloco": "assunto", "claim_id": None,
+                      "topico": "assunto", "titulo": _titulo(a["titulo"]), **a})
     return itens
 
 
 def _linha(item: dict) -> str:
+    if item["bloco"] == "assunto":
+        if item["tipo"] == "divisao":
+            return (f"{item['n']}. “{item['titulo']}” tem {item['n_afirmacoes']} "
+                    "afirmações — virou tópico. Divido?")
+        return (f"{item['n']}. “{item['titulo']}” tem uma afirmação só — "
+                f"junto em “{_titulo(item['sugestao'])}”?")
     extra = f" (aberta desde {item['desde']})" if item.get("desde") else ""
     return f"{item['n']}. [{item['topico']}] {item['titulo']}{extra}"
 
@@ -276,6 +334,11 @@ def montar_texto(sel: Selecao, itens: list[dict], *, fora_extra: int = 0) -> str
     if pend:
         partes += ["", "E estas pendências estão abertas há muito tempo — alguma já morreu?"]
         partes += [_linha(i) for i in pend]
+    arrumar = [i for i in itens if i["bloco"] == "assunto"]
+    if arrumar:
+        partes += ["", "E estes assuntos pedem arrumação (assunto = uma conversa, do "
+                   "tamanho de um documento):"]
+        partes += [_linha(i) for i in arrumar]
     partes += [
         "",
         "Se precisar de ajuste é só falar, do jeito que vier — pode mandar áudio "
@@ -396,6 +459,14 @@ def aplicar(cx, rev: dict, operacoes: list[dict], *, frase: str,
             raise RevisaoRecusou(f"ação {acao!r} não existe. As que existem: {', '.join(ACOES)}.")
         item = _item(rev, op.get("item"))
         extra = {"revisao": rev["id"], "item": item["n"]}
+        if item["bloco"] == "assunto":
+            feito.append({"item": item["n"], "acao": acao,
+                          **_aplicar_assunto(cx, rev, item, acao, frase=frase,
+                                             origem=origem, extra=extra)})
+            continue
+        if acao in ("fundir", "dividir"):
+            raise RevisaoRecusou(f"item {item['n']} é uma afirmação, não um assunto — "
+                                 f"'{acao}' só vale para os itens de assunto.")
         cid = item["claim_id"]
         try:
             if acao == "confere":
@@ -427,6 +498,51 @@ def aplicar(cx, rev: dict, operacoes: list[dict], *, frase: str,
     return feito
 
 
+def _aplicar_assunto(cx, rev: dict, item: dict, acao: str, *, frase: str,
+                     origem: dict, extra: dict) -> dict:
+    """O bloco C: fundir, dividir, manter ou desfazer. Sem commit — o tudo-ou-nada
+    é de quem chama. `dividir` custa UMA chamada de modelo."""
+    from bot.lucien import agrupamento, assuntos as _assuntos
+
+    detalhe = {**extra, "frase": (frase or "")[:400],
+               "origem_seq": origem.get("seq"), "origem_topico": origem.get("topico")}
+    sid = item["subject_id"]
+    if acao in ("confere", "manter"):
+        return {"nada": True}
+    if acao == "fundir":
+        if item["tipo"] != "fusao":
+            raise RevisaoRecusou(f"item {item['n']} é de divisão — não se funde. "
+                                 "As ações dele são dividir ou manter.")
+        n = _assuntos.fundir(cx, sid, item["sugestao_id"], actor="operador",
+                             motivo=frase, extra=detalhe)
+        return {"fundidas": n}
+    if acao == "dividir":
+        if item["tipo"] != "divisao":
+            raise RevisaoRecusou(f"item {item['n']} é de fusão — não se divide. "
+                                 "As ações dele são fundir ou manter.")
+        kobe_home = os.environ.get("KOBE_HOME") or str(Path(__file__).resolve().parents[2])
+        rel = agrupamento.dividir(cx, sid, kobe_home=kobe_home, actor="operador",
+                                  commit=False, extra=detalhe)
+        if rel.erro:
+            raise RevisaoRecusou(f"item {item['n']}: a divisão não saiu ({rel.erro}). "
+                                 "Nada foi gravado; dá para tentar de novo.")
+        return {"run_id": rel.run_id, "assuntos": rel.criados + rel.evitados}
+    if acao == "desfazer":
+        cur = cx.cursor()
+        cur.execute("SELECT id, action, run_id FROM lucien_subject_events"
+                    " WHERE detail->>'revisao' = %s AND detail->>'item' = %s"
+                    "   AND action IN ('fundido', 'atribuido')"
+                    " ORDER BY at DESC", (rev["id"], str(item["n"])))
+        evs = cur.fetchall()
+        if not evs:
+            raise RevisaoRecusou(f"não há nada aplicado no item {item['n']} para desfazer.")
+        if evs[0]["action"] == "fundido":
+            return {"devolvidas": _assuntos.desfazer_fusao(cx, str(evs[0]["id"]))}
+        return _assuntos.desfazer_rodada(cx, str(evs[0]["run_id"]))
+    raise RevisaoRecusou(f"item {item['n']} é um assunto: as ações dele são "
+                         "fundir/dividir, manter ou desfazer.")
+
+
 # ── A foto: como ficou ───────────────────────────────────────────────────
 
 
@@ -442,7 +558,7 @@ _ROTULO = {
 def foto(cx, rev: dict) -> str:
     """O ESTADO dos itens da revisão agora — não a lista de operações. Itens que
     esta revisão tocou aparecem um a um; os intocados, numa linha só."""
-    ids = [i["claim_id"] for i in rev.get("itens", [])]
+    ids = [i["claim_id"] for i in rev.get("itens", []) if i.get("claim_id")]
     cur = cx.cursor()
     cur.execute(
         "SELECT c.id, c.status, c.superseded_by, n.statement AS novo"
@@ -457,6 +573,17 @@ def foto(cx, rev: dict) -> str:
         (rev["id"],),
     )
     tocados = {r["n"] for r in cur.fetchall()}
+    try:
+        cur.execute(
+            "SELECT DISTINCT (detail->>'item')::int AS n, action FROM lucien_subject_events"
+            " WHERE detail->>'revisao' = %s", (rev["id"],))
+        assunto_feito = {}
+        for r in cur.fetchall():
+            assunto_feito.setdefault(r["n"], set()).add(r["action"])
+    except Exception:  # noqa: BLE001 — banco sem a 012: não há bloco C
+        cx.rollback()
+        assunto_feito = {}
+    tocados |= set(assunto_feito)
     cur.execute(
         "SELECT (detail->>'item')::int AS n FROM lucien_events"
         " WHERE detail->>'revisao' = %s AND action = 'reconfirmed'",
@@ -469,6 +596,18 @@ def foto(cx, rev: dict) -> str:
     for i in rev.get("itens", []):
         if i["n"] not in tocados:
             intocados.append(i["n"])
+            continue
+        if i["bloco"] == "assunto":
+            feito = assunto_feito.get(i["n"], set())
+            if "desfeito" in feito or "reativado" in feito:
+                rotulo = "↩️ arrumação desfeita"
+            elif "fundido" in feito:
+                rotulo = f"🔗 juntado em “{_titulo(i.get('sugestao') or '')}”"
+            elif "atribuido" in feito:
+                rotulo = "✂️ dividido em assuntos menores"
+            else:
+                rotulo = "segue como estava"
+            linhas.append(f"{i['n']}. [assunto] {i['titulo']} — {rotulo}")
             continue
         e = estado.get(i["claim_id"])
         status = e["status"] if e else "?"
@@ -533,7 +672,7 @@ def render_bloco(kobe_home, chat_id: Optional[int], thread_id: Optional[int]) ->
             "Itens (número → [tópico] título):",
         ]
         for i in rev["itens"]:
-            tipo = "pendência" if i["bloco"] == "pendencia" else "gravado"
+            tipo = {"pendencia": "pendência", "assunto": "assunto"}.get(i["bloco"], "gravado")
             linhas.append(f"  {i['n']}. [{i['topico']}] {i['titulo']} ({tipo})")
         return "\n".join(linhas)
     except Exception:  # noqa: BLE001
@@ -620,6 +759,8 @@ def rodar_ciclo(cx, kobe_home, *, agora: Optional[datetime] = None,
         for i in itens:
             if i["bloco"] == "pendencia":
                 perguntadas[i["claim_id"]] = _iso(agora)
+            elif i["bloco"] == "assunto":
+                perguntadas[_PREFIXO_ASSUNTO + i["subject_id"]] = _iso(agora)
         estado.update({
             "aberta": {"id": rev_id, "enviada_em": _iso(agora), "chat_id": chat_id,
                        "desde": _iso(desde), "ate": _iso(agora), "itens": itens,

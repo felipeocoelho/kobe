@@ -374,6 +374,7 @@ prestes a executar** e o arquivo que você tem obrigação de abrir antes. A con
 | o gatilho — ANTES de agir, quando… | carregue OBRIGATORIAMENTE |
 |---|---|
 | você for responder **qualquer pergunta sobre o passado**, ou rodar `kobe-remember` / `kobe-reflect` | `docs/agente/memoria-manual.md` |
+| o operador pedir para **retomar um assunto** ("retoma o assunto X", "em que pé está X", "me traz tudo sobre X"), ou você for rodar `kobe-assunto` | `docs/agente/memoria-manual.md` (seção `kobe-assunto`) |
 | o operador **pedir um lembrete, alarme, cobrança recorrente ou briefing periódico** ("me lembra toda terça", "todo dia às 7h"), **ou** o prompt trouxer o bloco `[Alertas aguardando confirmação neste tópico]` | `docs/agente/alertas.md` |
 | o prompt trouxer o bloco `[Revisão da memória aguardando tua resposta]` | `docs/agente/revisao-da-memoria.md` |
 | o operador pedir para **abrir, retomar ou encerrar uma missão** ("abre uma missão sobre X", "quero pensar fundo sobre Y"), **ou** o prompt trouxer a linha `[Sala de missão ativa neste tópico]` | `docs/agente/mission-control.md` |

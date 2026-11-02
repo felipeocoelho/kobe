@@ -271,6 +271,12 @@ def embedding_ok(monkeypatch):
 def embedding_quebrado(monkeypatch):
     from bot.search import embedder
 
+    # Uma chave falsa no ambiente: sem ela, o código para um passo ANTES
+    # ("chave não configurada") e o teste deixa de medir o que diz medir — foi
+    # a falha intermitente da F7.1, que dependia de a variável existir na
+    # máquina de quem roda a suíte (reproduzida 7 de 7 vezes sem a chave).
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-teste")
+
     def _explode(textos, *, cliente=None):
         raise embedder.EmbeddingIndisponivel("serviço fora (simulado)")
 

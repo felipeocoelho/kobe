@@ -108,6 +108,17 @@ def main() -> int:
         stderr = result.stderr.decode("utf-8", errors="replace")[:400]
         print(f"kobe-attach falhou: curl exit={result.returncode} {stderr}", file=sys.stderr)
         return 1
+    # F7: o anexo (nome + legenda) também entra na conversa — é a ele que o
+    # operador responde citando. Chave desligada por padrão.
+    try:
+        import json as _json
+
+        mid = int(_json.loads(result.stdout.decode("utf-8")).get("result", {}).get("message_id"))
+    except Exception:  # noqa: BLE001
+        mid = None
+    from _kobe_topic import gravar_notificacao
+
+    gravar_notificacao(chat_id, thread_id, f"[anexo: {path.name}] {caption}".strip(), mid)
     return 0
 
 

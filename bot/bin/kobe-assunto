@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""kobe-assunto — retoma um assunto inteiro, e cuida da lista de assuntos.
+
+É a ferramenta do pedido que originou o Highlander: *"retoma o assunto X"*. Um
+assunto é uma THREAD — uma conversa sobre UMA coisa, do tamanho de um documento.
+A lista é única e plana para a casa inteira; cada afirmação continua com o seu
+tópico.
+
+USO
+---
+    kobe-assunto ver "<assunto ou frase>" [--sem-busca]
+                                              # o dossiê: o que vale, o que mudou, a conversa, e
+                                              # o que a busca acha fora da etiqueta
+    kobe-assunto conversa "<assunto>" [--pagina N] [--inteira]
+                                              # a conversa do assunto: mensagens inteiras, com as
+                                              # partes de outro assunto sinalizadas
+    kobe-assunto listar [--busca <texto>] [--limite 40]
+    kobe-assunto fila                         # o que pede arrumação (fusão / divisão)
+
+    # arrumação — só com decisão do operador
+    kobe-assunto fundir <de> <para> --motivo "..."
+    kobe-assunto renomear <id> "<novo título>" --motivo "..."
+    kobe-assunto desfazer-fusao <id-do-evento>
+    kobe-assunto dividir <id>                 # assunto que virou tópico (1 chamada de modelo)
+
+    # o agrupamento retroativo (uma vez, com OK do operador)
+    kobe-assunto agrupar [--retomar <run_id>] [--limite-lotes N]
+    kobe-assunto desfazer-agrupamento <run_id>   # também desfaz uma divisão
+
+    # a marcação retroativa das mensagens (F7: a mensagem inteira em cada assunto)
+    kobe-assunto marcar [--retomar <run_id>] [--limite-lotes N] [--topico <uuid>] [--de N --ate N]
+    kobe-assunto desfazer-marcacao <run_id>
+
+`<id>` aceita o prefixo de 8 caracteres que `listar` mostra.
+
+COMO LER O DOSSIÊ
+-----------------
+- **"O que vale hoje"** é ESTADO curado por um modelo: cada linha traz `#número`
+  de origem. Confira com `kobe-remember --ver <número>` antes de afirmar que algo
+  foi decidido.
+- **"O que mudou"** é o que NÃO vale mais. Nunca apresente como em aberto uma
+  coisa que está ali como superada ou fechada — é exatamente o defeito que este
+  comando existe para impedir.
+- Se a frase bater em **vários assuntos** (pergunta larga, ex.: "Highlander v3"),
+  o dossiê junta todos. Se ela for **ambígua**, o comando LISTA os candidatos e
+  sai com código 2 — pergunte ao operador qual, ou peça um deles pelo título.
+- **Nada encontrado** (código 1) não é "não há registro": a busca de assunto vê
+  só o que já foi agrupado. Rode `kobe-remember` com a mesma frase antes de
+  concluir ausência.
+
+SAÍDA
+-----
+0 sucesso · 1 nada encontrado / recusa · 2 ambíguo (candidatos listados) ·
+3 FALHA DO INSTRUMENTO (banco fora) — **3 não é "não existe", é "não sei"**.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def _url() -> str:
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not url:
+        print("kobe-assunto: sem banco. Defina DATABASE_URL.", file=sys.stderr)
+        raise SystemExit(3)
+    return url
+
+
+def _id(cx, prefixo: str) -> str:
+    cur = cx.cursor()
+    cur.execute("SELECT id FROM lucien_subjects WHERE id::text LIKE %s LIMIT 2",
+                (prefixo.strip().lower() + "%",))
+    rs = cur.fetchall()
+    if len(rs) != 1:
+        raise SystemExit(f"kobe-assunto: '{prefixo}' não identifica um assunto "
+                         f"({'nenhum' if not rs else 'mais de um'})")
+    return str(rs[0]["id"])
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="kobe-assunto", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("ver"); p.add_argument("frase", nargs="+")
+    p.add_argument("--teto", type=int, default=12000)
+    p.add_argument("--sem-busca", action="store_true",
+                   help="só o dossiê, sem o complemento da busca")
+    p = sub.add_parser("conversa"); p.add_argument("frase", nargs="+")
+    p.add_argument("--teto", type=int, default=12000)
+    p.add_argument("--pagina", type=int, default=1)
+    p.add_argument("--inteira", action="store_true")
+    p = sub.add_parser("listar"); p.add_argument("--busca", default="")
+    p.add_argument("--limite", type=int, default=40)
+    sub.add_parser("fila")
+    p = sub.add_parser("fundir"); p.add_argument("de"); p.add_argument("para")
+    p.add_argument("--motivo", required=True)
+    p = sub.add_parser("renomear"); p.add_argument("id"); p.add_argument("titulo")
+    p.add_argument("--motivo", required=True)
+    p = sub.add_parser("desfazer-fusao"); p.add_argument("evento")
+    p = sub.add_parser("dividir"); p.add_argument("id")
+    p = sub.add_parser("agrupar"); p.add_argument("--retomar", default=None)
+    p.add_argument("--limite-lotes", type=int, default=None)
+    p = sub.add_parser("desfazer-agrupamento"); p.add_argument("run_id")
+    p = sub.add_parser("marcar"); p.add_argument("--retomar", default=None)
+    p.add_argument("--limite-lotes", type=int, default=None)
+    p.add_argument("--topico", default=None)
+    p.add_argument("--de", type=int, default=None); p.add_argument("--ate", type=int, default=None)
+    p = sub.add_parser("desfazer-marcacao"); p.add_argument("run_id")
+    args = ap.parse_args(argv)
+
+    from bot.lucien import agrupamento, assuntos, dossie_assunto, store
+
+    try:
+        cx = store.conectar(_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-assunto: (FALHA DO INSTRUMENTO) banco: {exc}", file=sys.stderr)
+        return 3
+    try:
+        if args.cmd == "ver":
+            frase = " ".join(args.frase)
+            cands, seguro = dossie_assunto.resolver(cx, frase)
+            if not cands:
+                print(f"nenhum assunto agrupado responde a \"{frase}\". Isto NÃO é "
+                      "\"não há registro\": rode `kobe-remember` com a mesma frase.")
+                return 1
+            if not seguro:
+                print(f"\"{frase}\" é ambíguo — candidatos:")
+                for c in cands:
+                    print(f"  {c.id[:8]}  {c.title}   ({c.como} {c.nota:.2f})")
+                print("Pergunte ao operador qual, ou peça um pelo título.")
+                return 2
+            ids = [c.id for c in cands]
+            # O complemento da busca sai do MESMO teto do turno: calcula-se antes,
+            # e o dossiê cabe no que sobrar.
+            extra = [] if args.sem_busca else dossie_assunto.complemento_da_busca(cx, frase, ids)
+            resto = "\n".join(extra)
+            print(dossie_assunto.montar(cx, ids, teto=max(3000, args.teto - len(resto) - 1)))
+            if resto:
+                print(resto)
+            return 0
+
+        if args.cmd == "conversa":
+            from bot.lucien import conversa_assunto
+
+            frase = " ".join(args.frase)
+            cands, seguro = dossie_assunto.resolver(cx, frase)
+            if not cands or not seguro or len(cands) > 1:
+                print(f"\"{frase}\" não nomeia UM assunto. Rode `kobe-assunto ver` com a "
+                      "frase para ver os candidatos e peça um pelo título.")
+                return 2 if cands else 1
+            texto = conversa_assunto.montar(cx, cands[0].id, teto=args.teto,
+                                            pagina=args.pagina, inteira=args.inteira,
+                                            titulo_para_comando=cands[0].title)
+            if not texto:
+                print(f"\"{cands[0].title}\" ainda não tem mensagens marcadas — o dossiê "
+                      "(`kobe-assunto ver`) mostra as afirmações e onde se conversou.")
+                return 1
+            print(f"## {cands[0].title} — a conversa\n")
+            print(texto)
+            return 0
+
+        if args.cmd == "listar":
+            for r in dossie_assunto.listar(cx, busca=args.busca, limite=args.limite):
+                print(f"{str(r['id'])[:8]}  {r['title']}  · {r['vigentes']}/{r['total']} "
+                      f"vigentes · último toque {r['last_touched_at']:%d/%m/%Y}")
+            return 0
+
+        if args.cmd == "fila":
+            f = dossie_assunto.fila_de_arrumacao(cx)
+            print(f"para FUNDIR ({len(f['fusao'])}) — uma afirmação só, há mais de 30 dias:")
+            for r in f["fusao"]:
+                print(f"  {str(r['id'])[:8]}  {r['title']}")
+            print(f"para DIVIDIR ({len(f['divisao'])}) — mais de 40 afirmações:")
+            for r in f["divisao"]:
+                print(f"  {str(r['id'])[:8]}  {r['title']}  · {r['n']}")
+            return 0
+
+        if args.cmd == "fundir":
+            n = assuntos.fundir(cx, _id(cx, args.de), _id(cx, args.para),
+                                motivo=args.motivo)
+            cx.commit()
+            print(f"fundido: {n} afirmação(ões) mudaram de assunto. Desfaz com "
+                  "`kobe-assunto desfazer-fusao <evento>` (o evento está no histórico).")
+            return 0
+
+        if args.cmd == "renomear":
+            agrupamento.renomear(cx, _id(cx, args.id), args.titulo, motivo=args.motivo)
+            cx.commit()
+            print("renomeado; o título antigo ficou no histórico.")
+            return 0
+
+        if args.cmd == "desfazer-fusao":
+            n = assuntos.desfazer_fusao(cx, args.evento)
+            cx.commit()
+            print(f"fusão desfeita: {n} afirmação(ões) voltaram ao assunto de origem.")
+            return 0
+
+        if args.cmd == "dividir":
+            kobe_home = os.environ.get("KOBE_HOME") or str(Path(__file__).resolve().parents[2])
+            rel = agrupamento.dividir(cx, _id(cx, args.id), kobe_home=kobe_home)
+            print(rel.resumo())
+            print(f"desfaz com: kobe-assunto desfazer-agrupamento {rel.run_id}")
+            return 0 if rel.erro is None else 3
+
+        if args.cmd == "agrupar":
+            kobe_home = os.environ.get("KOBE_HOME") or str(Path(__file__).resolve().parents[2])
+            rel = agrupamento.rodar(cx, kobe_home=kobe_home, retomar=args.retomar,
+                                    limite_lotes=args.limite_lotes)
+            print(rel.resumo())
+            for f in rel.falhas:
+                print(f"  falha: {f}")
+            print(assuntos.contar(cx))
+            return 0 if rel.erro is None else 3
+
+        if args.cmd == "marcar":
+            from bot.lucien import marcacao_retro
+
+            kobe_home = os.environ.get("KOBE_HOME") or str(Path(__file__).resolve().parents[2])
+            rel = marcacao_retro.rodar(cx, kobe_home=kobe_home, retomar=args.retomar,
+                                       limite_lotes=args.limite_lotes, topic_id=args.topico,
+                                       de_seq=args.de, ate_seq=args.ate)
+            print(rel.resumo())
+            print(f"desfaz com: kobe-assunto desfazer-marcacao {rel.run_id}")
+            return 0 if rel.erro is None else 3
+
+        if args.cmd == "desfazer-marcacao":
+            from bot.lucien import marcacao_retro
+
+            r = marcacao_retro.desfazer(cx, args.run_id)
+            cx.commit()
+            print(f"desfeito: {r['marcacoes_desfeitas']} marcação(ões) tirada(s), "
+                  f"{r['assuntos_arquivados']} assunto(s) arquivado(s). O texto das "
+                  "mensagens nunca foi tocado.")
+            return 0
+
+        if args.cmd == "desfazer-agrupamento":
+            r = assuntos.desfazer_rodada(cx, args.run_id)
+            cx.commit()
+            print(f"desfeito: {r['afirmacoes_soltas']} afirmação(ões) sem assunto de novo, "
+                  f"{r['assuntos_arquivados']} assunto(s) arquivado(s).")
+            return 0
+    except SystemExit:
+        raise
+    except (ValueError, LookupError) as exc:
+        cx.rollback()
+        print(f"kobe-assunto RECUSOU: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        cx.rollback()
+        print(f"kobe-assunto: (FALHA DO INSTRUMENTO) {exc}", file=sys.stderr)
+        return 3
+    finally:
+        cx.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
