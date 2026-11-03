@@ -4,6 +4,66 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### feat(lucien): o documento ligado ao assunto — "retoma o assunto" traz os documentos de X (Highlander v3, F7.2) (2026-11-03)
+
+**Operador pediu:** opção 1 da proposta de 03/11 (17:09). A ligação documento↔assunto é feita por modelo: o curador, em segundo plano, com o modelo padrão do Kobe. Antes de ligar na produção, medir de novo com o modelo do Kobe. Chave ligada também no `.env.example`. Não fechar a porta para o resumo por assunto da F7.3.
+**Por quê:** no laboratório, a busca sozinha achou 0,66–0,71 dos documentos certos entre os 5 mostrados no "retoma o assunto X". Ela cai quando a frase usa outras palavras: no incidente do rsync, a frase coloquial achou 0 de 5.
+**Foi feito:**
+- Migration `016_documento_e_assunto.sql`, aditiva:
+  - cria a tabela `doc_subjects` (documento, assunto, `origin` = `ligador | operador | autoria`, versão lida, `run_id`). A ligação que deixa de valer é **aposentada**, não apagada.
+  - `doc_sources` ganha `linked_sha256`, `linked_at` e `link_run_id`: dizem que versão do documento o ligador já leu.
+  - `lucien_runs` ganha o modo `documentos` e três contadores: lidos, ligações criadas e descartadas.
+  - A referência `tests/fixtures/schema_expected.json` foi regenerada.
+- `bot/lucien/ligador_docs.py`:
+  - **O que ele lê.** Documentos novos ou mudados, parados há 10 min. Vê o mesmo resumo que foi medido: caminho, títulos internos e começo do texto. Lotes de 70, com a lista de todos os assuntos ativos antes dos documentos, para o cache reaproveitar o começo do prompt.
+  - **Validação.** O código confere a resposta: documento e assunto têm que estar no lote, e cada documento leva no máximo 4 assuntos. O que não passa é descartado e contado.
+  - **Limites.** Só mexe em ligação `ligador`. Documento com ligação por `autoria` (o resumo da F7.3) não entra na fila. Desfazer é por rodada.
+  - **Chave.** `DOC_SUBJECTS_ENABLED`, desligada quando ausente. Teto próprio de rodadas por hora: `DOC_SUBJECTS_MAX_RUNS_HORA=4`.
+- **Fonte do curador:** quando não há conversa devida, dispara um lote do ligador, destacado. A conversa sempre passa na frente.
+- **Dossiê (`kobe-assunto ver`):**
+  - nova seção **Documentos deste assunto**: até 5, os mais recentes, da família do assunto (fusões e, num tema, as conversas de dentro), com rótulo, origem e aviso de "o arquivo mudou depois da ligação";
+  - depois, **Documentos também achados pela busca**, até 3, sem repetir os de cima. Sem ligação, só a busca, como antes;
+  - saiu o rodapé velho que dizia que documento ainda não entrava.
+- **`kobe-docs`:** novos `ligar`, `desfazer-ligacao <run_id>` e `listar --assunto <id>`. O `status` mostra a ligação.
+- **Documentação:**
+  - `.env.example`: `DOC_SUBJECTS_ENABLED=true`, com custo (cota, não dinheiro), privacidade e rollback;
+  - `CLAUDE.md`: ligação é julgamento de modelo, não decisão;
+  - `docs/agente/memoria-manual.md`: as duas seções do dossiê.
+**Testes:**
+- **Automáticos.** `tests/test_ligador_docs.py` (11):
+  - a migration só alarga a restrição do modo;
+  - documento fora do lote, assunto inexistente e excesso por documento são descartados e contados;
+  - documento lido sem ligação sai da fila, e o que muda volta;
+  - a releitura aposenta, e desfazer a rodada restaura tudo;
+  - falha do modelo não grava nada e a rodada fecha com `ok=false`;
+  - ligação por `autoria` é intocável e o documento dela fica fora da fila;
+  - o dossiê traz os ligados da família do tema e a busca não repete;
+  - a fusão é seguida na leitura;
+  - com a chave desligada, sai só a busca.
+- **Suíte inteira:** 1.332 verdes no banco do zero (108 pulados), 1.440 no `kobe_dev`.
+- **Remedição com o ligador de produção** (`.local/lab-religar.py`):
+  - **Montagem.** O código de produção rodou pelo modelo padrão, pela assinatura (`claude-opus-5-5`). Foram 7 chamadas de 14 a 28 s, sem gastar dinheiro e sem nada descartado. A lista foi a de **471 assuntos reais** da produção, lida só para consulta. Os 460 documentos com texto são os do laboratório. Os 14 assuntos medidos foram mapeados por título para os da produção.
+  - **Juiz.** O juiz é o mesmo gabarito às cegas da 1ª medição, feito pelo Gemini. Os documentos novos que o ligador propôs foram julgados pelo mesmo prompt (US$ 0,03). Agora **quem liga não é quem julga.**
+  - **Resultado:** **recall@5 0,81, precisão 0,83**. Antes, o Gemini ligando e julgando dava 0,89 / 0,76; a busca sozinha, 0,66–0,71 / 0,47–0,54.
+  - **Onde ainda erra:** escada do Coder (0 de 1), Mission Control (2 de 5) e F7 (3 de 5). A seção da busca, logo abaixo no dossiê, cobre parte disso.
+**Commits:** (este)
+**Reversão:** `DOC_SUBJECTS_ENABLED=false`: o dossiê volta a só buscar e o curador para de ligar. Uma rodada sai com `kobe-docs desfazer-ligacao <run_id>`. Também dá `git revert` deste commit. A 016 é aditiva e pode ficar.
+
+### feat(docs): documentos alcançáveis pela busca — a camada DOCUMENTOS do `kobe-remember` (Highlander v3, F7.2) (2026-11-03)
+
+**Operador pediu:** F7.2 do Highlander v3 — redesenho aprovado em 02/11/2026 (#4251), com os ajustes de 03/11: só `.md`/`.txt` indexados (binário só listado); nenhum tratamento especial por tópico (regra geral para todo `topics/*`, sem aviso de material no prompt); o que vai ligado na produção vai ligado no `.env.example`.
+**Por quê:** planos das salas, a base `knowledge/` do agente, a base e o material de cada tópico só eram achados se alguém lembrasse que existiam e fizesse `grep`. "Em que ponto está a V3?" ou "resgata o que está nos arquivos do debriefing de fulano" não tinham caminho.
+**Foi feito:**
+- Migration `015_documentos.sql` (aditiva, só cria): `doc_sources` (documento: natureza, raiz + caminho relativo, tópico, hash, **texto preservado**, `presente | ausente_do_disco` — nunca apagado), `doc_chunks` (trecho com âncora de títulos, palavra gerada, trigrama, vetor 1536d) e `doc_producoes` (produção de sala + **desfecho**, que nasce `desconhecido`; o banco recusa `recusado`/`superado` sem a fala do operador). Referência `tests/fixtures/schema_expected.json` regenerada.
+- `bot/docs/`: `raizes.py` (lista do que entra por regra geral — `topics/<slug>/knowledge/**` base do tópico, resto de `topics/<slug>/**` material do operador, `knowledge/**` anotação do agente, `missoes/**/*.md` e `<sala>/.local/plano-*.md` artefato de sala, e `DOC_INDEX_SALA_ROOTS` para salas fora da casa; nunca entra pasta/arquivo com ponto, link simbólico, código, estado); `indexer.py` (stat → hash → trechos → vetor; só lê); `producoes.py` (desfecho: `aprovado` só pelo `plan_approved` do Coder, o resto só por comando com a fala do operador; `sem_resposta` não é deduzido); `query.py` (as três pernas da conversa, piso próprio, rótulo); `source.py` (fonte do Keyko, 10 min).
+- `kobe-remember`: bloco **DOCUMENTOS** depois da EVIDÊNCIA, sem voto no veredito dela; carimbo `SEM REGISTRO na fala literal — MAS HÁ DOCUMENTO`; `--sem-docs`; camada fora/falha dita em voz alta. O vetor da pergunta é reaproveitado (sem segunda chamada).
+- `kobe-assunto ver`: seção **Documentos** (a mesma busca, com a frase), dentro do teto.
+- `kobe-docs` (status · carga · listar · desfecho) e `kobe-attach`: anexar `plano-*.md` registra o plano na hora.
+- `CLAUDE.md` e `docs/agente/memoria-manual.md`: um buscador por pergunta e como citar cada natureza. README: chave da OpenAI declarada como requisito. `.env.example`: `DOC_INDEX_ENABLED=true`, `DOC_INDEX_SALA_ROOTS` vazio.
+**Testes:** `tests/test_docs.py` (18): armadilhas reais (`.env`, `.git`, `.local`, `.py`, `sala.json`, link simbólico) fora; tópico e pasta novos entram sem config; binário só listado; hash da árvore idêntico depois da carga; mudança refaz trechos; sumiço preserva o texto; raiz desconfigurada não faz ninguém sumir; `aprovado` pelo estado do Coder; recusado sem fala do operador recusado (código e banco); DESCONHECIDO nunca sai como aprovado; embedding fora = falha nomeada. Suíte inteira: 1.321 verdes no banco do zero (108 pulados por banco sem mensagens), 1.429 verdes no `kobe_dev`. **Laboratório** (disco real da produção, só leitura, no `kobe_dev`): 597 documentos (232 anotações, 134 artefatos de sala, 2 da base, 92 de material em texto, 137 só listados), 8.074 trechos, 78 s, ~US$ 0,03; varredura de padrões de chave nos textos antes de embeddar: zero; hash de todos os arquivos antes e depois: idênticos. **Bateria** (a sala escreveu, 20 perguntas com resposta e 10 sem): com resposta 0,517–0,751, sem resposta 0,242–0,468 (+1 exceção a 0,556, "cluster Kubernetes" → doc de "cluster Postgres") → piso 0,50; documento certo em 1º 13/20, nos 3 primeiros 17/20, nos 6 mostrados 18/20. A repescagem de palavra rara da conversa foi tirada da perna literal dos documentos (punha os planos longos no topo: 12/20 em 1º) e a perna de palavra pesa 0,25 na fusão. ~400 ms por busca.
+**Commits:** (este)
+**Reversão:** `DOC_INDEX_ENABLED=false` (tabelas inertes, `kobe-remember` sem a camada); `git revert` deste commit. A 015 é aditiva e pode ficar.
+
 ### fix(lucien): "retoma o assunto" cabe no teto com a busca, e o tema não aparece repetido com a conversa dele (2026-11-02)
 
 **Operador pediu:** testar no ambiente de dev, de ponta a ponta, o "retoma o assunto tal" antes de subir (ordem de 02/11: ele não faz mais teste de uso).

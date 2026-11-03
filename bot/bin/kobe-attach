@@ -119,6 +119,10 @@ def main() -> int:
     from _kobe_topic import gravar_notificacao
 
     gravar_notificacao(chat_id, thread_id, f"[anexo: {path.name}] {caption}".strip(), mid)
+    # F7.2: plano de sala anexado entra no catálogo de documentos na hora.
+    from _kobe_topic import registrar_plano_anexado
+
+    registrar_plano_anexado(path)
     return 0
 
 

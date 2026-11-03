@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""kobe-docs — o índice de documentos (Highlander v3, F7.2): estado, carga, lista, desfecho.
+
+Buscar NÃO é aqui: a busca nos documentos é a camada DOCUMENTOS do `kobe-remember`
+(um buscador por pergunta). Este comando é a manutenção do índice e a porta do
+DESFECHO de uma produção de sala.
+
+USO
+---
+    kobe-docs status                      quanto há, quanto falta embeddar
+    kobe-docs carga                       roda o indexador até a fila zerar
+    kobe-docs listar [--natureza N] [--topico SLUG] [--so-listados] [--salas]
+    kobe-docs desfecho <doc> <aprovado|recusado|sem_resposta|superado|desconhecido> --origem <seq>
+    kobe-docs ligar [--limite-lotes N]    o curador liga à lista de assuntos os documentos
+                                          novos ou mudados (modelo padrão, pela assinatura)
+    kobe-docs desfazer-ligacao <run_id>   desfaz uma rodada inteira do ligador
+    kobe-docs listar --assunto <id>       os documentos ligados a um assunto (e à família)
+
+`<doc>` é o número do documento (coluna `id` do `listar`) ou o caminho relativo
+(`casa:topics/x/y.md`, ou só o fim dele quando for único).
+
+O DESFECHO EXIGE A VOZ DO OPERADOR: `--origem` é o `#número` de uma fala DELE
+(role `user`) — o comando recusa fala do agente. `recusado` e `superado` só existem
+por esta porta.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+_RAIZ = Path(__file__).resolve().parent.parent.parent
+if str(_RAIZ) not in sys.path:
+    sys.path.insert(0, str(_RAIZ))
+_HELPER_DIR = Path(__file__).resolve().parent
+if str(_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_HELPER_DIR))
+from _venv import ensure as _ensure_venv  # noqa: E402
+
+_ensure_venv(__file__)
+
+
+def _resolver_doc(db, ref: str):
+    if ref.isdigit():
+        return db.query("SELECT id, root, rel_path FROM doc_sources WHERE id = %s", (int(ref),))
+    if ":" in ref:
+        root, rel = ref.split(":", 1)
+        return db.query("SELECT id, root, rel_path FROM doc_sources WHERE root=%s AND rel_path=%s",
+                        (root, rel))
+    return db.query("SELECT id, root, rel_path FROM doc_sources WHERE rel_path LIKE %s",
+                    ("%" + ref,))
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="kobe-docs")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    c = sub.add_parser("carga")
+    c.add_argument("--sem-estado-coder", action="store_true",
+                   help="não lê o estado das sessões do Coder (laboratório)")
+    li = sub.add_parser("listar")
+    li.add_argument("--natureza")
+    li.add_argument("--topico")
+    li.add_argument("--so-listados", action="store_true", help="só os binários (não lidos)")
+    li.add_argument("--salas", action="store_true", help="só as produções de sala, com desfecho")
+    li.add_argument("--assunto", help="prefixo do id do assunto: só os documentos ligados a ele")
+    li.add_argument("--limite", type=int, default=200)
+    lg = sub.add_parser("ligar")
+    lg.add_argument("--limite-lotes", type=int, default=None)
+    dl = sub.add_parser("desfazer-ligacao")
+    dl.add_argument("run_id")
+    d = sub.add_parser("desfecho")
+    d.add_argument("doc")
+    d.add_argument("desfecho")
+    d.add_argument("--origem", type=int, required=True, help="#número da fala do operador")
+    args = ap.parse_args(argv)
+
+    from bot.config import load_config
+    from bot.db import build_client
+    from bot.docs import indexer, producoes
+
+    try:
+        cfg = load_config()
+        db = build_client(cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-docs: (FALHA DO INSTRUMENTO) banco: {exc}", file=sys.stderr)
+        return 3
+    kobe_home = Path(cfg.kobe_home)
+
+    if args.cmd == "status":
+        print(f"chave DOC_INDEX_ENABLED: {'ligada' if indexer.indexer_enabled() else 'DESLIGADA'}")
+        for l in db.query(
+            "SELECT nature, indexable, status, COUNT(*) AS n, SUM(size_bytes) AS b"
+            "  FROM doc_sources GROUP BY 1,2,3 ORDER BY 1,2,3"):
+            tipo = "texto" if l["indexable"] else "só listado"
+            print(f"  {l['nature']:<18} {tipo:<11} {l['status']:<17} {l['n']:>5} arquivos "
+                  f"{int(l['b'] or 0):>10} bytes")
+        if db.scalar("SELECT to_regclass('doc_subjects') IS NOT NULL"):
+            from bot.lucien import ligador_docs
+
+            print(f"chave DOC_SUBJECTS_ENABLED: "
+                  f"{'ligada' if ligador_docs.habilitado() else 'DESLIGADA'}")
+            n_lig = db.scalar("SELECT COUNT(*) FROM doc_subjects WHERE retired_at IS NULL")
+            n_docs = db.scalar("SELECT COUNT(DISTINCT doc_id) FROM doc_subjects"
+                               " WHERE retired_at IS NULL")
+            fila = db.scalar("SELECT COUNT(*) FROM doc_sources WHERE indexable"
+                             " AND status = 'presente' AND content IS NOT NULL"
+                             " AND linked_sha256 IS DISTINCT FROM sha256")
+            print(f"ligação a assunto: {n_lig} ligação(ões) vigente(s) em {n_docs} documento(s);"
+                  f" {fila} documento(s) ainda não lido(s) pelo ligador")
+        n = db.scalar("SELECT COUNT(*) FROM doc_chunks")
+        p = indexer.pendencia(db)
+        print(f"trechos: {n} (sem vetor: {p['trechos_sem_vetor']})")
+        for l in db.query("SELECT outcome, COUNT(*) AS n FROM doc_producoes GROUP BY 1 ORDER BY 1"):
+            print(f"  produções {l['outcome']:<13} {l['n']}")
+        return 0
+
+    if args.cmd == "carga":
+        if not indexer.indexer_enabled():
+            print("DOC_INDEX_ENABLED está desligada — nada a fazer.", file=sys.stderr)
+            return 2
+        r = indexer.carga(db, kobe_home, estado_coder=not args.sem_estado_coder)
+        for a in r.avisos[:10]:
+            print(f"aviso: {a}", file=sys.stderr)
+        if r.erro:
+            print(f"ERRO: {r.erro}", file=sys.stderr)
+            return 3
+        return 0
+
+    if args.cmd in ("ligar", "desfazer-ligacao") or (args.cmd == "listar" and args.assunto):
+        return _ligacao(args, cfg, kobe_home)
+
+    if args.cmd == "listar":
+        onde, params = ["TRUE"], []
+        if args.natureza:
+            onde.append("s.nature = %s")
+            params.append(args.natureza)
+        if args.topico:
+            onde.append("s.topic_slug = %s")
+            params.append(args.topico)
+        if args.so_listados:
+            onde.append("NOT s.indexable")
+        if args.salas:
+            onde.append("p.doc_id IS NOT NULL")
+        params.append(args.limite)
+        for l in db.query(
+            "SELECT s.id, s.root, s.rel_path, s.nature, s.topic_slug, s.indexable, s.status,"
+            "       p.sala_id, p.outcome, p.outcome_source, p.origin_seq"
+            "  FROM doc_sources s LEFT JOIN doc_producoes p ON p.doc_id = s.id"
+            f" WHERE {' AND '.join(onde)} ORDER BY s.root, s.rel_path LIMIT %s", params):
+            extra = ""
+            if l["sala_id"]:
+                extra = f"  [sala {l['sala_id']} · {l['outcome']}" + (
+                    f" · {l['outcome_source']}" if l["outcome_source"] else "") + (
+                    f" #{l['origin_seq']}" if l["origin_seq"] else "") + "]"
+            marca = "" if l["indexable"] else "  (só listado)"
+            aus = "  (ausente do disco)" if l["status"] != "presente" else ""
+            print(f"{l['id']:>6}  {l['nature']:<18} {l['root']}:{l['rel_path']}{marca}{aus}{extra}")
+        return 0
+
+    if args.cmd == "desfecho":
+        docs = _resolver_doc(db, args.doc)
+        if len(docs) != 1:
+            print(f"kobe-docs: '{args.doc}' casa com {len(docs)} documento(s) — use o número.",
+                  file=sys.stderr)
+            for x in docs[:10]:
+                print(f"  {x['id']}  {x['root']}:{x['rel_path']}", file=sys.stderr)
+            return 2
+        try:
+            r = producoes.registrar_desfecho(db, int(docs[0]["id"]), args.desfecho, args.origem)
+        except producoes.DesfechoRecusado as exc:
+            print(f"kobe-docs: recusado — {exc}", file=sys.stderr)
+            return 2
+        print(f"desfecho registrado: {docs[0]['root']}:{docs[0]['rel_path']} → "
+              f"{r['outcome']} (fala do operador #{r['origin_seq']})")
+        return 0
+    return 2
+
+
+def _ligacao(args, cfg, kobe_home) -> int:
+    """Os subcomandos da ligação documento↔assunto: usam a conexão do curador
+    (transação explícita), não a ponte do bot."""
+    from bot.lucien import ligador_docs, store
+
+    try:
+        cx = store.conectar(cfg.database_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"kobe-docs: (FALHA DO INSTRUMENTO) banco: {exc}", file=sys.stderr)
+        return 3
+    try:
+        if not ligador_docs.tem_tabela(cx):
+            print("kobe-docs: a migration 016 não está aplicada neste banco "
+                  "(rode `infra/migrate.py up`).", file=sys.stderr)
+            return 2
+        if args.cmd == "ligar":
+            if not ligador_docs.habilitado():
+                print("DOC_SUBJECTS_ENABLED está desligada — nada a fazer.", file=sys.stderr)
+                return 2
+            r = ligador_docs.rodar(cx, kobe_home=str(kobe_home), limite_lotes=args.limite_lotes,
+                                   assentado_s=0)
+            print(r.resumo())
+            return 0 if r.erro is None else 3
+        if args.cmd == "desfazer-ligacao":
+            try:
+                d = ligador_docs.desfazer(cx, args.run_id)
+            except ValueError as exc:
+                cx.rollback()
+                print(f"kobe-docs: {exc}", file=sys.stderr)
+                return 2
+            cx.commit()
+            print(f"desfeita: {d['tiradas']} ligação(ões) tirada(s), {d['desaposentadas']} "
+                  f"desaposentada(s), {d['de_volta_na_fila']} documento(s) de volta na fila")
+            return 0
+        # listar --assunto
+        cur = cx.cursor()
+        cur.execute("SELECT id, title FROM lucien_subjects WHERE id::text LIKE %s LIMIT 2",
+                    (args.assunto.strip().lower() + "%",))
+        rs = cur.fetchall()
+        if len(rs) != 1:
+            print(f"kobe-docs: '{args.assunto}' não identifica um assunto "
+                  f"({'nenhum' if not rs else 'mais de um'})", file=sys.stderr)
+            return 2
+        rows = ligador_docs.documentos_do_assunto(cx, [str(rs[0]["id"])])
+        print(f"{len(rows)} documento(s) ligado(s) a \"{rs[0]['title']}\" (e à família dele):")
+        for l in rows[:args.limite]:
+            velha = "  (o arquivo mudou depois da ligação)" if l["versao_velha"] else ""
+            print(f"{l['id']:>6}  {l['nature']:<18} {l['root']}:{l['rel_path']}"
+                  f"  [{l['origin']}]{velha}")
+        return 0
+    finally:
+        cx.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

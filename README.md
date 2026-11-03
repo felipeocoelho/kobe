@@ -64,6 +64,7 @@ Antes de rodar o instalador, tenha em mãos:
 3. **PostgreSQL 16+** no ar, e um usuário que possa criar banco nele. **Você não precisa criar o banco** — o instalador cria (com a codificação, a collation e o fuso corretos) e aplica o schema. As extensões `vector`, `uuid-ossp` e `pg_trgm` precisam estar disponíveis (Debian/Ubuntu: `apt install postgresql-<versão>-pgvector`). Escolha um nome pro banco e monte a `DATABASE_URL` — você não roda SQL à mão
 4. **Conta Groq** com API key ([console.groq.com](https://console.groq.com))
 5. **Claude Code** instalado e autenticado ([docs](https://docs.claude.com/en/docs/claude-code/setup))
+6. **Chave da OpenAI** (`OPENAI_API_KEY`) — é ela que gera os vetores da busca por sentido do `kobe-remember` (conversa e documentos). Custo típico: centavos. Sem ela, a busca por sentido fica fora e o comando diz isso em toda saída; a busca por palavra continua
 
 Depois:
 
@@ -168,6 +169,17 @@ viraram tópico, ou que ficaram com uma afirmação só, aparecem na revisão de
 para você decidir. Numa instalação que já tinha memória, o passado é agrupado uma
 vez com `kobe-assunto agrupar` (chamadas de modelo pela assinatura; desfaz com
 `kobe-assunto desfazer-agrupamento <run_id>`). Desligar: `LUCIEN_ASSUNTOS_ENABLED=false`.
+
+### Documentos alcançáveis pela busca
+
+O `kobe-remember` também procura nos **documentos**: planos das salas, a base de
+anotações do agente, a base de cada tópico e o material que você sobe nos tópicos.
+A regra é geral — vale para todo tópico, inclusive os que você criar depois — e nada
+disto vai para o prompt: o caminho é a busca. Cada resultado vem rotulado pelo que
+o documento é (um plano de sala sai com o **desfecho**: aprovado, recusado, superado
+ou desconhecido). Só `.md`/`.txt` têm o conteúdo lido; PDF, Word e imagem são
+achados pelo nome. `kobe-docs status` mostra o índice; `kobe-docs desfecho` registra
+o desfecho de um plano com o número da sua fala. Desligar: `DOC_INDEX_ENABLED=false`.
 
 ## Keyko — o daemon de despertar por gatilho
 

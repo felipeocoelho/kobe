@@ -30,7 +30,9 @@
     "011",
     "012",
     "013",
-    "014"
+    "014",
+    "015",
+    "016"
   ],
   "tables": {
     "contacts": {
@@ -210,6 +212,690 @@
         {
           "name": "contacts_tipo_check",
           "definition": "CHECK ((tipo = ANY (ARRAY['pessoa'::text, 'grupo'::text])))"
+        }
+      ]
+    },
+    "doc_chunks": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": "d",
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "doc_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "idx",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "anchor",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "body",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "search_tsv",
+          "type": "tsvector",
+          "nullable": true,
+          "default": "to_tsvector('portuguese'::regconfig, body)",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "embedding",
+          "type": "vector(1536)",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "model",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "embedded_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "doc_chunks_doc_id_idx_key",
+          "definition": "CREATE UNIQUE INDEX doc_chunks_doc_id_idx_key ON public.doc_chunks USING btree (doc_id, idx)"
+        },
+        {
+          "name": "doc_chunks_pkey",
+          "definition": "CREATE UNIQUE INDEX doc_chunks_pkey ON public.doc_chunks USING btree (id)"
+        },
+        {
+          "name": "idx_doc_chunks_body_trgm",
+          "definition": "CREATE INDEX idx_doc_chunks_body_trgm ON public.doc_chunks USING gin (body gin_trgm_ops)"
+        },
+        {
+          "name": "idx_doc_chunks_doc",
+          "definition": "CREATE INDEX idx_doc_chunks_doc ON public.doc_chunks USING btree (doc_id)"
+        },
+        {
+          "name": "idx_doc_chunks_pendentes",
+          "definition": "CREATE INDEX idx_doc_chunks_pendentes ON public.doc_chunks USING btree (id) WHERE (embedding IS NULL)"
+        },
+        {
+          "name": "idx_doc_chunks_tsv",
+          "definition": "CREATE INDEX idx_doc_chunks_tsv ON public.doc_chunks USING gin (search_tsv)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "doc_chunks_doc_id_fkey",
+          "definition": "FOREIGN KEY (doc_id) REFERENCES doc_sources(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "doc_chunks_doc_id_idx_key",
+          "definition": "UNIQUE (doc_id, idx)"
+        },
+        {
+          "name": "doc_chunks_pkey",
+          "definition": "PRIMARY KEY (id)"
+        }
+      ]
+    },
+    "doc_producoes": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": "d",
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "doc_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "sala_id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "sala_kind",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "produced_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "outcome",
+          "type": "text",
+          "nullable": false,
+          "default": "'desconhecido'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "outcome_source",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "outcome_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "origin_seq",
+          "type": "bigint",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "doc_producoes_doc_id_key",
+          "definition": "CREATE UNIQUE INDEX doc_producoes_doc_id_key ON public.doc_producoes USING btree (doc_id)"
+        },
+        {
+          "name": "doc_producoes_pkey",
+          "definition": "CREATE UNIQUE INDEX doc_producoes_pkey ON public.doc_producoes USING btree (id)"
+        },
+        {
+          "name": "idx_doc_producoes_sala",
+          "definition": "CREATE INDEX idx_doc_producoes_sala ON public.doc_producoes USING btree (sala_id)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "doc_producoes_check",
+          "definition": "CHECK (((outcome = 'desconhecido'::text) OR (outcome_source IS NOT NULL)))"
+        },
+        {
+          "name": "doc_producoes_check1",
+          "definition": "CHECK (((outcome <> ALL (ARRAY['recusado'::text, 'superado'::text])) OR ((outcome_source = 'operador'::text) AND (origin_seq IS NOT NULL))))"
+        },
+        {
+          "name": "doc_producoes_doc_id_fkey",
+          "definition": "FOREIGN KEY (doc_id) REFERENCES doc_sources(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "doc_producoes_doc_id_key",
+          "definition": "UNIQUE (doc_id)"
+        },
+        {
+          "name": "doc_producoes_outcome_check",
+          "definition": "CHECK ((outcome = ANY (ARRAY['aprovado'::text, 'recusado'::text, 'sem_resposta'::text, 'superado'::text, 'desconhecido'::text])))"
+        },
+        {
+          "name": "doc_producoes_outcome_source_check",
+          "definition": "CHECK (((outcome_source IS NULL) OR (outcome_source = ANY (ARRAY['estado_coder'::text, 'fim_da_sala'::text, 'operador'::text]))))"
+        },
+        {
+          "name": "doc_producoes_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "doc_producoes_sala_kind_check",
+          "definition": "CHECK ((sala_kind = ANY (ARRAY['coder'::text, 'missao'::text])))"
+        }
+      ]
+    },
+    "doc_sources": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": "d",
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "root",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "rel_path",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "nature",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "topic_slug",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "title",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "ext",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "size_bytes",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "file_mtime",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 10,
+          "attnum": 10,
+          "name": "sha256",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 11,
+          "attnum": 11,
+          "name": "indexable",
+          "type": "boolean",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 12,
+          "attnum": 12,
+          "name": "content",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 13,
+          "attnum": 13,
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": "'presente'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 14,
+          "attnum": 14,
+          "name": "first_seen_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 15,
+          "attnum": 15,
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 16,
+          "attnum": 16,
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 17,
+          "attnum": 17,
+          "name": "linked_sha256",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 18,
+          "attnum": 18,
+          "name": "linked_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 19,
+          "attnum": 19,
+          "name": "link_run_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "doc_sources_pkey",
+          "definition": "CREATE UNIQUE INDEX doc_sources_pkey ON public.doc_sources USING btree (id)"
+        },
+        {
+          "name": "doc_sources_root_rel_path_key",
+          "definition": "CREATE UNIQUE INDEX doc_sources_root_rel_path_key ON public.doc_sources USING btree (root, rel_path)"
+        },
+        {
+          "name": "idx_doc_sources_link_run",
+          "definition": "CREATE INDEX idx_doc_sources_link_run ON public.doc_sources USING btree (link_run_id) WHERE (link_run_id IS NOT NULL)"
+        },
+        {
+          "name": "idx_doc_sources_path_trgm",
+          "definition": "CREATE INDEX idx_doc_sources_path_trgm ON public.doc_sources USING gin (rel_path gin_trgm_ops)"
+        },
+        {
+          "name": "idx_doc_sources_topic",
+          "definition": "CREATE INDEX idx_doc_sources_topic ON public.doc_sources USING btree (topic_slug)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "doc_sources_check",
+          "definition": "CHECK ((indexable OR (content IS NULL)))"
+        },
+        {
+          "name": "doc_sources_link_run_id_fkey",
+          "definition": "FOREIGN KEY (link_run_id) REFERENCES lucien_runs(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "doc_sources_nature_check",
+          "definition": "CHECK ((nature = ANY (ARRAY['artefato_sala'::text, 'anotacao_agente'::text, 'base_topico'::text, 'material_operador'::text])))"
+        },
+        {
+          "name": "doc_sources_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "doc_sources_root_rel_path_key",
+          "definition": "UNIQUE (root, rel_path)"
+        },
+        {
+          "name": "doc_sources_status_check",
+          "definition": "CHECK ((status = ANY (ARRAY['presente'::text, 'ausente_do_disco'::text])))"
+        }
+      ]
+    },
+    "doc_subjects": {
+      "columns": [
+        {
+          "position": 1,
+          "attnum": 1,
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": "d",
+          "collation": null
+        },
+        {
+          "position": 2,
+          "attnum": 2,
+          "name": "doc_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 3,
+          "attnum": 3,
+          "name": "subject_id",
+          "type": "uuid",
+          "nullable": false,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 4,
+          "attnum": 4,
+          "name": "origin",
+          "type": "text",
+          "nullable": false,
+          "default": "'ligador'::text",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 5,
+          "attnum": 5,
+          "name": "doc_sha256",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 6,
+          "attnum": 6,
+          "name": "run_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 7,
+          "attnum": 7,
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": false,
+          "default": "now()",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 8,
+          "attnum": 8,
+          "name": "retired_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 9,
+          "attnum": 9,
+          "name": "retired_run_id",
+          "type": "uuid",
+          "nullable": true,
+          "default": null,
+          "identity": null,
+          "collation": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "doc_subjects_pkey",
+          "definition": "CREATE UNIQUE INDEX doc_subjects_pkey ON public.doc_subjects USING btree (id)"
+        },
+        {
+          "name": "idx_doc_subjects_assunto",
+          "definition": "CREATE INDEX idx_doc_subjects_assunto ON public.doc_subjects USING btree (subject_id) WHERE (retired_at IS NULL)"
+        },
+        {
+          "name": "idx_doc_subjects_retired_run",
+          "definition": "CREATE INDEX idx_doc_subjects_retired_run ON public.doc_subjects USING btree (retired_run_id) WHERE (retired_run_id IS NOT NULL)"
+        },
+        {
+          "name": "idx_doc_subjects_run",
+          "definition": "CREATE INDEX idx_doc_subjects_run ON public.doc_subjects USING btree (run_id)"
+        },
+        {
+          "name": "uq_doc_subjects_vigente",
+          "definition": "CREATE UNIQUE INDEX uq_doc_subjects_vigente ON public.doc_subjects USING btree (doc_id, subject_id) WHERE (retired_at IS NULL)"
+        }
+      ],
+      "constraints": [
+        {
+          "name": "doc_subjects_aposentada_check",
+          "definition": "CHECK (((retired_run_id IS NULL) OR (retired_at IS NOT NULL)))"
+        },
+        {
+          "name": "doc_subjects_doc_id_fkey",
+          "definition": "FOREIGN KEY (doc_id) REFERENCES doc_sources(id) ON DELETE CASCADE"
+        },
+        {
+          "name": "doc_subjects_origin_check",
+          "definition": "CHECK ((origin = ANY (ARRAY['ligador'::text, 'operador'::text, 'autoria'::text])))"
+        },
+        {
+          "name": "doc_subjects_pkey",
+          "definition": "PRIMARY KEY (id)"
+        },
+        {
+          "name": "doc_subjects_retired_run_id_fkey",
+          "definition": "FOREIGN KEY (retired_run_id) REFERENCES lucien_runs(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "doc_subjects_run_id_fkey",
+          "definition": "FOREIGN KEY (run_id) REFERENCES lucien_runs(id) ON DELETE SET NULL"
+        },
+        {
+          "name": "doc_subjects_subject_id_fkey",
+          "definition": "FOREIGN KEY (subject_id) REFERENCES lucien_subjects(id) ON DELETE CASCADE"
         }
       ]
     },
@@ -1200,6 +1886,36 @@
           "default": "0",
           "identity": null,
           "collation": null
+        },
+        {
+          "position": 24,
+          "attnum": 24,
+          "name": "docs_seen",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 25,
+          "attnum": 25,
+          "name": "doc_links_created",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
+        },
+        {
+          "position": 26,
+          "attnum": 26,
+          "name": "doc_links_rejected",
+          "type": "integer",
+          "nullable": false,
+          "default": "0",
+          "identity": null,
+          "collation": null
         }
       ],
       "indexes": [
@@ -1215,7 +1931,7 @@
       "constraints": [
         {
           "name": "lucien_runs_mode_check",
-          "definition": "CHECK ((mode = ANY (ARRAY['incremental'::text, 'reconstruction'::text, 'assuntos'::text, 'marcacao'::text])))"
+          "definition": "CHECK ((mode = ANY (ARRAY['incremental'::text, 'reconstruction'::text, 'assuntos'::text, 'marcacao'::text, 'documentos'::text])))"
         },
         {
           "name": "lucien_runs_pkey",

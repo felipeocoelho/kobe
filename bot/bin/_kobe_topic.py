@@ -292,3 +292,52 @@ def _gravar(conn, chat_id: int, thread, texto: str, telegram_message_id) -> bool
         " VALUES (%s, %s, %s, 'assistant', %s)",
         (r["session_id"], r["id"], telegram_message_id, MARCA_NOTIFICACAO + texto))
     return True
+
+
+class _PonteCrua:
+    """`query`/`execute` sobre uma conexão psycopg — a cara da ponte do bot."""
+
+    def __init__(self, cx) -> None:
+        self.cx = cx
+
+    def query(self, sql, params=()):
+        with self.cx.cursor() as cur:
+            cur.execute(sql, tuple(params) if params else None)
+            return cur.fetchall() if cur.description else []
+
+    execute = query
+
+
+def registrar_plano_anexado(path) -> None:
+    """F7.2 — o plano de uma sala, anexado agora, entra no catálogo NA HORA (texto
+    preservado), sem esperar o tick e sem depender de a worktree sobreviver.
+
+    Só age sobre `<sala>/.local/plano-*.md` e com `DOC_INDEX_ENABLED` ligada.
+    NUNCA faz o anexo falhar: qualquer erro vira um aviso no stderr — e o tick do
+    indexador pega o arquivo depois, se ele ainda existir."""
+    import re as _re
+    from pathlib import Path as _P
+
+    p = _P(path).resolve()
+    if not _re.match(r"^plano-.+\.md$", p.name) or p.parent.name != ".local":
+        return
+    try:
+        cfg = read_dotenv({"DATABASE_URL", "KOBE_HOME"}, prefixo="DOC_INDEX")
+        if (cfg.get("DOC_INDEX_ENABLED") or "").strip().lower() not in ("1", "true", "on", "yes"):
+            return
+        for k, v in cfg.items():
+            os.environ.setdefault(k, v)
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        import psycopg
+        from psycopg.rows import dict_row
+
+        from bot.docs import producoes
+
+        home = _P(cfg.get("KOBE_HOME") or PROJECT_ROOT)
+        with psycopg.connect(cfg["DATABASE_URL"], row_factory=dict_row, autocommit=True,
+                             connect_timeout=10) as c:
+            producoes.registrar_plano_anexado(_PonteCrua(c), p, home)
+    except Exception as exc:  # noqa: BLE001 — o anexo já foi; isto é registro
+        print(f"aviso: o plano foi anexado mas não entrou no catálogo agora ({exc})",
+              file=sys.stderr)

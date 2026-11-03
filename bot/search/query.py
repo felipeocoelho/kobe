@@ -588,6 +588,9 @@ def buscar(
     sem: list[dict] = []
     try:
         vetor = embedder.embed_um(pergunta)
+        # O vetor da pergunta fica no resultado (fora dos campos, então fora do
+        # `--json`): a camada de DOCUMENTOS usa o mesmo, sem segunda chamada.
+        r._vetor = vetor
         sem = buscar_sentido(db, vetor, **recorte)
     except embedder.EmbeddingIndisponivel as exc:
         r.sentido_ativo = False

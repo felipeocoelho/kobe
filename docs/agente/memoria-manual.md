@@ -93,6 +93,31 @@ Ele diz `⚠️ a camada de ESTADO falhou` ou `não deu pra consultar o registro
 que não depende do registro. Um banco sem a migration 008 diz outra coisa — *"o
 registro de estado ainda não existe neste banco"* —, e aí é ausência mesmo.
 
+### A quarta camada: DOCUMENTOS (F7.2)
+
+Depois da EVIDÊNCIA vem o bloco **DOCUMENTOS** — o que os arquivos dizem. A busca é
+a mesma (literal, palavra, sentido) e o piso é próprio. Cada resultado traz:
+
+| rótulo | o que é | como citar |
+|---|---|---|
+| 📄 artefato de sala · desfecho: X | plano, brief ou arquivo de missão que uma sala produziu | *"a sala X propôs… — desfecho X"*. `DESCONHECIDO` **nunca** vira "aprovado" |
+| 📝 anotação do agente | a base `knowledge/` e os briefs que o agente escreveu | *"o agente anotou… (registro de segunda mão)"*; o original, quando existe, está na conversa |
+| 📚 base do tópico | `topics/<slug>/knowledge/` | *"a base do tópico diz…"* — é material do operador |
+| 📎 documento seu | todo o resto que está em `topics/<slug>/` | *"o documento Y diz…"* |
+| … · só listado — conteúdo NÃO lido | PDF, Word, planilha, imagem, HTML | só o nome foi achado; não afirme o conteúdo |
+| … · o arquivo saiu do disco | o texto ficou preservado no índice | cite normalmente, avisando |
+
+- **O veredito da EVIDÊNCIA não muda.** Mas quando a conversa não acha a fala e há
+  documento, o carimbo é **`SEM REGISTRO na fala literal — MAS HÁ DOCUMENTO`**:
+  responda pelo documento, rotulado, e diga que não achou a fala.
+- **Camada fora ou com falha** (`camada de documentos fora`, `FALHA DO INSTRUMENTO nos
+  documentos`) **não é "não há documento"** — diga ao operador.
+- `--sem-docs` desliga a camada; `--topico` filtra os documentos do tópico atual.
+- **Desfecho:** se o operador disser que um plano foi aprovado, recusado ou superado,
+  `bot/bin/kobe-docs desfecho <doc> <desfecho> --origem <#número da fala dele>`. O
+  comando recusa fala que não seja dele. `kobe-docs listar --salas` mostra os planos
+  e o desfecho de cada um.
+
 ---
 
 ## `kobe-assunto` — retomar um ASSUNTO inteiro (F7.1)
@@ -132,6 +157,14 @@ afirmação continua com o tópico dela, e o dossiê rotula de onde veio cada um
   mensagem mal etiquetada (ou ainda sem etiqueta) apareça. Leia e julgue cada
   uma: responde à pergunta? cite; não responde? ignore. Se a busca não rodou, a
   seção diz isso — **não é "não há mais nada"**.
+- **Documentos deste assunto** (F7.2) — os documentos que o curador LIGOU ao
+  assunto (e às conversas dentro dele): um modelo leu cada documento e julgou que
+  ele é sobre isto. É julgamento de modelo, não decisão: cite cada um pelo rótulo
+  da natureza (ver "A quarta camada" acima). "O arquivo mudou depois da ligação"
+  quer dizer que a leitura é de uma versão anterior.
+- **Documentos também achados pela busca** — até 3 que a busca acha com a frase do
+  operador e não estão ligados (sem ligação nenhuma, a seção se chama só
+  **Documentos** e traz até 5). Leia e julgue, como no complemento da conversa.
 - **Onde se conversou** (quando o assunto ainda não tem mensagens marcadas) — os
   números das mensagens. Abra as que importam; o dossiê é o índice, a fala literal
   é a prova.

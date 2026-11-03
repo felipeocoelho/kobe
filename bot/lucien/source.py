@@ -119,6 +119,9 @@ class LucienSource:
                 return []
             devido = worker.escolher_topico(cx)
             if devido is None:
+                # Sem conversa devida, a vez é do ligador de documentos (F7.2):
+                # a conversa sempre passa na frente, e ele tem cota própria.
+                self._talvez_ligar(cx)
                 return []
             logger.info(
                 "lucien: lote devido em %s (%s mensagens pendentes) — disparando",
@@ -135,14 +138,26 @@ class LucienSource:
                 pass
         return []
 
-    def _disparar(self) -> None:
+    def _talvez_ligar(self, cx) -> None:
+        """Um lote do ligador de documentos, se a chave, a 016, a cota e a fila
+        deixarem. Falhar aqui nunca derruba o tick."""
+        try:
+            from bot.lucien import ligador_docs
+
+            if ligador_docs.devido(cx):
+                logger.info("lucien: documentos novos ou mudados na fila — disparando o ligador")
+                self._disparar(["-m", "bot.lucien.ligador_docs", "--um-lote"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lucien: o ligador de documentos não disparou: %s", exc)
+
+    def _disparar(self, argv: Optional[list] = None) -> None:
         """O worker, detached. `start_new_session` para ele sobreviver a um
         restart do Keyko — uma rodada interrompida no meio não grava nada, mas
         gasta a chamada de modelo que já foi feita."""
         log = self._abrir_log_do_worker()
         try:
             self._em_voo = subprocess.Popen(
-                [sys.executable, "-m", "bot.lucien.worker", "--uma-rodada"],
+                [sys.executable, *(argv or ["-m", "bot.lucien.worker", "--uma-rodada"])],
                 cwd=self._kobe_home,
                 env=dict(os.environ),
                 stdout=log if log is not None else subprocess.DEVNULL,

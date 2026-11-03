@@ -87,6 +87,16 @@ def _id(cx, prefixo: str) -> str:
     return str(rs[0]["id"])
 
 
+def _kobe_home():
+    """A casa desta instalação, para resolver o caminho dos documentos."""
+    try:
+        from bot.config import load_config
+
+        return Path(load_config().kobe_home)
+    except Exception:  # noqa: BLE001 — sem caminho, o documento sai sem `abrir:`
+        return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="kobe-assunto", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -132,6 +142,9 @@ def main(argv=None) -> int:
             if not cands:
                 print(f"nenhum assunto agrupado responde a \"{frase}\". Isto NÃO é "
                       "\"não há registro\": rode `kobe-remember` com a mesma frase.")
+                docs = dossie_assunto.documentos_da_busca(cx, frase, kobe_home=_kobe_home())
+                if docs:
+                    print("\n".join(docs))
                 return 1
             if not seguro:
                 print(f"\"{frase}\" é ambíguo — candidatos:")
@@ -143,6 +156,16 @@ def main(argv=None) -> int:
             # O complemento da busca sai do MESMO teto do turno: calcula-se antes,
             # e o dossiê cabe no que sobrar.
             extra = [] if args.sem_busca else dossie_assunto.complemento_da_busca(cx, frase, ids)
+            # F7.2: primeiro os documentos LIGADOS ao assunto pelo curador; depois
+            # os que só a busca acha (sem repetir). Sem ligação, só a busca.
+            ligados, ids_ligados = dossie_assunto.documentos_ligados(cx, ids, kobe_home=_kobe_home())
+            extra += ligados
+            if not args.sem_busca:
+                extra += dossie_assunto.documentos_da_busca(
+                    cx, frase, kobe_home=_kobe_home(), excluir=ids_ligados,
+                    limite=(dossie_assunto.MAX_BUSCA_COM_LIGADOS if ligados
+                            else dossie_assunto.MAX_DOCUMENTOS),
+                    titulo="Documentos também achados pela busca" if ligados else "Documentos")
             resto = "\n".join(extra)
             print(dossie_assunto.montar(cx, ids, teto=max(3000, args.teto - len(resto) - 1)))
             if resto:

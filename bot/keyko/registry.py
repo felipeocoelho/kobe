@@ -80,6 +80,21 @@ def build_sources(
                 "source search-index NÃO registrada (SEARCH_INDEX_ENABLED off)"
             )
 
+    # DocIndexSource — o índice de DOCUMENTOS (Highlander v3, F7.2). Mesmo desenho
+    # da fonte acima: nunca devolve despertar, faz o trabalho no tick (varrer
+    # metadados e pedir vetor não precisa de modelo). Chave `DOC_INDEX_ENABLED`.
+    try:
+        from bot.docs.source import build as build_docs
+    except ImportError:
+        logger.exception("DocIndexSource indisponível — pacote bot.docs faltando?")
+    else:
+        docs = build_docs(kobe_home=kobe_home, bot_token=bot_token)
+        if docs is not None:
+            sources.append(docs)
+            logger.info("source registrada: doc-index")
+        else:
+            logger.info("source doc-index NÃO registrada (DOC_INDEX_ENABLED off)")
+
     # LucienSource — 5ª fonte (gatilho por acúmulo: o registro de estado da F3).
     # Como as duas anteriores, NUNCA devolve despertar — e aqui isso é decisão
     # de arquitetura, não de economia: o despertar acordaria um `claude -p` que

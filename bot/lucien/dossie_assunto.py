@@ -418,8 +418,7 @@ def montar(cx, subject_ids: list[str], *, teto: int = TETO_CHARS) -> str:
                     " ORDER BY last_touched_at DESC", (fora,))
         partes.append("### E mais " + str(len(fora)) + " assunto(s), não mostrados:\n"
                       + "\n".join(f"- {r['title']}" for r in cur.fetchall()))
-    rodape = ("\n\n---\n_Documentos e salas ligados ao assunto ainda não entram aqui: "
-              "a indexação de documentos (F7.2) está em redesenho com o operador._\n"
+    rodape = ("\n\n---\n"
               "_ESTADO é curado por um modelo: cada linha traz a origem — confira com "
               "`kobe-remember --ver <número>` antes de afirmar que algo foi decidido._")
     return "\n\n".join(partes) + rodape
@@ -553,4 +552,104 @@ def complemento_da_busca(cx, frase: str, subject_ids: list[str], *,
         corpo = corpo[:220] + ("…" if len(corpo) > 220 else "")
         linhas.append(f"- **#{a.seq}** · {str(a.created_at)[:10]} · {a.topico} · {quem}{onde}"
                       f" — {corpo}")
+    return linhas
+
+
+MAX_DOCUMENTOS = 5
+
+
+MAX_LIGADOS = 5
+MAX_BUSCA_COM_LIGADOS = 3
+
+
+def documentos_ligados(cx, subject_ids: list[str], *, limite: int = MAX_LIGADOS,
+                       kobe_home=None) -> tuple[list[str], set[int]]:
+    """F7.2 — os documentos LIGADOS ao assunto (e à família dele) pelo curador.
+
+    Devolve `(linhas, ids)`: os ids servem para a busca não repetir o mesmo
+    documento na seção de baixo. Ligação desligada, banco sem a 016 ou nenhuma
+    ligação → `([], set())`, e o dossiê fica só com a busca, como antes."""
+    from bot.docs import query as dq
+    from bot.lucien import ligador_docs
+
+    try:
+        if not ligador_docs.ativo(cx):
+            return [], set()
+        rows = ligador_docs.documentos_do_assunto(cx, subject_ids)
+    except Exception as exc:  # noqa: BLE001
+        cx.rollback()
+        return (["", "### Documentos deste assunto", "",
+                 f"_a leitura das ligações falhou ({type(exc).__name__}) — isto NÃO quer "
+                 "dizer que não há documento; a busca abaixo ainda roda._"], set())
+    if not rows:
+        return [], set()
+    mostra = rows[:limite]
+    achados = [dq.DocAchado(doc_id=int(r["id"]), root=r["root"], rel_path=r["rel_path"],
+                            nature=r["nature"], topic_slug=r["topic_slug"], title=r["title"],
+                            ext=r["ext"], indexable=bool(r["indexable"]), status=r["status"],
+                            file_mtime=r["file_mtime"]) for r in mostra]
+    try:
+        dq._anotar(_Ponte(cx), achados, kobe_home)
+    except Exception:  # noqa: BLE001 — sem desfecho e caminho, o rótulo ainda sai
+        cx.rollback()
+    origem = {int(r["id"]): r for r in mostra}
+    linhas = ["", f"### Documentos deste assunto ({len(rows)})", "",
+              "_ligados ao assunto pelo curador (um modelo leu cada documento e julgou que "
+              "ele é sobre isto). O que um documento diz não é fala nem decisão: cite pelo "
+              "rótulo._", ""]
+    for a in achados:
+        r = origem[a.doc_id]
+        onde = f" · `{a.caminho}`" if a.caminho else ""
+        nota = ""
+        if r["origin"] == "autoria":
+            nota = " · escrito para este assunto"
+        elif r["origin"] == "operador":
+            nota = " · ligado pelo operador"
+        if r["versao_velha"]:
+            nota += " · o arquivo mudou depois da ligação"
+        titulo = f" — {a.title}" if a.title and a.title != a.rel_path.rsplit('/', 1)[-1] else ""
+        linhas.append(f"- {dq.rotulo(a)}{onde}{nota}{titulo}")
+    if len(rows) > limite:
+        linhas.append(f"- _e mais {len(rows) - limite}: `kobe-docs listar --assunto "
+                      f"{subject_ids[0][:8]}`_")
+    return linhas, {int(r["id"]) for r in rows}
+
+
+def documentos_da_busca(cx, frase: str, *, buscar=None, limite: int = MAX_DOCUMENTOS,
+                        kobe_home=None, excluir: Optional[set] = None,
+                        titulo: str = "Documentos") -> list[str]:
+    """F7.2 — "retoma o assunto X" traz também os DOCUMENTOS: a busca de documentos
+    do `kobe-remember` (as mesmas três pernas) com a frase do operador.
+
+    Cada documento sai com o rótulo da natureza (e o desfecho, se for de sala): o
+    que um documento diz NÃO é o que foi decidido. Falha ou camada desligada vira
+    uma linha dizendo isso — nunca "não há documento"."""
+    from bot.docs import query as dq
+
+    excluir = excluir or set()
+    try:
+        r = (buscar or dq.buscar)(_Ponte(cx), frase, limite=limite + len(excluir),
+                                  kobe_home=kobe_home)
+    except Exception as exc:  # noqa: BLE001
+        cx.rollback()
+        return ["", f"### {titulo}", "",
+                f"_a busca de documentos não rodou ({type(exc).__name__}) — isto NÃO quer "
+                "dizer que não há documento; rode `kobe-remember` com a mesma frase._"]
+    if r.veredito == "FORA":
+        return []
+    if r.veredito == "FALHA":
+        return ["", f"### {titulo}", "",
+                f"_a busca de documentos falhou ({r.erro}) — rode `kobe-remember`._"]
+    achados = [a for a in r.achados if a.doc_id not in excluir][:limite]
+    if r.veredito not in ("ACHOU", "MENCAO_LITERAL") or not achados:
+        return []
+    linhas = ["", f"### {titulo}", "",
+              "_o que os arquivos dizem — não é fala nem decisão; cite pelo rótulo._"
+              + (" _Só MENÇÃO LITERAL: leia e julgue._" if r.veredito == "MENCAO_LITERAL" else ""),
+              ""]
+    for a in achados:
+        corpo = " ".join((a.corpo or "").split())
+        corpo = corpo[:200] + ("…" if len(corpo) > 200 else "")
+        onde = f" · `{a.caminho}`" if a.caminho else ""
+        linhas.append(f"- {dq.rotulo(a)}{onde}" + (f" — {corpo}" if corpo else ""))
     return linhas

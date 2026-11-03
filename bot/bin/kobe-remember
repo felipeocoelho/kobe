@@ -310,6 +310,100 @@ def _ver(db, seq: int, janela: int) -> int:
     return 0
 
 
+def _topico_slug_atual(db):
+    """O slug do tópico atual (para `--topico` nos documentos), ou None."""
+    chat = os.environ.get("KOBE_CHAT_ID")
+    if not chat:
+        return None
+    thread = os.environ.get("KOBE_THREAD_ID") or None
+    try:
+        from bot.topic_manager import get_topic_slug
+
+        return get_topic_slug(db, int(chat), int(thread) if thread else None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _buscar_docs(db, assunto, r, args):
+    """A 4ª camada (F7.2). Falhar aqui NÃO derruba o comando — vira uma linha
+    dizendo que a camada falhou, que NÃO é "não há documento"."""
+    if args.sem_docs:
+        return None
+    try:
+        from bot.config import load_config
+        from bot.docs import query as dq
+
+        slug = _topico_slug_atual(db) if args.topico else None
+        return dq.buscar(db, assunto, vetor=getattr(r, "_vetor", None), topic_slug=slug,
+                         limite=max(1, min(args.limite, 6)),
+                         kobe_home=Path(load_config().kobe_home))
+    except Exception as exc:  # noqa: BLE001
+        from bot.docs.query import ResultadoDocs
+
+        return ResultadoDocs(veredito="FALHA", erro=f"{type(exc).__name__}: {exc}")
+
+
+def _tem_docs(d) -> bool:
+    return bool(d is not None and d.veredito in ("ACHOU", "MENCAO_LITERAL") and d.achados)
+
+
+def _imprimir_docs(d) -> None:
+    """O bloco DOCUMENTOS. Vem DEPOIS da evidência e não vota no veredito dela:
+    documento não é fala, e o que um documento diz não é o que foi decidido."""
+    if d is None:
+        return
+    print()
+    print("═" * LARGURA)
+    print("DOCUMENTOS — o que os arquivos dizem (não é fala, não é decisão)")
+    print("═" * LARGURA)
+    print()
+    if d.veredito == "FORA":
+        print(f"(camada de documentos fora: {d.erro}. Isto NÃO é \"não há documento\".)")
+        return
+    if d.veredito == "FALHA":
+        print(f"(FALHA DO INSTRUMENTO nos documentos — {d.erro}. NÃO conclua que não há "
+              "documento: a busca não chegou a ser respondida.)")
+        return
+    if d.veredito == "SEM_REGISTRO":
+        parcial = "" if d.sentido_ativo else (
+            " — PARCIAL: a busca por sentido estava fora "
+            f"({d.motivo_sentido_fora}); diga isso ao operador")
+        print(f"nenhum documento responde a isto{parcial}.")
+        return
+    if d.veredito == "MENCAO_LITERAL":
+        print("MENÇÃO LITERAL — a palavra aparece nestes arquivos e o sentido não passou "
+              "do piso. LEIA e julgue; não costure numa resposta se for fora de contexto.")
+        print()
+    for a in d.achados:
+        print(f"{_rotulo_doc(a)}")
+        if a.corpo:
+            print(f'   "{_cortar(a.corpo)}"')
+        pernas = []
+        if a.cos is not None and "sentido" in a.pernas:
+            pernas.append(f"sentido {a.cos:.3f}")
+        if "palavra" in a.pernas:
+            pernas.append("palavra")
+        if a.literal:
+            pernas.append("literal")
+        print(f"   ({' · '.join(pernas)})" + (f" · abrir: `{a.caminho}`" if a.caminho else ""))
+        print()
+    print("(Cite cada documento PELO RÓTULO: 📄 \"a sala propôs… — desfecho X\", 📝 \"o agente "
+          "anotou…\", 📎/📚 \"o documento diz…\". Um documento NÃO é decisão: um plano de "
+          "desfecho DESCONHECIDO não pode ser dito como aprovado.)")
+    if not d.sentido_ativo:
+        print(f"⚠️  busca por sentido nos documentos fora — {d.motivo_sentido_fora}.")
+    atraso = int((d.pendencia or {}).get("trechos_sem_vetor") or 0)
+    if atraso:
+        print(f"ℹ️  {atraso} trecho(s) de documento ainda sem vetor — documento muito "
+              "recente pode não aparecer pela busca por sentido ainda.")
+
+
+def _rotulo_doc(a) -> str:
+    from bot.docs.query import rotulo
+
+    return rotulo(a)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="kobe-remember",
@@ -338,6 +432,8 @@ def main(argv=None) -> int:
                     help="SÓ a camada de estado (o que vale hoje)")
     ap.add_argument("--sem-estado", action="store_true",
                     help="pula a camada de estado (a saída da v1, exata)")
+    ap.add_argument("--sem-docs", action="store_true",
+                    help="não consulta a camada de DOCUMENTOS")
     ap.add_argument("--sem-pistas", action="store_true",
                     help="não consulta o Hindsight nem quando o estado está magro")
     args = ap.parse_args(argv)
@@ -420,6 +516,8 @@ def main(argv=None) -> int:
                   "seguindo só com a EVIDÊNCIA.")
             estado = None
 
+    docs = None if args.estado else _buscar_docs(db, assunto, r, args)
+
     if args.estado:
         if estado is None or not estado.disponivel:
             motivo = estado.erro if estado else "camada indisponível"
@@ -442,6 +540,8 @@ def main(argv=None) -> int:
         saida = {"evidencia": asdict(r)}
         if estado is not None:
             saida["estado"] = asdict(estado)
+        if docs is not None:
+            saida["documentos"] = asdict(docs)
         print(json.dumps(saida, ensure_ascii=False, indent=2, default=str))
         return 3 if r.veredito == "FALHA" else 0
 
@@ -457,6 +557,7 @@ def main(argv=None) -> int:
             "respondida. Diga ao operador que a consulta ao histórico falhou, "
             "e por quê.)"
         )
+        _imprimir_docs(docs)
         return 3
 
     if r.veredito == "SEM_REGISTRO" and tem_estado:
@@ -479,6 +580,24 @@ def main(argv=None) -> int:
             "Para ver a conversa de origem: `kobe-remember --ver <número>`."
         )
         _rodape(r)
+        _imprimir_docs(docs)
+        return 0
+
+    if r.veredito == "SEM_REGISTRO" and _tem_docs(docs):
+        # A mesma concessão de TEXTO que o ESTADO tem: a conversa não achou a
+        # fala, mas há documento. Dizer "não há nada" seria falso.
+        print(
+            "SEM REGISTRO na fala literal — MAS HÁ DOCUMENTO (abaixo).\n"
+            "\n"
+            "O que isto significa: a conversa não tem a fala com estas palavras, e há\n"
+            "arquivos que tratam disso.\n"
+            "  · responda pelo DOCUMENTO, citando o rótulo de cada um (o que é, e o\n"
+            "    desfecho, se for de sala);\n"
+            "  · diga que não localizou a fala na conversa;\n"
+            "  · NÃO trate o documento como decisão do operador."
+        )
+        _rodape(r)
+        _imprimir_docs(docs)
         return 0
 
     if r.veredito == "SEM_REGISTRO":
@@ -521,6 +640,7 @@ def main(argv=None) -> int:
             "paráfrase, e ela precisa de contexto para funcionar."
         )
         _rodape(r)
+        _imprimir_docs(docs)
         return 0
 
     if r.veredito == "MENCAO_LITERAL":
@@ -547,6 +667,7 @@ def main(argv=None) -> int:
             "paráfrase, e ela precisa de contexto para funcionar."
         )
         _rodape(r)
+        _imprimir_docs(docs)
         return 0
 
     if tem_estado:
@@ -566,6 +687,7 @@ def main(argv=None) -> int:
     )
     print()
     _rodape(r)
+    _imprimir_docs(docs)
     return 0
 
 

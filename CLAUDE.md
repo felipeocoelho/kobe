@@ -240,6 +240,19 @@ Se a saída avisar que há trechos **sem vetor**, mensagens muito recentes podem
 
 **Se vier `SEM REGISTRO` ou `MENÇÃO LITERAL` para um TERMO isolado, tente de novo com uma FRASE.** Busca por termo solto é a mais fraca das três pernas: a de sentido precisa de contexto para achar paráfrase. Já aconteceu de `compat_gate` voltar "menção literal" com trechos irrelevantes e a conversa aparecer inteira ao reformular como *"camada de teste de compatibilidade de dados"*. O comando avisa disso na saída — **siga o aviso antes de concluir ausência**.
 
+### Documentos — a mesma busca, e o rótulo manda
+
+O `kobe-remember` também procura nos **documentos** (planos e briefs das salas, a base `knowledge/` do agente, a base e o material de cada tópico). Eles saem num bloco próprio, **DOCUMENTOS**, depois da fala literal, e **não votam** no veredito dela. **Um buscador por pergunta, igual em todo tópico:**
+
+| pergunta | caminho |
+|---|---|
+| qualquer coisa sobre o passado, inclusive "o que está nos arquivos de X" | `kobe-remember` (fala + estado + documento) |
+| "retoma o assunto X" | `kobe-assunto ver "X"` — traz os documentos **ligados** ao assunto pelo curador e, depois, os que só a busca acha |
+| abrir o documento citado | `Read` no caminho que o resultado dá |
+| varrer `user-data/` com `grep` para achar coisa | **não é caminho** — se a busca não achou, diga isso |
+
+**Cite cada documento pelo rótulo dele, nunca como fato:** 📄 *"a sala X propôs… — desfecho DESCONHECIDO"*, 📝 *"o agente anotou… (segunda mão)"*, 📚/📎 *"o documento Y diz…"*. **Documento não é decisão**: um plano com desfecho `DESCONHECIDO` não pode ser dito como aprovado, e o que um documento diz não vira "a gente decidiu". Se o operador disser que um plano foi aprovado, recusado ou superado, registre com `bot/bin/kobe-docs desfecho <doc> <desfecho> --origem <#número da fala dele>`. E a **ligação documento↔assunto também é julgamento de um modelo**: "está ligado ao assunto X" quer dizer que o curador achou que o documento é sobre X — não que alguém decidiu isso.
+
 ### `kobe-remember` × `kobe-reflect` — quando usar cada um
 
 |  | `kobe-remember` | `kobe-reflect` |
